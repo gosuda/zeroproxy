@@ -511,24 +511,29 @@ test('decodeInlineEntities decodes the raw-text entity set', () => {
 const vm = require('node:vm');
 const WORKER_SRC = fs.readFileSync(require.resolve('../../web/worker-prelude.js'), 'utf8').split('\r\n').join('\n');
 
+// `hook` is the page's own view of the property (pageStackHook / the worker's stackHook): what it assigned, kept apart
+// from the sanitizer V8 reads.
 function sanitizerRealm(install) {
   const ctx = vm.createContext({});
-  install(vm.runInContext('globalThis', ctx));
-  return code => vm.runInContext(code, ctx);
+  const hook = { ctor: null, exists: false, value: undefined, forget: null };
+  install(vm.runInContext('globalThis', ctx), hook);
+  const run = code => vm.runInContext(code, ctx);
+  run.hook = hook;
+  return run;
 }
 
 const STACK_SANITIZERS = {
-  page: realm => load(
+  page: (realm, hook) => load(
     slice('  function installStackSanitizer() {', '  function installPhase2Membrane() {'),
     ['installStackSanitizer'],
-    { root: realm, deproxyURL: s => s, defineMasked: (o, p, d) => Object.defineProperty(o, p, d) },
+    { root: realm, deproxyURL: s => s, defineMasked: (o, p, d) => Object.defineProperty(o, p, d), pageStackHook: hook },
   ).installStackSanitizer(),
-  worker: realm => {
+  worker: (realm, hook) => {
     const a = WORKER_SRC.indexOf('  (function installStackSanitizer() {');
     const b = WORKER_SRC.indexOf('  })();', a);
     assert.ok(a >= 0 && b > a, 'worker stack sanitizer markers missing');
     load(WORKER_SRC.slice(a, b + '  })();'.length), [], {
-      self: realm, realProxyOrigin: 'http://proxy.localhost:18080', NativeURLCtor: URL, base: new URL('https://t.example/'),
+      self: realm, realProxyOrigin: 'http://proxy.localhost:18080', NativeURLCtor: URL, base: new URL('https://t.example/'), stackHook: hook,
     });
   },
 };
@@ -542,6 +547,17 @@ for (const [name, install] of Object.entries(STACK_SANITIZERS)) {
     assert.match(run("{ const prev = Error.prepareStackTrace; Error.prepareStackTrace = (e, f) => 'W:' + prev(e, f); const s = new Error('y').stack; Error.prepareStackTrace = prev; s }"), /^W:Error: y\n    at /);
     // 페이지 훅은 프레임을 받고 그 결과가 `.stack` 이 된다.
     assert.equal(run("Error.prepareStackTrace = (e, f) => 'n:' + (f.length > 0); const s2 = new Error('z').stack; Error.prepareStackTrace = undefined; s2"), 'n:true');
+    // The page's own view: what it assigned, listed like a native property; forgetting it (a page's `delete`) keeps the
+    // sanitizer in place.
+    assert.equal(run.hook.ctor, run('Error'));
+    run("globalThis.f1 = (e, f) => 'f1'; Error.prepareStackTrace = f1");
+    assert.equal(run.hook.exists, true);
+    assert.equal(run.hook.value, run('f1'));
+    assert.equal(run("Object.getOwnPropertyDescriptor(Error, 'prepareStackTrace').enumerable"), true);
+    run.hook.forget();
+    assert.equal(run.hook.exists, false);
+    assert.equal(run("Object.getOwnPropertyDescriptor(Error, 'prepareStackTrace').enumerable"), false);
+    assert.match(run("new Error('w').stack"), /^Error: w\n    at /);
   });
 }
 

@@ -1673,3 +1673,38 @@ rendercheck naver/wikipedia/github 3/3 OK, `npm run test:e2e` 117/117
 - **고침:** 필터 전에 `decode_url_html_entities`(이름·숫자 엔티티). 테스트는 `&#39;`·`&apos;`·`&#x27;` 셋 다(ERRATA 69).
 - **같은 날, 인라인 스크립트의 스택(ERRATA 70):** 인라인 스크립트를 `eval` 로 돌리니 V8 이 최상위·익명 함수를 `eval` 로, 파사드 `this` 를 `Proxy.` 로 찍고, 아래에 `eval (<anonymous>)` 와 부트스트랩 프레임이 붙었다. 압축된 프렐류드라 함수 이름으로는 못 가르고, **구조**(우리 sourceURL 의 eval 코드 / 출처 없는 `eval` 빌트인 / 뒤따르는 문서 경로의 최상위 프레임)로 가른다.
 - **규칙:** `lol_html` 의 `Attribute::value()`/`get_attribute` 를 **값으로 해석**하는 모든 곳(URL, CSP, refresh, srcset…)은 먼저 엔티티를 푼다. 되돌려 쓸 때 `set_attribute` 가 무엇을 이스케이프하는지는 확인하지 않았다(이번 CSP 값에는 `&` 가 없었다) — `&` 가 들어가는 값을 쓰게 되면 그때 테스트로 확인할 것.
+
+## <a id="trusted-script-는-코드"></a>"비문자열은 평가하지 않는다" 의 예외 — TrustedScript 는 코드다. 그리고 타이머는 문자열만 잡고 있었다 (탈출) (2026-10-12)
+
+- **측정:** Glassdoor 의 Turnstile 위젯이 프록시에서만 `reading 'call'` 로 죽었다(`ulgk5` 미정의). CSP 에 `trusted-types nAZtB7 default` 가 있는 문서다. 네이티브 크롬에서 정책 없는 페이지(example.com)로 재 보니 `(0, eval)(policy.createScript('1 + 1'))` 는 **2** — Trusted Types 강제 여부와 무관하게 TrustedScript 는 코드로 컴파일된다(direct eval, `Function`, 타이머도).
+- **원인:** 멤브레인 `eval` 은 PerformEval 1단계("문자열이 아니면 그대로 반환")를 그대로 옮겼다. VM 은 디코더를 `eval(TrustedScript)` 로 컴파일하는데 우리는 객체를 돌려줘 정의가 안 됐다. 같은 자리를 보다가 **탈출**을 찾았다: 타이머 훅은 `typeof handler === 'string'` 만 리라이트하고 나머지는 네이티브 타이머로 넘겼는데, 네이티브는 함수가 아닌 핸들러를 `String(x)` 로 **컴파일**한다 — `setTimeout({ toString() { … } })`·`setTimeout(['…'])`·`setTimeout(trustedScript)` 가 리라이트 없이 진짜 전역에서 돌았다. e2e 변이에서 그 코드가 읽은 `location.href` 는 프록시 share 경로와 `#k=` 키였다.
+- **고침(ERRATA 77·78):** `evalSource` — 문자열, 또는 네이티브 `trustedTypes.isScript` 로 브랜드 확인한 TrustedScript 의 텍스트(네이티브 `toString`). 그 밖은 그대로 반환. 타이머는 **함수가 아니면 전부 코드**(TrustedScript 텍스트, 아니면 `String(x)`). 페이지·워커 둘 다.
+- **규칙:** 스펙 문장을 옮길 때 "문자열" 이 **호스트가 코드로 취급하는 것** 전체인지 확인한다(TrustedScript, 그리고 타이머·이벤트 핸들러 속성처럼 ToString 하는 싱크). 그리고 싱크 훅은 **통과시키는 쪽**이 안전한지 본다 — 우리가 손대지 않고 네이티브로 넘긴 값을 네이티브가 컴파일하면 그게 탈출이다.
+
+## <a id="캔버스-파블링-결정적"></a>읽을 때마다 바뀌는 지문 가림은 그 자체가 지문이다 — 캔버스 노이즈가 페이지 캔버스에 그려지고 있었다 (2026-10-12)
+
+- **측정:** Turnstile 위젯 프레임의 환경 스냅숏(네이티브 대 프록시, 같은 기계)에서 캔버스 해시만 프록시 쪽이 **실행마다** 달랐다(1270 → 1286). 같은 그림을 `toDataURL` 두 번 하면 프록시는 매번 다른 값, 네이티브는 같다.
+- **원인:** `installCanvasAntiFingerprinting` 이 `toDataURL` 마다 **페이지의 캔버스에** 임의 위치·색의 픽셀을 칠했다(누적된다), `getImageData` 는 고정 두 비트를 뒤집었다(두 경로가 서로 안 맞는다), `getChannelData` 는 부를 때마다 표본을 임의로 밀었다(제자리 누적). 게다가 `this.getContext('2d')` 로 컨텍스트를 물어봐서 컨텍스트 없는 캔버스에 2d 를 **만들어** 버렸다(이후 `getContext('webgl')` 이 null). 훅은 `function(...args)` 라 `length` 0·`prototype` 있음·`new` 가능·`configurable:false` — 넷 다 네이티브와 다르다.
+- **고침(ERRATA 73):** 가림은 유지하되 프로필·출처별 **결정적**: 사이트별 격자(32 중 1)의 칠해진 픽셀에서 한 채널 최하위 비트를 **설정**(뒤집기가 아니다 — 되읽어 다시 써도 같다, 빈 캔버스는 빈 채로). 사본 캔버스에서 하고 원본은 손대지 않는다. 오디오는 채널을 처음 내줄 때 한 번, 버퍼 전체에. 2d 컨텍스트는 `getContext` 가 내줄 때 기록한다. 훅은 네이티브 메서드 모양(`replaceNativeMethod`).
+- **규칙:** 지문 가림은 **같은 입력 → 같은 출력**이어야 한다(두 번 읽기는 봇 검사의 첫 줄이다). 페이지 상태(캔버스 픽셀, 버퍼)를 읽기 경로에서 바꾸지 말 것. 훅을 새로 걸 때는 `define()`(configurable:false) 대신 원래 디스크립터 플래그·`name`·`length` 를 유지하고 메서드 축약형으로 만든다.
+
+## <a id="prepare-stack-trace-페이지-뷰"></a>멤브레인 훅이 페이지가 읽는 자리에 산다 — `Error.prepareStackTrace` (2026-10-12)
+
+- **측정:** 위젯 프레임에서 `typeof Error.prepareStackTrace` 가 네이티브 `undefined`, 프록시 `function`. 그리고 페이지가 `delete Error.prepareStackTrace` 하면 **정리기가 통째로 지워져** 이후 모든 스택에 프록시 URL 이 실렸다.
+- **원인:** 스택 정리기는 V8 이 읽는 그 프로퍼티(접근자)에 있다. 게터 안에서는 V8 의 내부 읽기와 페이지의 읽기를 구분할 수 없다.
+- **고침(ERRATA 74):** 구분은 **리라이터**가 한다. `prepareStackTrace` 를 위험 멤버로(`__zp_get/__zp_set/__zp_delete`), `'prepareStackTrace' in X` 를 `__zp_has` 로. 멤브레인은 페이지가 대입한 값(`pageStackHook`)을 답하고, 키 목록·디스크립터는 네이티브 데이터 프로퍼티처럼, `delete` 는 페이지 값만 잊는다. 키 목록 패치(00-head)는 그 상태를 일찍 읽으므로 상태 객체는 파일 맨 위에 선언(TDZ). 워커 realm 도 같게.
+- **규칙:** 엔진이 읽는 자리에 우리 것을 둘 때는 (1) 페이지의 시야(읽기·`in`·디스크립터·키 목록)를 따로 두고, (2) 페이지의 `delete`/재정의가 우리 것을 지우지 못하게 한다.
+
+## <a id="프렐류드-스크립트-잔존"></a>죽은 가드 + 반쪽 숨김 — 프렐류드 스크립트가 `head.children` 맨 앞에 서 있었다 (2026-10-12)
+
+- **측정:** 위젯 문서의 `head.children` 이 프록시에서 `script,script,script,script,meta,…`, 네이티브는 `meta,…`. 그런데 `document.scripts.length` 는 같았다 — 일부 API 만 가리고 있었다.
+- **원인:** 프렐류드의 자기 제거가 `/\/__zp\/runtime-prelude\.js/` 를 찾았는데 실제 경로는 `/zp/assets/runtime-prelude.js` — **한 번도 실행된 적 없는 가드**. 나머지(prewarm, zp-core, page-bundle)는 애초에 지우지 않고 `document.scripts`·직렬화에서만 걸러 냈다. `children`/`firstElementChild`/`childNodes` 는 못 막는다.
+- **고침(ERRATA 76):** 설치 끝에 `isZPAssetNode` 인 스크립트를 전부 제거(돌고 있는 스크립트를 지워도 실행은 계속된다). 이미 실행된 뒤라 잃는 것이 없다.
+- **규칙:** 숨김 필터를 API 별로 거는 대신 **실체를 없앨 수 있으면 없앤다**. 그리고 URL 로 자기 자신을 찾는 가드는 경로 상수와 함께 테스트로 묶을 것 — 경로가 바뀌면 조용히 죽는다.
+
+## <a id="referrer-한-곳에서"></a>같은 값을 두 곳에서 계산하면 갈라진다 — `document.referrer` (2026-10-12)
+
+- **측정:** e2e `/xref`(임베더 `Referrer-Policy: same-origin`, `referrerpolicy` 속성, meta `origin`, 내비게이션): 서버가 받은 `Referer` 는 모든 칸이 네이티브와 같은데, 문서의 `document.referrer` 는 네 칸이 달랐다. Turnstile 위젯은 네이티브 `""`, 프록시는 챌린지 페이지 주소.
+- **원인:** SW 는 브라우저가 계산한 요청별 정책으로 `Referer` 를 정확히 만들고 있었는데, 프렐류드는 부모 URL 을 **기본 정책**으로 잘라 따로 재구성했다(최상위 문서는 늘 `""`).
+- **고침(ERRATA 75):** SW 가 문서 내비게이션에 실은 값(마지막 홉)을 엔트리에 남기고 부트 설정으로 넘긴다. 프렐류드는 그 값을 그대로 쓰고, 가져온 적 없는 문서(blank/srcdoc)만 예전 규칙.
+- **규칙:** 브라우저나 SW 가 이미 계산한 값을 프렐류드에서 다시 만들지 말고 **넘겨받는다**. 재구성은 정책·속성·리다이렉트를 하나씩 빠뜨린다.

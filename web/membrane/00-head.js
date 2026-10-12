@@ -39,6 +39,10 @@
   // instead. `enumerable: false` does NOT help here: getOwnPropertyNames and
   // Reflect.ownKeys report non-enumerable own properties by spec.
   const ZP_HIDDEN_RE = /^(?:__zp_|__ZP_|ZPBundle$|ZPPageBundleWBG$|ZeroProxyRT$|ZP$)/;
+  // The page's own view of `Error.prepareStackTrace` (the stack sanitizer, 06-install.js): V8 reads the sanitizer through
+  // the real accessor, page code reads this through the routed member helpers (07-membrane.js) and the key lists below.
+  // Natively the property is not there until the page assigns it. Declared up here: the key-list patches run from now on.
+  const pageStackHook = { ctor: null, exists: false, value: undefined, forget: null };
   // ...but `for (k in window)` is a THIRD enumeration surface, and it is the one
   // the scrubbing above cannot reach: for-in is a language construct, not a
   // method we can wrap. It walks enumerable own+inherited keys directly.
@@ -114,6 +118,7 @@
       const patched = function (target) {
         const out = orig.apply(this, arguments);
         if (!Array.isArray(out)) return out;
+        if (target === pageStackHook.ctor && target != null && !pageStackHook.exists) return out.filter(n => n !== 'prepareStackTrace');
         return (isGlobalObj(target) || isLocProto(target)) ? scrub(out, target) : out;
       };
       // Keep `fn.toString()` / `fn.name` / `fn.length` indistinguishable from
@@ -412,10 +417,12 @@
     } catch {}
     return out;
   }
-  // `document.referrer` of a frame the embedder navigated: the embedder's URL, cut by the default referrer policy
-  // (strict-origin-when-cross-origin) — full URL (no fragment) to the same origin, the origin alone across origins, nothing
-  // from https to http. A top-level document keeps '' (what opened it is not known here).
+  // `document.referrer`: the Referer the document's navigation carried, which the worker computed under the policy that
+  // applied (the embedder's header or meta, the frame's `referrerpolicy`). A document that was not fetched (a blank or
+  // srcdoc frame) falls back to the embedder's URL cut by the default policy (strict-origin-when-cross-origin) — full URL
+  // (no fragment) to the same origin, the origin alone across origins, nothing from https to http.
   function virtualReferrer() {
+    if (typeof boot.referrer === 'string') return boot.referrer;
     try {
       const p = root.parent;
       if (!p || p === root) return '';
@@ -479,6 +486,16 @@
   const WINDOW_BOUND_METHODS = new Set(['addEventListener','removeEventListener','dispatchEvent','setTimeout','setInterval','clearTimeout','clearInterval','requestAnimationFrame','cancelAnimationFrame','requestIdleCallback','cancelIdleCallback','matchMedia','getComputedStyle','postMessage','atob','btoa','focus','blur','close','print','alert','confirm','prompt','scroll','scrollTo','scrollBy']);
   const canvasHookedWindows = new WeakSet();
   const audioHookedWindows = new WeakSet();
+  // The per-profile secret canvas/audio farbling is keyed with (22-tail.js) — read here, before the storage facade hides the
+  // real area. The key has no page's prefix, so no page's storage view or storage event ever carries it.
+  const farbleSecret = (() => {
+    try {
+      const ls = root.localStorage;
+      let s = ls.getItem('__zp_farble');
+      if (!s) { s = Math.random().toString(36).slice(2) + Date.now().toString(36); ls.setItem('__zp_farble', s); }
+      return s;
+    } catch { return Math.random().toString(36).slice(2); }
+  })();
   const serviceWorkerFacades = new WeakMap();
   const storageMaps = new Map();
   // The page-rewriter helpers live inside `installPhase2Membrane`'s scope, but

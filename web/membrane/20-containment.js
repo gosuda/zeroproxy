@@ -48,6 +48,8 @@
     // wrap·dangerous-prop dispatch 모두 부모 closure 가 처리). 자식 native
     // global 접근은 base[prop] 으로 fall through.
     if (root.__zp_get && !define(w, '__zp_get', root.__zp_get)) throw normalizedError('SecurityError');
+    // a plain call in the child gets the child's own global: it reads what the child's `window` reads
+    if (root.__zp_get && !define(w, '__zp_this', t => t === w ? root.__zp_get(w, 'window') : root.__zp_this(t))) throw normalizedError('SecurityError');
     if (root.__zp_origin && !define(w, '__zp_origin', root.__zp_origin)) throw normalizedError('SecurityError');
     if (root.__zp_url && !define(w, '__zp_url', root.__zp_url)) throw normalizedError('SecurityError');
     if (root.__zp_set && !define(w, '__zp_set', root.__zp_set)) throw normalizedError('SecurityError');

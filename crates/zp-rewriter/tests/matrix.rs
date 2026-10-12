@@ -883,5 +883,40 @@ fn global_this_reads_like_window() {
     .unwrap()
     .code;
     assert!(!local.contains("__zp_get(globalThis,\"window\")"), "a function-site eval keeps its caller's `this`, got: {local}");
-    assert!(local.contains("var t = this;"), "got: {local}");
+    assert!(local.contains("var t = __zp_this(this);"), "got: {local}");
+}
+
+#[test]
+fn error_prepare_stack_trace_is_the_pages_own_view() {
+    emits("var a = typeof Error.prepareStackTrace;", &["typeof __zp_get(Error,\"prepareStackTrace\")"]);
+    emits("Error.prepareStackTrace = f;", &["__zp_set(Error,\"prepareStackTrace\",f)"]);
+    emits("delete Error.prepareStackTrace;", &["__zp_delete((Error),\"prepareStackTrace\")"]);
+    emits("var b = 'prepareStackTrace' in Error;", &["__zp_has((Error),('prepareStackTrace'))"]);
+    emits("var b = 'prepareStackTrace' in w.Error;", &["__zp_has((w.Error),('prepareStackTrace'))"]);
+    not_emits("var c = 'stack' in o;", &["__zp_has"]);
+    reparses("if ('prepareStackTrace' in Error) delete Error.prepareStackTrace;");
+}
+
+#[test]
+fn sloppy_function_this_maps_only_the_real_global() {
+    let mapped = "__zp_this(this)";
+    // A plain call of sloppy function code gets the real global from the engine — natively the window.
+    emits("function f(){ return this }", &[&format!("return {mapped}")]);
+    emits("var o = { m() { return this }, get g() { return this } };", &[&format!("m() {{ return {mapped} }}"), &format!("get g() {{ return {mapped} }}")]);
+    emits("var f = function(){ return () => this }", &[&format!("() => {mapped}")]);
+    emits("function f(){ this.location = 'x' }", &[&format!("__zp_set({mapped},\"location\",'x')")]);
+    emits("function f(){ return new this.Foo() }", &[&format!("new ({mapped}).Foo()")]);
+    reparses("function f(){ return new this.Foo() }");
+    reparses("function f(){ return this`t` + typeof this + (this?.x) }");
+    // Strict code and class bodies get `undefined` for a plain call: nothing to map.
+    not_emits("function f(){ 'use strict'; return this }", &["__zp_this"]);
+    not_emits("'use strict'; function f(){ return this }", &["__zp_this"]);
+    not_emits("class A { x = this.y; static { this.z = 1 } m() { return function(){ return this } } }", &["__zp_this"]);
+    // `Function('return this')()` — a Function body is sloppy function code.
+    let body = rewrite_script("return this", &RewriteOpts { kind: ScriptKind::Function, ..opts() }).unwrap().code;
+    assert!(body.contains(&format!("return {mapped}")), "got: {body}");
+    for kind in [ScriptKind::Module, ScriptKind::Worker] {
+        let code = rewrite_script("function f(){ return this }", &RewriteOpts { kind, ..opts() }).unwrap().code;
+        assert!(!code.contains("__zp_this"), "{kind:?} has no window facade to map to, got: {code}");
+    }
 }

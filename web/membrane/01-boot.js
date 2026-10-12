@@ -46,6 +46,11 @@
       // `execGlobalScript` to give inline <script> bodies real global scope —
       // site-called `eval()` still goes through `dynamicEval`.
       globalEval: w.eval,
+      // `eval(trustedScript)` compiles the script (Chrome treats a TrustedScript as code, enforced or not): the brand check
+      // and the text, taken before the page can replace either.
+      trustedTypes: navGet(() => w.trustedTypes),
+      ttIsScript: navGet(() => w.TrustedTypePolicyFactory.prototype.isScript),
+      ttScriptText: navGet(() => w.TrustedScript.prototype.toString),
       SharedWorker: w.SharedWorker,
       FormData: w.FormData,
       URL: w.URL,

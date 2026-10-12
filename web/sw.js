@@ -1897,6 +1897,7 @@ async function transportFetchHop(targetUrl, opt) {
   }
   headers.delete('X-ZP-Referer');
   headers.delete('X-ZP-Origin');
+  let sentReferer = '';
   if (effectiveBase) {
     // Referer/Origin are forbidden headers — the Request constructor strips
     // them from `init.headers`. Smuggle them as X-ZP-Referer/X-ZP-Origin and
@@ -1909,6 +1910,14 @@ async function transportFetchHop(targetUrl, opt) {
     const referrerPolicy = context.referrerPolicy;
     const refValue = refererForPolicy(effectiveBase, u, referrerPolicy);
     if (refValue) headers.set('X-ZP-Referer', refValue);
+    sentReferer = refValue || '';
+  }
+  // A document's `document.referrer` is the Referer its navigation carried — after redirects, the last hop's. The
+  // prelude used to rebuild it from the embedder's URL under the default policy, whatever the embedder or the frame's
+  // `referrerpolicy` said (and a top-level document read '').
+  if (opt.document) {
+    const docEntry = opt.tab && opt.tab.entries && opt.tab.entries.get(opt.entryId);
+    if (docEntry) docEntry.documentReferrer = sentReferer;
   }
   // Origin is independent of Referrer-Policy and an explicit empty referrer. A cors-mode element (`crossorigin`,
   // module script, font) names its origin even to its own site (measured: Chrome does); a fetch() only across origins.
@@ -2653,6 +2662,8 @@ function buildRuntimePrelude(tab, entry) {
     rtcICEServers: Array.isArray(runtimeConfig.rtcICEServers) ? runtimeConfig.rtcICEServers : [],
     // The document was opened by an opaque one (a popup of a sandboxed frame): it is opaque too.
     ...(entry.opaque ? { opaque: true } : null),
+    // `document.referrer`: the Referer the navigation carried (transportFetchHop).
+    ...(typeof entry.documentReferrer === 'string' ? { referrer: entry.documentReferrer } : null),
   };
   const bootJSON = JSON.stringify(boot).replace(/</g, '\\u003c');
   // The chain consumer must run before the target's anti-bot JS does (it

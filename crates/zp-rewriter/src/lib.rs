@@ -157,6 +157,9 @@ pub(crate) const DANGEROUS_MEMBERS: &[&str] = &[
     // `frame.navigation` / `w.navigation` member access: same escape as the
     // bare global — the facade is what pages must see.
     "navigation",
+    // `Error.prepareStackTrace` holds the membrane's stack sanitizer, which V8 reads through the real property. A page
+    // reads its own view: natively nothing is there until it assigns one (and `delete` must not remove the sanitizer).
+    "prepareStackTrace",
 ];
 
 /// Method names that, when called on ANY object, should be routed through the
@@ -368,6 +371,7 @@ fn shift_marker_positions(replacement: &str, offset: u32) -> String {
     }
     let prefixes: &[(&str, &[usize])] = &[
         ("\u{1}GLOBAL_GET\u{1}", &[]),
+        ("\u{1}THIS_MAP\u{1}", &[]),
         ("\u{1}GLOBAL_SET\u{1}", &[3, 4]),
         ("\u{1}GLOBAL_ASSIGN\u{1}", &[4, 5]),
         ("\u{1}GLOBAL_UPDATE\u{1}", &[]),
@@ -818,6 +822,11 @@ pub fn apply_patches(source: &str, patches: &[Patch]) -> String {
                 cursor = end;
                 continue;
             }
+        } else if p.replacement == "\u{1}THIS_MAP\u{1}" {
+            // `new this.C()` must stay `new (…).C()` — a bare call there would become the constructor
+            out.push_str(if needs_paren_prefix(start) { "(__zp_this(this))" } else { "__zp_this(this)" });
+            cursor = end;
+            continue;
         } else if p.replacement.starts_with("\u{1}MEMBER_GET\u{1}") {
             // \u{1}MEMBER_GET\u{1}<obj_start>\u{1}<obj_end>\u{1}<prop>\u{1}
             let parts: Vec<&str> = p.replacement.split('\u{1}').collect();
@@ -2721,11 +2730,39 @@ impl<'a> Visit<'a> for RewriteVisitor {
     /// `this` in the top level of a classic script is the global object — natively `this === window`. The page's `window` is
     /// the membrane's facade, never the real global, so the real one used to arrive through `this` (a script's top level, a
     /// string eval): `this === window` was false, `var self = this; self.location = …` skipped the facade, and a bot-management
-    /// VM that checks `eval('this') === window` stopped. It reads the same thing `window` does. (A sloppy function called
-    /// plainly still gets the real global from the engine; a function body is not rewritten, since `this` is its caller's.)
+    /// VM that checks `eval('this') === window` stopped. It reads the same thing `window` does.
+    ///
+    /// Everywhere else in sloppy code `this` is the caller's receiver — except that a plain call (`f()`, `Function('return
+    /// this')()`, `[].map(f)`) gets the real global from the engine, where natively it is the window. That one value is
+    /// mapped at runtime (`__zp_this`), every other receiver passes through. Strict code and class bodies get `undefined`
+    /// for a plain call, so they are left alone; module and worker code has no window facade to map to.
+    /// `'prepareStackTrace' in Error` — the presence test of the one routed member a page checks with `in` (the membrane's
+    /// sanitizer is there, natively nothing is). Other `in` tests stay native.
+    fn visit_binary_expression(&mut self, expr: &BinaryExpression<'a>) {
+        if expr.operator == BinaryOperator::In {
+            if let Expression::StringLiteral(s) = &expr.left {
+                if s.value == "prepareStackTrace" {
+                    let (os, ks) = (expr.right.span(), s.span);
+                    self.patches.push(Patch {
+                        start: expr.span.start,
+                        end: expr.span.end,
+                        replacement: format!("\u{1}RHAS\u{1}{}\u{1}{}\u{1}{}\u{1}{}\u{1}", os.start, os.end, ks.start, ks.end),
+                    });
+                }
+            }
+        }
+        walk::walk_binary_expression(self, expr);
+    }
+
     fn visit_this_expression(&mut self, expr: &ThisExpression) {
         if self.kind == ScriptKind::Classic && !self.local_this && self.nt_depth == 0 && self.class_depth == 0 {
             self.emit_global_get(expr.span, "window");
+        } else if self.cur_sloppy
+            && self.class_depth == 0
+            && self.kind != ScriptKind::Module
+            && self.kind != ScriptKind::Worker
+        {
+            self.patches.push(Patch { start: expr.span.start, end: expr.span.end, replacement: "\u{1}THIS_MAP\u{1}".to_string() });
         }
     }
 

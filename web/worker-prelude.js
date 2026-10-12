@@ -49,11 +49,20 @@
   }
   // expression/statement 구분은 페이지 dynamicEval 과 같은 휴리스틱.
   const EXPR_STMT_RE = /^(?:function|class|var|let|const|if|for|while|do|switch|try|throw|return|break|continue|with|import|export|debugger)\b/;
+  // eval 이 컴파일하는 것: 문자열, 또는 TrustedScript 의 텍스트(크롬은 강제 여부와 무관하게 TrustedScript 를 코드로
+  // 본다 — 페이지 realm 의 evalSource 와 같다). 그 밖의 값은 평가하지 않고 그대로 돌려준다(PerformEval 1단계).
+  const nativeTT = (() => { try { return { f: self.trustedTypes, is: TrustedTypePolicyFactory.prototype.isScript, text: TrustedScript.prototype.toString }; } catch { return null; } })();
+  function evalSource(x) {
+    if (typeof x === 'string') return x;
+    try { if (nativeTT && x !== null && typeof x === 'object' && Reflect.apply(nativeTT.is, nativeTT.f, [x])) return Reflect.apply(nativeTT.text, x, []); } catch {}
+    return null;
+  }
   function workerDynamicEval(source) {
     // 네이티브 eval 은 생성자가 아니다 — `new eval()` 은 TypeError.
     if (new.target) throw new TypeError('eval is not a constructor');
     if (arguments.length === 0) return undefined;
-    const text = String(source);
+    const text = evalSource(source);
+    if (text === null) return source;
     if (!EXPR_STMT_RE.test(text.trimStart())) {
       try {
         const rw = zpRewrite(text);
@@ -101,8 +110,9 @@
   function workerDirectEval(callee, args, desc, callerStrict) {
     if (new.target) throw new TypeError('eval is not a constructor');
     if (callee !== workerEval) return Reflect.apply(callee, undefined, Array.isArray(args) ? args : []);
-    const src = args && args.length ? args[0] : undefined;
-    if (typeof src !== 'string') return src;
+    const arg = args && args.length ? args[0] : undefined;
+    const src = evalSource(arg);
+    if (src === null) return arg;
     const rewritten = zpRewrite(src);
     let d = {};
     if (desc && typeof desc === 'object') {
@@ -261,8 +271,15 @@
   function expose(name, value) { Object.defineProperty(self, name, { value, enumerable: false, configurable: false }); }
   function isWorkerGlobal(value) { return value === self || value === scope; }
   function workerTarget(value) { return value === scope ? self : value; }
+  // 워커 코드가 보는 `Error.prepareStackTrace` — V8 은 진짜 접근자로 정리기를 읽고, 리라이트된 코드는 이걸 본다(페이지
+  // realm 의 pageStackHook 과 같다). 네이티브에선 대입하기 전엔 없다. 정리기(installStackSanitizer)가 채운다.
+  const stackHook = { ctor: null, exists: false, value: undefined, forget: null };
+  const isStackHook = (target, prop) => prop === 'prepareStackTrace' && target === stackHook.ctor && target != null;
+  const stackHookDesc = () => stackHook.exists ? { value: stackHook.value, writable: true, enumerable: true, configurable: true } : undefined;
+  const withoutStackHook = (target, keys) => isStackHook(target, 'prepareStackTrace') && !stackHook.exists ? keys.filter(k => k !== 'prepareStackTrace') : keys;
   function get(target, prop) {
     if (typeof prop !== 'symbol') prop = String(prop);
+    if (isStackHook(target, prop)) return stackHook.value;
     {
       const d = __zp_eval_desc;
       if (d && isWorkerGlobal(target) && typeof prop === 'string'
@@ -336,13 +353,15 @@
     const d = __zp_eval_desc;
     if (d && isWorkerGlobal(target) && typeof prop === 'string'
         && Object.prototype.hasOwnProperty.call(d, prop)) return true;
+    if (isStackHook(target, prop)) return stackHook.exists;
     return isWorkerGlobal(target) && prop === 'location' || Reflect.has(Object(workerTarget(target)), prop);
   }
   function getOwnPropertyDescriptor(target, prop) {
     if (isWorkerGlobal(target) && prop === 'location') return { value: base, configurable: true, enumerable: true, writable: false };
+    if (isStackHook(target, prop)) return stackHookDesc();
     return Reflect.getOwnPropertyDescriptor(Object(workerTarget(target)), prop);
   }
-  function ownKeys(target) { return Reflect.ownKeys(Object(workerTarget(target))); }
+  function ownKeys(target) { return withoutStackHook(target, Reflect.ownKeys(Object(workerTarget(target)))); }
   // ★리라이터는 워커에도 페이지와 **같은 헬퍼**를 낸다 — `Object.keys(o)` 는
   // `__zp_okeys(o)`, `delete o[k]` 는 `__zp_delete(o,k)`, `o?.[k]` 는
   // `__zp_oget(o,k)`. b602610(2026-09-22)이 페이지에만 정의해서 워커에서는
@@ -355,6 +374,7 @@
       if (d && isWorkerGlobal(target) && typeof prop === 'string'
           && Object.prototype.hasOwnProperty.call(d, prop)) { delete d[prop]; return false; }
     }
+    if (isStackHook(target, prop)) { stackHook.forget(); return true; }
     return Reflect.deleteProperty(Object(workerTarget(target)), prop);
   }
   function odel(target, prop) { return target == null ? true : del(target, prop); }
@@ -392,10 +412,10 @@
     return Reflect.set(Object(target), prop, value, receiver === undefined ? target : receiver);
   }
   function okeys(target) { return Object.keys(Object(workerTarget(target))); }
-  function getOwnPropertyNames(target) { return Object.getOwnPropertyNames(Object(workerTarget(target))); }
+  function getOwnPropertyNames(target) { return withoutStackHook(target, Object.getOwnPropertyNames(Object(workerTarget(target)))); }
   function getOwnPropertyDescriptors(target) {
     const out = {};
-    for (const k of Reflect.ownKeys(Object(workerTarget(target)))) out[k] = getOwnPropertyDescriptor(target, k);
+    for (const k of ownKeys(target)) out[k] = getOwnPropertyDescriptor(target, k);
     return out;
   }
   // `with(obj)` — 객체 우선, 그다음 바깥(fb). 워커 전역이 obj 면 가상화 경로로.
@@ -424,6 +444,8 @@
     };
   }
   expose('__zp_get', get);
+  // the page realm maps the real global to its window facade; a worker's global is not wrapped that way
+  expose('__zp_this', function (t) { return t; });
   expose('__zp_set', set);
   expose('__zp_assign', assign);
   expose('__zp_call', call);
@@ -762,16 +784,20 @@
   // 같은 답이다. 문자열 핸들러에는 timeout 인자가 안 넘어간다(네이티브 의미).
   const nativeSetTimeout = self.setTimeout.bind(self);
   const nativeSetInterval = self.setInterval.bind(self);
-  const compileTimerString = code => {
+  // 함수가 아닌 핸들러는 전부 코드다 — 문자열, TrustedScript 의 텍스트, 그 밖의 값은 String() 결과(네이티브도 그렇다).
+  // 문자열만 잡던 동안 `setTimeout({ toString() { … } })` 는 네이티브 타이머가 **리라이트 없이** 컴파일했다.
+  const compileTimerString = handler => {
+    let code = evalSource(handler);
+    if (code === null) code = String(handler);
     const rw = zpRewrite(code);
     return () => workerExecGlobal(rw, true);
   };
   self.setTimeout = (handler, timeout, ...args) => {
-    if (typeof handler === 'string') return nativeSetTimeout(compileTimerString(handler), timeout);
+    if (typeof handler !== 'function') return nativeSetTimeout(compileTimerString(handler), timeout);
     return nativeSetTimeout(handler, timeout, ...args);
   };
   self.setInterval = (handler, timeout, ...args) => {
-    if (typeof handler === 'string') return nativeSetInterval(compileTimerString(handler), timeout);
+    if (typeof handler !== 'function') return nativeSetInterval(compileTimerString(handler), timeout);
     return nativeSetInterval(handler, timeout, ...args);
   };
   // ── EventSource over proxied fetch ───────────────────────────────────
@@ -1215,12 +1241,21 @@
       for (const f of wrapped) { try { out += '\n    at ' + f.toString(); } catch {} }
       return out;
     };
+    // V8 은 늘 zpPrepare 를 읽고, 워커 코드가 대입한 값은 stackHook 에 남긴다. 대입하면 네이티브처럼 열거되고 delete 면 다시 숨는다.
+    const listHook = enumerable => { try { Object.defineProperty(E, 'prepareStackTrace', { enumerable }); } catch {} };
     try {
       Object.defineProperty(E, 'prepareStackTrace', {
         get() { return zpPrepare; },
-        set(v) { userPrepare = typeof v === 'function' && v !== zpPrepare ? v : null; },
+        set(v) {
+          stackHook.exists = true;
+          stackHook.value = v;
+          userPrepare = typeof v === 'function' && v !== zpPrepare ? v : null;
+          listHook(true);
+        },
         configurable: true, enumerable: false
       });
+      stackHook.ctor = E;
+      stackHook.forget = () => { stackHook.exists = false; stackHook.value = undefined; userPrepare = null; listHook(false); };
     } catch {}
   })();
 

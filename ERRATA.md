@@ -659,6 +659,76 @@ claimed:
     builtin is followed, past membrane frames, by the bootstrap — a page's own `eval` keeps its builtin frame. — e2e `an inline
     script's Error.stack is a browser's (matches native)`: top level, named, anonymous, method, `.call(window)`, callback — all
     equal to native (mutation checked: frame dropping, formatting).
+71. **A plain call of sloppy code got the real global as `this`, not the window.** `(function(){ return this })()`,
+    `Function('return this')()` and `[0].map(function(){ return this })` give the global object; natively that is `window`,
+    through the proxy the page's `window` is the membrane's facade, so `this === window` was false and the real global was
+    one plain call away. In sloppy function code (and a `Function` body, an event handler, a function-site eval) the rewriter
+    now emits `__zp_this(this)`, which maps exactly that one value to the facade and passes every other receiver through.
+    Strict code and class bodies get `undefined` from a plain call and are left alone; module and worker code has no window
+    facade. A contained child window maps its own global to what its `window` reads. — matrix
+    `sloppy_function_this_maps_only_the_real_global`; e2e `a plain call's this, … (matches native)`, inline and external
+    (mutation: identity helper → red).
+72. **`Object.keys(window)` threw, and `location` had no own accessors.** The window facade reported `window`/`self`/… as
+    non-configurable from `getOwnPropertyDescriptor` without its target agreeing — a Proxy invariant violation, so
+    `Object.keys(window)` threw `trap reported non-configurability for property 'window'`. Such descriptors are now locked
+    onto the target as they are handed out. The location facade's target had no own `href`/`origin`/…: `Object
+    .getOwnPropertyDescriptor(location, 'href')` came from the facade without the native shape. The target now holds
+    accessors shaped like the browser's (`function get href() { [native code] }`, no `prototype`, a setter only where the
+    native has one, non-configurable) that answer through the facade. — same e2e: `Object.keys(window)`, the `href`/`origin`
+    descriptors and `Object.keys(location)` equal native (mutation: each lock removed → red).
+73. **Canvas and audio reads changed on every call.** The masking painted a random pixel *into the page's canvas* on each
+    `toDataURL`, flipped two fixed bits in each `getImageData`, and nudged a sample by a random amount on each `getChannelData`
+    (cumulatively, in place). Two reads of one drawing differed and the page's own canvas changed under it — no browser does
+    either, and reading twice is the first thing a bot check does. The masking stays (ERRATA Q6) but is deterministic per
+    profile and origin: the low bit of one channel of painted pixels on a per-site lattice (1 in 32) is *set* — so a
+    readback written back reads the same, and blank stays blank — on a scratch copy (the page's canvas is never touched;
+    `toBlob` as `toDataURL`); an audio channel is farbled once, the first time it is handed out, across the whole buffer
+    (fingerprints sum samples 4500–5000; the old masking only reached the first 100). The 2d context is noted as `getContext`
+    hands it out instead of asking the canvas for one (which made one, and a later `getContext('webgl')` then failed). The
+    hooks are shaped like native methods: name, `length`, configurable, no `prototype`, not constructors. — e2e `canvas audio
+    and speech fingerprint masking` (same drawing → same bytes, within the low bit, sub-rectangle consistent, round trip,
+    blank stays blank, descriptor shapes, audio stable and reaching 4500–5000).
+74. **`Error.prepareStackTrace` was a function to the page, and a page's `delete` removed the stack sanitizer.** The
+    sanitizer lives there, and V8 reads it through the real property; natively nothing is there until the page assigns one.
+    `prepareStackTrace` is now a routed member (and `'prepareStackTrace' in X` a routed `in`): the page reads what it
+    assigned (`typeof` `undefined` before), `in`/the descriptor/the key lists answer as for the native data property, an
+    assignment lists it like one, and `delete` forgets the page's value while the sanitizer stays — before, a `delete` left
+    every later stack with proxy URLs. Page and worker realms. — matrix `error_prepare_stack_trace_is_the_pages_own_view`; e2e
+    same test (`stackHook`, page and worker: before/assigned/custom hook/deleted/`= undefined`, no `/zp/` in a stack after
+    delete; mutation: plain read, delete → red); unit `stack sanitizer survives save/restore…`.
+75. **`document.referrer` ignored the referrer policy, and a navigated-to document read `""`.** The prelude rebuilt a frame's
+    referrer from the embedder's URL under the default policy, whatever the embedder declared (header or `<meta
+    name=referrer>`) or the frame's `referrerpolicy` said; a top-level document always read `""`. Cloudflare's challenge page
+    sends `Referrer-Policy: same-origin`: natively its Turnstile frame reads `""`, through the proxy it read the challenge
+    page's address. The `Referer` the worker sent was already right; the worker now hands the document the value its
+    navigation carried (the last hop's) in its boot config. — e2e `document.referrer and Referer follow the referrer policy,
+    for frames and navigations (matches native)`: header policy same/cross, `referrerpolicy` unsafe-url/no-referrer, meta
+    `origin`, a navigation — `document.referrer` and the `Referer` the server saw, all equal (before: four differed).
+76. **The prelude's script elements stayed in the page.** Hidden from `document.scripts` and serialization, the injected
+    scripts (prewarm, `zp-core.js`, `zp-page-bundle.js`, `runtime-prelude.js`) still stood in `head.children`,
+    `firstElementChild` and `childNodes` in front of the page's first element: Turnstile's head read
+    `script,script,script,script,meta,…` where natively it starts with `meta`. The prelude's self-removal looked for
+    `/__zp/runtime-prelude.js`, a path that does not exist (it is `/zp/assets/…`), so it never ran. All of them are removed
+    once they have run. — e2e same test (`dom`: head and body child lists, script counts; mutation: no removal → four extra
+    `SCRIPT`s ahead of `TITLE`).
+77. **`eval` returned a TrustedScript instead of running it — the Glassdoor crash.** Chrome treats a `TrustedScript` as
+    code: `eval(policy.createScript(s))` compiles `s`, direct or indirect, whether or not Trusted Types are enforced
+    (measured on example.com, no CSP: `2` for `'1 + 1'`). The membrane's `eval` returned every non-string unevaluated (the
+    rule for a plain object). Turnstile's VM compiles its string decoder exactly this way — `eval(<TrustedScript "function
+    ulgk5(s){…}">)` — so the decoder was never defined and the VM died calling it (`reading 'call'`, the residual row
+    below). Both eval paths, page and worker, now compile a TrustedScript's text (brand-checked with the native
+    `trustedTypes.isScript`, text read with the native `toString`). With it the widget's VM runs to its verdict: the first
+    `fo` POST, its workers, the challenge image. — e2e `a TrustedScript is code for eval and timers, and no timer handler
+    skips the rewriter (matches native)` (indirect, direct with a caller local, a declared global function, `eval({})`
+    passes through; mutation: no TrustedScript case → `{}` and `declared: false`, Turnstile's symptom).
+78. **Escape: a timer handler that was neither a function nor a string ran unrewritten in the real global.** Natively
+    `setTimeout(x)` with a non-function `x` compiles `String(x)` (a TrustedScript, its text). The membrane's timer hook
+    rewrote only `typeof x === 'string'` and passed everything else to the native timer, which compiled it raw:
+    `setTimeout({ toString() { return 'code' } })`, `setTimeout(['code'])` or `setTimeout(trustedScript)` ran outside the
+    membrane — the e2e probe read the real `location.href`, the proxy's share route **with its `#k=` key**. Page and worker
+    timers now treat every non-function handler as code (a TrustedScript's text, otherwise `String(x)`) and rewrite it. —
+    same e2e (`timers`: TrustedScript, object, array → the page's address; mutation: the old string-only check → the
+    proxy's address and key).
 
 ### Residuals (documented, not fixed)
 
@@ -695,7 +765,10 @@ claimed:
 | A cloned frame, read before it is inserted, shows the rewritten `sandbox` and an absolute `src` | The page's text lives in element-keyed maps that `cloneNode` does not carry; insertion restores the sandbox, not the `src` text. | — |
 | A cookie written by `document.cookie` may miss a navigation or an `<img>` request made in the same task | Runtime `fetch` and asynchronous XHR wait for the write's acknowledgement (item 40) and a synchronous XHR carries the write (item 44); these cannot wait. | — |
 | `Reflect.getOwnPropertyDescriptor(null, k)` throws `Cannot convert undefined or null to object` (the `Object.` message; native: `Reflect.getOwnPropertyDescriptor called on non-object`) | The rewriter sends `Object.getOwnPropertyDescriptor` and `Reflect.getOwnPropertyDescriptor` to one helper. Always a `TypeError`; only the text differs. | — |
-| Glassdoor's Cloudflare challenge does not finish through the proxy | Natively an unautomated Chrome is through in ~4 s. Through the proxy, after items 68–70 (workers start, the meta CSP is intact, inline stacks are native): Turnstile's widget frame still throws `Cannot read properties of undefined (reading 'call')` before its first `fo` POST. Measured: the call is `ulgk5` on the widget's window facade, and `ulgk5` is defined nowhere in that realm. Natively the widget compiles `function ulgk5(s){…}` itself (an eval from inside its VM, ~0.2 s after its document starts, before the POST); through the proxy its VM calls the decoder without having compiled it — its encrypted control flow took another path, which such a VM does when something it reads of the environment differs. The error's debug-info hash changed when the stack was fixed (item 70), so the stack is one of the readings; another still differs. Ruled out: a decoder evaluated in a fresh frame's realm that is then removed (e2e `/xdyneval` `g12`). After many attempts from one IP Cloudflare answers "Humans only" instead, and runs stop being comparable. | e2e `/xcoep`, `/xstack`, `/xdyneval` `g12` |
+| Glassdoor's Cloudflare challenge does not finish through the proxy | Natively an unautomated Chrome is through in ~4 s (re-checked 2026-10-12, same IP, after the attempts below). Through the proxy the widget used to crash (`reading 'call'`): its VM compiles its decoder with `eval(TrustedScript)`, which the membrane did not run — item 77. Since then the VM runs to its verdict (first `fo` POST, workers, challenge image) and the verdict is against us: in a fresh Chrome the widget asks "Verify you are human" (no checkbox drawn), in the product browser it spins and restarts with a new Ray ID. Not the canvas farbling (same result with it switched off). What still reads differently in the widget (env-diff, rows below): Trusted Types and CSP `sandbox` not applied, feature policy, blob URL origin; the worker realm was not compared yet. | e2e `/xtt`, `/xcoep`, `/xstack`; `.lean-ctx/env-diff.js` |
+| A blob URL carries the proxy's origin (`blob:http://proxy.localhost:18080/…`; natively the document's) | `URL.createObjectURL` is the browser's: the blob store is keyed by the real origin. Handing out a virtual URL means mapping it back in every consumer (DOM URL attributes, `fetch`/XHR, workers, CSS `url()`, media, `import()`) and forward in every read-back. Known since the URL-gate design (trap-notebook LOG 2026-08). | env-diff `blobUrl` |
+| The target's header CSP is replaced by the proxy's: header-only `sandbox`, Trusted Types (`require-trusted-types-for`/`trusted-types`) and stricter source lists are not applied (the meta CSP is intersected, item 69) | Trusted Types would bind the membrane's own sinks (the prelude's evals, rewritten `innerHTML`): applying them needs a policy of ours for those sinks and the page's strings checked against the page's policy in the membrane. A nonce policy also refuses the prelude's inline scripts. Turnstile's document is such a document: natively a string `eval` throws `EvalError`, `document.domain = …` throws `SecurityError` (sandbox); through the proxy neither does. | env-diff `evalString`, `ttCreateOther`, `sandboxed` |
+| A cross-site frame allows the features a same-origin one does (`document.featurePolicy.allowedFeatures()`: Turnstile 61 through the proxy, 20 natively) | Underneath, every frame is same-origin with its embedder, so each feature whose default allowlist is `'self'` is allowed without an `allow` delegation. Emulating it means virtualizing the policy API and the features it gates. | env-diff `permissionsPolicy` |
 | Reddit's "Prove your humanity" wall on a cold profile | Parity: re-checked 2026-10-12 with a fresh, unautomated Chrome (no proxy) — it gets the same wall, and so does the proxy. | — |
 | `iframe.sandbox` (the `DOMTokenList`) is empty for a value the membrane virtualized (`allow-scripts allow-same-origin`: native length 2, ours 0) | `getAttribute('sandbox')` is right. The real attribute is removed so the browser does not enforce flags that would let the frame escape; the list is the real element's. (A sandbox without `allow-same-origin` is not this case: its list is a real `DOMTokenList` holding the page's value — item 37.) | — |
 

@@ -62,6 +62,8 @@ function executionContext() {
     else base[key] = value;
     return value;
   };
+  // 07-membrane.js: a plain call's real global reads as the page's window
+  ctx.__zp_this = t => (t === realmGlobal || t === ctx ? window : t);
   ctx.__zp_assign = (base, key, op, value) => {
     assert.equal(op, '+=');
     return ctx.__zp_set(base, key, ctx.__zp_get(base, key) + value);

@@ -2455,6 +2455,65 @@ function createTargetServer(requests, pendingResponses) {
       </script></body>`);
       return;
     }
+    if (url.pathname === '/xtt') {
+      // Code that is not a string: a TrustedScript given to eval and to a timer (Chrome compiles it, enforced or not), and a
+      // timer's object or array handler (compiled as its String()). Each reads `location.href`: rewritten code reads the
+      // page's address, code that bypassed the rewriter the proxy's.
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(`<!doctype html><title>tt</title><body><script>
+        var out = {};
+        var pol = trustedTypes.createPolicy('xtt', { createScript: function (s) { return s; } });
+        out.indirect = (0, eval)(pol.createScript('1 + 1'));
+        out.direct = (function () { var k = 40; return eval(pol.createScript('k + 2')); })();
+        (0, eval)(pol.createScript('function xttDecl() { return 7; }'));
+        out.declared = typeof xttDecl === 'function' && xttDecl();
+        var plain = {};
+        out.plainObject = eval(plain) === plain;
+        out.fn = Function(pol.createScript('return 3'))();
+        setTimeout(pol.createScript('window.__xttT1 = location.href'), 0);
+        setTimeout({ toString: function () { return 'window.__xttT2 = location.href'; } }, 0);
+        setTimeout(['window.__xttT3 = location.href'], 0);
+        setTimeout(function () {
+          out.timers = [window.__xttT1, window.__xttT2, window.__xttT3];
+          window.__xtt = out;
+        }, 50);
+      </script></body>`);
+      return;
+    }
+    if (url.pathname.startsWith('/xref')) {
+      // What a frame's `document.referrer` is, and what Referer its request carried: the embedder's Referrer-Policy header,
+      // a `<meta name=referrer>`, a frame's `referrerpolicy` attribute, and a document reached by navigating.
+      const seen = globalThis.__refSeen || (globalThis.__refSeen = new Map());
+      const run = url.searchParams.get('run') || '';
+      const other = `http://127.0.0.1:${req.socket.localPort}`;
+      const html = (body, extra) => { res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', ...extra }); res.end(`<!doctype html><title>ref</title><body>${body}</body>`); };
+      const collect = keys => `<script>window.__xref = {}; addEventListener('message', function (e) {
+          if (e.data && e.data.xref) { window.__xref[e.data.xref.k] = e.data.xref.ref; if (Object.keys(window.__xref).length === ${keys}) window.__xrefDone = true; }
+        });</script>`;
+      const child = (k, base, attr) => `<iframe ${attr || ''} src="${base || ''}/xref-child?k=${k}&run=${run}"></iframe>`;
+      if (url.pathname === '/xref-child' || url.pathname === '/xref-landing') {
+        const k = url.searchParams.get('k') || 'landing';
+        seen.set(run + '|' + k, req.headers.referer || '');
+        if (url.pathname === '/xref-landing') return html(`<script>window.__xreflanding = document.referrer;</script>`);
+        return html(`<script>parent.postMessage({ xref: { k: ${JSON.stringify(k)}, ref: document.referrer } }, '*');</script>`);
+      }
+      if (url.pathname === '/xref-log') {
+        const out = {};
+        for (const [k, v] of seen) if (k.startsWith(run + '|')) out[k.slice(run.length + 1)] = v;
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+        res.end(JSON.stringify(out));
+        return;
+      }
+      // the embedder's policy as a header: same-origin keeps the URL in-site and sends nothing across
+      if (url.pathname === '/xref') {
+        return html(collect(4) + child('cross', other) + child('same') + child('crossUnsafe', other, 'referrerpolicy="unsafe-url"')
+          + child('sameNone', '', 'referrerpolicy="no-referrer"'), { 'Referrer-Policy': 'same-origin' });
+      }
+      // the policy declared in markup
+      if (url.pathname === '/xref-meta') return html(`<meta name="referrer" content="origin">` + collect(2) + child('metaSame') + child('metaCross', other));
+      // a document reached from another one: its referrer is the page it left
+      if (url.pathname === '/xref-nav') return html(`<script>location.href = '/xref-landing?run=${run}&from=nav';</script>`);
+    }
     if (url.pathname === '/xfm2' || url.pathname === '/xfm2-r' || url.pathname === '/xfm2-log') {
       // Fetch Metadata of element loads: what the target server reads for an image, a script, a stylesheet, a no-cors fetch,
       // a beacon and a worker, same-origin and cross-site.
@@ -2552,6 +2611,66 @@ function createTargetServer(requests, pendingResponses) {
         out.callback = [0].map(function cb() { return site(new Error('c').stack); })[0];
         window.__xstack = out;
       </script></body>`);
+      return;
+    }
+    if (url.pathname === '/xthis' || url.pathname === '/xthis.js' || url.pathname === '/xthis-worker.js') {
+      // `Error.prepareStackTrace` as page code sees it: absent until assigned, a plain data property after, gone on delete.
+      const stackProbe = `(function () {
+        var view = function () {
+          var d = Object.getOwnPropertyDescriptor(Error, 'prepareStackTrace');
+          return [typeof Error.prepareStackTrace, 'prepareStackTrace' in Error, Object.getOwnPropertyNames(Error).indexOf('prepareStackTrace') >= 0,
+            Object.keys(Error).join(','), d ? [typeof d.value, d.writable, d.enumerable, d.configurable, typeof d.get].join(',') : 'none'];
+        };
+        var s = {};
+        s.before = view();
+        Error.prepareStackTrace = function (e, frames) { return 'custom ' + (frames.length > 0) + ' ' + typeof frames[0].getFileName; };
+        s.assigned = view();
+        s.customStack = new Error('x').stack;
+        delete Error.prepareStackTrace;
+        s.deleted = view();
+        var st = String(new Error('y').stack);
+        s.plainStack = [st.split('\\n')[0], st.indexOf('/zp/') < 0, /^    at /.test(st.split('\\n')[1] || '')];
+        Error.prepareStackTrace = undefined;
+        s.undef = view();
+        delete Error.prepareStackTrace;
+        return s;
+      })()`;
+      if (url.pathname === '/xthis-worker.js') {
+        res.writeHead(200, { 'Content-Type': 'text/javascript', 'Cache-Control': 'no-store' });
+        res.end(`postMessage(${stackProbe});`);
+        return;
+      }
+      // What a plain call's `this` is, and how `window` / `location` describe themselves — read by inline and external code.
+      const probe = `(function () {
+        var r = {};
+        r.plain = (function () { return this === window; })();
+        r.ctor = Function('return this')() === window;
+        r.map = [0].map(function () { return this === window; })[0];
+        r.arrow = (function () { return (() => this === window)(); })();
+        var o = { m: function () { return this; } };
+        r.method = o.m() === o;
+        r.strict = typeof (function () { 'use strict'; return this; })();
+        r.keys = Object.keys(window).filter(function (k) { return /^(window|self|document|location|top|frames|__xthis)$/.test(k); });
+        var d = Object.getOwnPropertyDescriptor(location, 'href');
+        r.href = d && [typeof d.get, typeof d.set, d.enumerable, d.configurable, String(d.get), 'prototype' in d.get, d.get.call(location) === location.href];
+        var od = Object.getOwnPropertyDescriptor(location, 'origin');
+        r.origin = od && [typeof od.get, typeof od.set, String(od.get)];
+        r.locKeys = Object.keys(location).join(',');
+        var names = function (list) { return Array.prototype.map.call(list, function (n) { return n.nodeName; }).join(','); };
+        r.dom = [names(document.head.childNodes), names(document.body.childNodes), document.scripts.length,
+          document.getElementsByTagName('script').length, document.body.firstElementChild && document.body.firstElementChild.nodeName];
+        r.stackHook = ${stackProbe};
+        return r;
+      })()`;
+      if (url.pathname === '/xthis.js') {
+        res.writeHead(200, { 'Content-Type': 'text/javascript', 'Cache-Control': 'no-store' });
+        res.end(`window.__xthis.external = ${probe};`);
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(`<!doctype html><title>this</title><body><script>window.__xthis = { inline: ${probe} };
+        new Worker('/xthis-worker.js').onmessage = function (e) { window.__xthis.worker = e.data; };
+      </script><script src="/xthis.js"></script></body>`);
       return;
     }
     if (url.pathname === '/xrawtext') {
@@ -5180,55 +5299,108 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 600000, co
     const canvasMask = HTMLCanvasElement.prototype.toDataURL.toString();
     const voicesMask = speechSynthesis.getVoices.toString();
 
-    const canvasA = document.createElement('canvas');
-    canvasA.width = 16;
-    canvasA.height = 16;
-    const ctxA = canvasA.getContext('2d');
-    ctxA.fillStyle = '#123456';
-    ctxA.fillRect(0, 0, 16, 16);
+    // #123456 has even channels everywhere: a farbled one is odd, and nothing may move by more than its low bit.
+    const solid = () => {
+      const c = document.createElement('canvas');
+      c.width = 64;
+      c.height = 64;
+      const x = c.getContext('2d');
+      x.fillStyle = '#123456';
+      x.fillRect(0, 0, 64, 64);
+      return c;
+    };
+    const canvasA = solid();
+    const canvasB = solid();
     const urlA = canvasA.toDataURL();
-
-    const canvasB = document.createElement('canvas');
-    canvasB.width = 16;
-    canvasB.height = 16;
-    const ctxB = canvasB.getContext('2d');
-    ctxB.fillStyle = '#123456';
-    ctxB.fillRect(0, 0, 16, 16);
+    const urlA2 = canvasA.toDataURL();
     const urlB = canvasB.toDataURL();
+    const ctxA = canvasA.getContext('2d');
+    const read = Array.from(ctxA.getImageData(0, 0, 64, 64).data);
+    const raw = [0x12, 0x34, 0x56, 255];
+    const farbledChannels = read.filter((v, i) => v !== raw[i % 4]).length;
+    const withinLowBit = read.every((v, i) => Math.abs(v - raw[i % 4]) <= 1);
+    // a sub-rectangle reads the same pixels as the whole canvas does
+    const sub = Array.from(ctxA.getImageData(10, 20, 5, 1).data);
+    const subMatches = sub.every((v, i) => v === read[(20 * 64 + 10) * 4 + i]);
+    // the page's canvas is never painted on: after every read, putting back what it gave reads back the same
+    const clean = solid();
+    const cleanCtx = clean.getContext('2d');
+    cleanCtx.putImageData(ctxA.getImageData(0, 0, 64, 64), 0, 0);
+    const roundTrip = clean.toDataURL() === urlA;
+    const blank = document.createElement('canvas');
+    blank.width = 8;
+    blank.height = 8;
+    blank.getContext('2d');
+    const blankStaysBlank = Array.from(blank.getContext('2d').getImageData(0, 0, 8, 8).data).every(v => v === 0);
+    const shape = (proto, key) => {
+      const d = Object.getOwnPropertyDescriptor(proto, key);
+      let constructs = true;
+      try { new d.value(); } catch { constructs = false; }
+      return [d.value.name, d.value.length, d.writable, d.enumerable, d.configurable, 'prototype' in d.value, constructs];
+    };
 
-    const pixelCanvas = document.createElement('canvas');
-    pixelCanvas.width = 1;
-    pixelCanvas.height = 1;
-    const pixelCtx = pixelCanvas.getContext('2d');
-    pixelCtx.fillStyle = 'rgba(0,0,0,1)';
-    pixelCtx.fillRect(0, 0, 1, 1);
-    const pixel = Array.from(pixelCtx.getImageData(0, 0, 1, 1).data);
-
-    let audioDelta = null;
+    let audio = null;
     if (window.AudioBuffer) {
-      const buffer = new AudioBuffer({ length: 128, numberOfChannels: 1, sampleRate: 44100 });
-      const channel = buffer.getChannelData(0);
-      channel[0] = 0.01;
-      for (let i = 0; i < 5; i++) buffer.getChannelData(0);
-      audioDelta = buffer.getChannelData(0)[0] - 0.01;
+      const buffer = new AudioBuffer({ length: 6000, numberOfChannels: 1, sampleRate: 44100 });
+      const written = new Float32Array(6000).map((_, i) => Math.sin(i / 7) * 0.5);
+      buffer.copyToChannel(written, 0);
+      const first = buffer.getChannelData(0);
+      const firstCopy = Array.from(first);
+      const again = buffer.getChannelData(0);
+      const deltas = firstCopy.map((v, i) => v - written[i]);
+      audio = {
+        sameArray: first === again,
+        stable: firstCopy.every((v, i) => v === again[i]),
+        changed: deltas.filter(d => d !== 0).length,
+        changedDeep: deltas.slice(4500, 5000).filter(d => d !== 0).length,
+        maxDelta: Math.max(...deltas.map(Math.abs)),
+      };
     }
 
     const voices = speechSynthesis.getVoices();
     return {
       canvasMask,
       voicesMask,
-      canvasVaries: urlA !== urlB,
-      pixel,
-      audioDelta,
+      sameDrawingSameBytes: urlA === urlB && urlA === urlA2,
+      farbledChannels,
+      withinLowBit,
+      subMatches,
+      roundTrip,
+      blankStaysBlank,
+      shapes: [
+        shape(CanvasRenderingContext2D.prototype, 'getImageData'),
+        shape(HTMLCanvasElement.prototype, 'toDataURL'),
+        shape(HTMLCanvasElement.prototype, 'toBlob'),
+        shape(HTMLCanvasElement.prototype, 'getContext'),
+        shape(AudioBuffer.prototype, 'getChannelData'),
+      ],
+      audio,
       voiceCount: voices.length,
       voiceNames: voices.map(v => v.name),
     };
   });
   assert.equal(fingerprintMasking.canvasMask, 'function toDataURL() { [native code] }');
   assert.equal(fingerprintMasking.voicesMask, 'function getVoices() { [native code] }');
-  assert.equal(fingerprintMasking.canvasVaries, true);
-  assert.deepEqual(fingerprintMasking.pixel.slice(0, 4), [1, 0, 1, 255]);
-  assert.ok(fingerprintMasking.audioDelta === null || Math.abs(fingerprintMasking.audioDelta) > 0);
+  // Farbled, but the same way every time — a device renders one drawing one way.
+  assert.equal(fingerprintMasking.sameDrawingSameBytes, true);
+  assert.ok(fingerprintMasking.farbledChannels > 0, 'no channel farbled');
+  assert.equal(fingerprintMasking.withinLowBit, true);
+  assert.equal(fingerprintMasking.subMatches, true);
+  assert.equal(fingerprintMasking.roundTrip, true);
+  assert.equal(fingerprintMasking.blankStaysBlank, true);
+  assert.deepEqual(fingerprintMasking.shapes, [
+    ['getImageData', 4, true, true, true, false, false],
+    ['toDataURL', 0, true, true, true, false, false],
+    ['toBlob', 1, true, true, true, false, false],
+    ['getContext', 1, true, true, true, false, false],
+    ['getChannelData', 1, true, true, true, false, false],
+  ]);
+  if (fingerprintMasking.audio) {
+    assert.equal(fingerprintMasking.audio.sameArray, true);
+    assert.equal(fingerprintMasking.audio.stable, true);
+    assert.ok(fingerprintMasking.audio.changed > 0 && fingerprintMasking.audio.changedDeep > 0, JSON.stringify(fingerprintMasking.audio));
+    assert.ok(fingerprintMasking.audio.maxDelta < 1e-6, JSON.stringify(fingerprintMasking.audio));
+  }
   assert.equal(fingerprintMasking.voiceCount, 2);
   assert.deepEqual(fingerprintMasking.voiceNames, ['Google US English', 'Microsoft David - English (United States)']);
   });
@@ -7157,6 +7329,103 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 600000, co
     fs.writeFileSync(path.join(artifacts, 'inline-stack.json'), JSON.stringify({ direct, proxied }, null, 2));
     assert.deepEqual(direct.top, [`at ${targetBase}/xstack:L:C`]);
     assert.deepEqual(proxied, direct);
+  });
+
+  // A plain call of sloppy code gets the real global from the engine — natively that is `window`, through the proxy it was
+  // not (the page's window is the facade). `Object.keys(window)` threw (the facade reported `window` non-configurable without
+  // the target agreeing), and the location facade had no own accessors. `Error.prepareStackTrace` held the stack sanitizer,
+  // where natively nothing is there until the page assigns one — and a page's `delete` removed the sanitizer. A challenge VM
+  // reads all of these.
+  await t.test('a plain call\'s this, Object.keys(window), location\'s accessors and Error.prepareStackTrace are a browser\'s (matches native)', async () => {
+    const targetBase = `http://${targetHost}:${targetPort}`;
+    const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    let direct;
+    try {
+      const directPage = await directBrowser.newPage();
+      await directPage.goto(`${targetBase}/xthis`, { waitUntil: 'domcontentloaded' });
+      await directPage.waitForFunction(() => window.__xthis && window.__xthis.external && window.__xthis.worker, { timeout: 60000, polling: 100 });
+      direct = await directPage.evaluate(() => window.__xthis);
+    } finally {
+      await directBrowser.close();
+    }
+    const fresh = await openProxiedPage(`${targetBase}/xthis`);
+    let proxied;
+    try {
+      await fresh.waitForFunction(() => window.__xthis && window.__xthis.external && window.__xthis.worker, { timeout: 120000, polling: 100 });
+      proxied = await fresh.evaluate(() => window.__xthis);
+    } finally {
+      await fresh.close();
+    }
+    fs.writeFileSync(path.join(artifacts, 'plain-call-this.json'), JSON.stringify({ direct, proxied }, null, 2));
+    assert.equal(direct.inline.plain, true);
+    assert.equal(direct.inline.href[4], 'function get href() { [native code] }');
+    assert.deepEqual(direct.inline.stackHook.before, ['undefined', false, false, 'stackTraceLimit', 'none']);
+    assert.equal(direct.worker.customStack, 'custom true function');
+    assert.deepEqual(proxied, direct);
+  });
+
+  // Chrome compiles a TrustedScript handed to `eval` or a timer, whether or not Trusted Types are enforced; the membrane
+  // returned it unevaluated (Cloudflare's Turnstile compiles its decoder that way — the decoder was never defined). And a
+  // timer handler that is neither a function nor a string is compiled as its String() natively; the membrane passed such
+  // handlers to the native timer, which ran them UNREWRITTEN in the real global (they read the proxy's address).
+  await t.test('a TrustedScript is code for eval and timers, and no timer handler skips the rewriter (matches native)', async () => {
+    const targetBase = `http://${targetHost}:${targetPort}`;
+    const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    let direct;
+    try {
+      const directPage = await directBrowser.newPage();
+      await directPage.goto(`${targetBase}/xtt`, { waitUntil: 'domcontentloaded' });
+      await directPage.waitForFunction(() => window.__xtt, { timeout: 60000, polling: 100 });
+      direct = await directPage.evaluate(() => window.__xtt);
+    } finally {
+      await directBrowser.close();
+    }
+    const fresh = await openProxiedPage(`${targetBase}/xtt`);
+    let proxied;
+    try {
+      await fresh.waitForFunction(() => window.__xtt, { timeout: 120000, polling: 100 });
+      proxied = await fresh.evaluate(() => window.__xtt);
+    } finally {
+      await fresh.close();
+    }
+    fs.writeFileSync(path.join(artifacts, 'trusted-script-code.json'), JSON.stringify({ direct, proxied }, null, 2));
+    assert.deepEqual(direct, { indirect: 2, direct: 42, declared: 7, plainObject: true, fn: 3, timers: Array(3).fill(`${targetBase}/xtt`) });
+    assert.deepEqual(proxied, direct);
+  });
+
+  // A frame's `document.referrer` was always the embedder's URL cut by the DEFAULT policy, whatever the embedder declared
+  // (Cloudflare's challenge page sends `Referrer-Policy: same-origin`: natively its widget frame reads "", through the proxy
+  // the challenge page's address), and a document reached by navigating read "" where natively it reads the page it left.
+  await t.test('document.referrer and Referer follow the referrer policy, for frames and navigations (matches native)', async () => {
+    const targetBase = `http://${targetHost}:${targetPort}`;
+    const collect = async (open, run) => {
+      const out = {};
+      for (const [pathname, done] of [['/xref', () => window.__xrefDone], ['/xref-meta', () => window.__xrefDone], ['/xref-nav', () => typeof window.__xreflanding === 'string']]) {
+        const p = await open(`${targetBase}${pathname}?run=${run}`);
+        try {
+          await p.waitForFunction(done, { timeout: 120000, polling: 100 });
+          Object.assign(out, await p.evaluate(() => window.__xref || { landing: window.__xreflanding }));
+        } finally {
+          await p.close();
+        }
+      }
+      const log = await (await fetch(`${targetBase}/xref-log?run=${run}`)).json();
+      return { referrer: out, header: log };
+    };
+    const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    let direct;
+    try {
+      direct = await collect(async u => { const p = await directBrowser.newPage(); await p.goto(u, { waitUntil: 'domcontentloaded' }); return p; }, 'native');
+    } finally {
+      await directBrowser.close();
+    }
+    const proxied = await collect(u => openProxiedPage(u), 'proxied');
+    fs.writeFileSync(path.join(artifacts, 'referrer-policy.json'), JSON.stringify({ direct, proxied }, null, 2));
+    assert.equal(direct.referrer.cross, '');
+    assert.equal(direct.referrer.same, `${targetBase}/xref?run=native`);
+    assert.equal(direct.referrer.landing, `${targetBase}/xref-nav?run=native`);
+    const scrub = r => JSON.parse(JSON.stringify(r).split('run=native').join('run=X').split('run=proxied').join('run=X'));
+    assert.deepEqual(scrub(proxied), scrub(direct));
   });
 
   // `innerHTML` on an element whose content is text sets text. The membrane read a script's code as markup:

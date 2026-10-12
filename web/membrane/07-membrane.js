@@ -130,6 +130,19 @@
       toStringMap.set(fn, dynamicSource(kind, params, body));
       return fn;
     }
+    // What `eval` compiles: a string, or a TrustedScript's text — Chrome treats a TrustedScript as code whether or not
+    // Trusted Types are enforced (measured: `(0, eval)(policy.createScript('1 + 1'))` is 2 on a page with no CSP).
+    // Anything else is returned as it is. Cloudflare's Turnstile VM compiles its decoder this way; handed back unevaluated,
+    // the decoder was never defined and the VM died calling it (Glassdoor).
+    function evalSource(x) {
+      if (typeof x === 'string') return x;
+      try {
+        if (x !== null && typeof x === 'object' && Native.ttIsScript && Reflect.apply(Native.ttIsScript, Native.trustedTypes, [x])) {
+          return Reflect.apply(Native.ttScriptText, x, []);
+        }
+      } catch {}
+      return null;
+    }
     function isEvalExpressionCandidate(text) {
       return !/^(?:function|class|var|let|const|if|for|while|do|switch|try|throw|return|break|continue|with|import|export|debugger)\b/.test(text.trimStart());
     }
@@ -140,9 +153,9 @@
       // Native parity: a non-string is returned as-is, never evaluated
       // (PerformEval step 1). `String(source)` used to evaluate eval`x` as the
       // identifier x, and made `(0,eval)(obj)` call obj.toString() and run
-      // the result — code no real browser runs. ERRATA §E, 2026-09-29.
-      if (typeof source !== 'string') return source;
-      const text = source;
+      // the result — code no real browser runs. ERRATA §E, 2026-09-29. (A TrustedScript is code: evalSource.)
+      const text = evalSource(source);
+      if (text === null) return source;
       let expr = null;
       if (isEvalExpressionCandidate(text)) {
         // 표현식도 리라이터를 거친다 — `with` 만 씌우면 computed member
@@ -231,9 +244,10 @@
       if (callee !== dynamicEval) {
         return Reflect.apply(callee, undefined, Array.isArray(args) ? args : []);
       }
-      const src = args && args.length ? args[0] : undefined;
-      // 네이티브 parity: 비문자열 인자는 평가 없이 그대로 반환.
-      if (typeof src !== 'string') return src;
+      const arg = args && args.length ? args[0] : undefined;
+      // 네이티브 parity: 비문자열 인자는 평가 없이 그대로 반환 — TrustedScript 만은 코드다(evalSource).
+      const src = evalSource(arg);
+      if (src === null) return arg;
       // Run as global code, the eval's top-level `this` is the global object (the facade); inside a function it is the
       // caller's `this`, which the helper below hands over — the rewriter has to leave it alone there.
       const asGlobal = globalSite === 1 && !callerStrict && !/^\s*['"]use strict['"]/.test(src);
@@ -473,12 +487,12 @@
         },
         has(_t, prop) { return Reflect.has(nativeLoc, prop); },
         ownKeys() { return Reflect.ownKeys(nativeLoc); },
-        getOwnPropertyDescriptor(_t, prop) {
-          // Virtualized URL props: live value, always configurable.
-          if (typeof prop === 'string' && LOC_VIRT_PROPS.has(prop)) {
-            const fv = local ? virtualURL : foreignVirtualURL() || virtualURL;
-            return { value: fv[prop], writable: true, enumerable: true, configurable: true };
-          }
+        getOwnPropertyDescriptor(t, prop) {
+          // Virtualized URL props: the native shape — an own, non-configurable accessor whose getter and setter read as
+          // native code (`function get href() { [native code] }`; `origin` has no setter). They live on the target (see
+          // `defineLocationAccessors`), which the Proxy invariant requires for a non-configurable report. The old answer,
+          // a writable data property, made `Object.getOwnPropertyDescriptor(location, 'href').get` undefined.
+          if (typeof prop === 'string' && LOC_VIRT_PROPS.has(prop)) return Reflect.getOwnPropertyDescriptor(t, prop);
           const d = Reflect.getOwnPropertyDescriptor(nativeLoc, prop);
           // Target is Object.create(nativeLoc) with NO own props, so the proxy
           // invariant forbids reporting a non-configurable descriptor that the
@@ -499,7 +513,16 @@
       // prototype chain leaves the target with no own props, so the invariant
       // never applies; instanceof Location and reflection still resolve through
       // the proto (forwarded to nativeLoc explicitly in every trap).
-      const proxy = new Proxy(Object.create(nativeLoc), handler);
+      const locTarget = Object.create(nativeLoc);
+      const proxy = new Proxy(locTarget, handler);
+      // The virtual URL props as own accessors of the target (see getOwnPropertyDescriptor). They answer through the facade
+      // and are only ever reached by descriptor reflection — `get`/`set` traps handle ordinary access.
+      for (const prop of LOC_VIRT_PROPS) {
+        const nd = Reflect.getOwnPropertyDescriptor(nativeLoc, prop);
+        // Real accessor functions (from an object literal): named `get href`, no `prototype`, not constructors — as native ones.
+        const pair = Object.getOwnPropertyDescriptor({ get [prop]() { return proxy[prop]; }, set [prop](v) { proxy[prop] = v; } }, prop);
+        defineMasked(locTarget, prop, { get: pair.get, set: !nd || nd.set ? pair.set : undefined, enumerable: nd ? nd.enumerable : true, configurable: false });
+      }
       wrappedLocationCache.set(nativeLoc, proxy);
       return proxy;
     }
@@ -1231,13 +1254,20 @@
         if (prop === 'location') return Reflect.getOwnPropertyDescriptor(target, prop);
         if (typeof prop === 'string' && ZP_HIDDEN_RE.test(prop)) return undefined;
         if (typeof prop === 'string' && MEMBER_DANGER.has(prop)) {
+          // A property reported non-configurable must exist, with this very descriptor, on the proxy's target (Proxy
+          // invariant). `window`, `document`, `top`… are [LegacyUnforgeable]: the report threw "trap reported
+          // non-configurability" and `Object.keys(window)` — any enumeration of the window — threw with it.
+          const locked = Reflect.getOwnPropertyDescriptor(target, prop);
+          if (locked) return locked;
           const native = Reflect.getOwnPropertyDescriptor(root, prop);
-          return {
+          const d = {
             get: membraneGetter(scope, prop),
             set: membraneSetter(scope, prop),
             enumerable: native ? native.enumerable : true,
             configurable: native ? native.configurable : false,
           };
+          if (!d.configurable) Reflect.defineProperty(target, prop, d);
+          return d;
         }
         const desc = Reflect.getOwnPropertyDescriptor(root, prop);
         // Preserve locked descriptors, not a blanket configurable:true mask.
@@ -1362,9 +1392,12 @@
     }
     // `Reflect.*` throws for any non-object target (a primitive too), `Object.*` only for null and undefined.
     function isObjectLike(v) { return (typeof v === 'object' && v !== null) || typeof v === 'function'; }
+    // `Error.prepareStackTrace` as the page sees it (pageStackHook, 00-head.js) — V8 keeps reading the sanitizer.
+    const isStackHook = (base, prop) => prop === 'prepareStackTrace' && base === pageStackHook.ctor && base != null;
     function get(base, prop) {
       if (base == null) return nullishFail('get', base, prop);
       if (typeof prop !== 'symbol') prop = String(prop);
+      if (isStackHook(base, prop)) return pageStackHook.value;
       // ★base 가 **진짜 Location** 이면 URL 성분은 가상값을 준다.
       // 리라이터는 `n.location.protocol` 에서 바깥 `.protocol` 만 감싸고
       // 안쪽 `n.location` 은 (수신자가 지역 변수라) 그대로 두므로, 멤브레인이
@@ -1579,6 +1612,7 @@
       if (d && (base === root || isScopeProxy(base)) && typeof prop === 'string'
           && Object.prototype.hasOwnProperty.call(d, prop)) return true;
       if ((isWindowLike(base) || isDocumentLike(base)) && prop === 'location') return true;
+      if (isStackHook(base, prop)) return pageStackHook.exists;
       return Reflect.has(Object(base), prop);
     }
     // Document-ness by nodeType 9: covers root document, iframe
@@ -1616,6 +1650,10 @@
     function getOwnPropertyDescriptor(base, prop) {
       if (base == null) return nullishFail('keys', base, prop);
       if (crossOriginFacadeSet.has(base)) return Reflect.getOwnPropertyDescriptor(base, prop);
+      // what an assignment makes natively: a plain data property
+      if (isStackHook(base, prop)) {
+        return pageStackHook.exists ? { value: pageStackHook.value, writable: true, enumerable: true, configurable: true } : undefined;
+      }
       // 서술자로 우회해 진짜 게터를 꺼내 가는 길도 막는다 — 여기서 진짜 접근자를
       // 돌려주면 `gopd(document,'location').get.call(document)` 한 줄로 프록시
       // 주소가 새어 나간다.
@@ -1648,6 +1686,8 @@
       // `delete window.location` — unforgeable, silently refuses. Returning
       // false mirrors native non-strict `delete` instead of a phantom success.
       if (prop === 'location' && (isWindowLike(base) || isDocumentLike(base))) return false;
+      // the page's value goes; the sanitizer stays
+      if (isStackHook(base, prop)) { pageStackHook.forget(); return true; }
       return Reflect.deleteProperty(Object(base), prop);
     }
     function odel(base, prop) { return base == null ? true : del(base, prop); }
@@ -1684,7 +1724,7 @@
     function rget(target, prop, receiver) {
       if (!isObjectLike(target)) return nullishFail('rget', target, prop);
       if (typeof prop !== 'symbol') prop = String(prop);
-      if (MEMBER_DANGER.has(prop)) return get(target, prop);
+      if (MEMBER_DANGER.has(prop) || isStackHook(target, prop)) return get(target, prop);
       return Reflect.get(Object(target), prop, receiver === undefined ? target : receiver);
     }
     function rset(target, prop, value, receiver) {
@@ -1696,7 +1736,10 @@
     function getOwnPropertyDescriptors(base) {
       if (base == null) return nullishFail('keys', base);
       const out = {};
-      for (const k of Reflect.ownKeys(Object(base))) out[k] = getOwnPropertyDescriptor(base, k);
+      for (const k of Reflect.ownKeys(Object(base))) {
+        const d = getOwnPropertyDescriptor(base, k);
+        if (d !== undefined) out[k] = d;
+      }
       return out;
     }
     // Reflect.getOwnPropertyNames 는 없는 API 다 — 네이티브 Object 쪽을 써야
@@ -1928,6 +1971,9 @@
     define(root, '__zp_getOwnPropertyNames', getOwnPropertyNames);
     define(root, '__zp_okeys', okeys);
     define(root, '__zp_with_get', withGet);
+    // `this` in sloppy function code: a plain call gets the real global from the engine, where natively it is the window —
+    // here the facade. Every other receiver passes through untouched.
+    define(root, '__zp_this', function (t) { return t === root ? scope : t; });
     define(root, '__zp_with_set', withSet);
     define(root, '__zp_with_assign', withAssign);
     define(root, '__zp_with_update', withUpdate);
@@ -2168,11 +2214,16 @@
     // at registration cut the caller's flow short. Non-syntax failures
     // (rewriter unavailable → NotSupportedError) still fail closed at once.
     function timerHandler(handler) {
-      if (typeof handler !== 'string') return handler;
-      // A string handler is compiled and run as an indirect eval — global code. Its `var`s and functions become properties
-      // of the global object, which a Function body (what this used to build) cannot do. Parse errors surface when the
-      // timer fires, as natively.
-      return function () { return dynamicEval.call(undefined, handler); };
+      if (typeof handler === 'function') return handler;
+      // Anything that is not a function is code: a string, a TrustedScript's text, or what String() makes of any other
+      // value (`setTimeout({ toString() { … } })`, `setTimeout(['…'])`) — natively too. Only strings used to be caught here;
+      // every other value went to the native timer, which compiled it UNREWRITTEN in the real global.
+      let text = evalSource(handler);
+      if (text === null) text = String(handler);
+      // Compiled and run as an indirect eval — global code. Its `var`s and functions become properties of the global
+      // object, which a Function body (what this used to build) cannot do. Parse errors surface when the timer fires, as
+      // natively.
+      return function () { return dynamicEval.call(undefined, text); };
     }
     if (Native.setTimeout) define(root, 'setTimeout', function(handler, delay, ...args) { return Native.setTimeout(timerHandler(handler), delay, ...args); });
     if (Native.setInterval) define(root, 'setInterval', function(handler, delay, ...args) { return Native.setInterval(timerHandler(handler), delay, ...args); });

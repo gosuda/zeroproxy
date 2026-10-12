@@ -1,27 +1,35 @@
-# ZeroProxy — handoff (2026-10-08)
+# ZeroProxy — handoff (2026-10-12)
 
 Written for: the next session (agent or engineer) picking up ZeroProxy cold. Read [CLAUDE.md](CLAUDE.md) and
 `head -40 .ai/trap-notebook/INDEX.md` first; this file only adds what is not already there.
 
 ## State
 
-- Branch `main`; everything up to `d54c7f1` is on `origin/main`. The commit carrying this version of the file (items 69–70)
+- Branch `main`; everything up to `5e1b775` is on `origin/main`. The commit carrying this version of the file (items 71–78)
   is local until the user says to push.
 - Commits of this arc: `8c178a7` HLS / loop cap / `innerHTML` / TLS refresh (ERRATA 58–61) · `8565ccf` five divergences found
   chasing the challenge (62–65) · `3ae6135` **Stack Overflow's Cloudflare challenge fixed** — the ClientHello lacked Chrome's
   `trust_anchors` extension — plus `Sec-Fetch-*` for frames and sub-requests (66–67) · `f8bb56a` element-load `Sec-Fetch-*`,
   `sendBeacon` as `no-cors`, `scripts/check-chrome-hello.mjs` · `8fc8a35`/`778955c` TaskWeaver notes · `d54c7f1` worker scripts
   told as `same-origin`/`worker`, `sec-fetch-storage-access` on cookie-carrying cross-site sub-requests (67), **workers under a
-  `COEP: require-corp` document start** (68) · the latest commit: meta CSP with entity quotes (69), native inline-script
-  stacks (70), Glassdoor narrowed, Reddit parity.
-- Verification (`d54c7f1`): cargo 304 / 3 ignored, go ok, test:js 163, test:wasm:ci 13, static-policy 61, test:e2e 222 (one
-  earlier full run had the favicon flake below). 13-site sweep: all answer, Stack Overflow loads, Naver 0 errors. CNN showed
-  two "Refused to apply style … MIME type ('text/html')" for `www.dianomi.com/…/dianomi-context.css` (an ad partner); upstream
-  serves `text/css` with and without the new `Sec-Fetch-*` headers, so the HTML was the proxy's own error page for that one
-  request — not explained, the SW's request ring had already rotated. The latest commit's numbers are in its message.
-- Detail lives in [ERRATA.md](ERRATA.md) items 62–70 and its Residuals table, the trap-notebook entries `동적-코드-전역-this`,
-  `chrome-hello-trust-anchors`, `coep-워커-부트스트랩` and `lol-html-원시-속성값` (`.ai/trap-notebook/rewriter.md`), and the verification table in
-  [PHASE2_STATUS.md](PHASE2_STATUS.md). No gate in PHASE2_STATUS is open.
+  `COEP: require-corp` document start** (68) · `5e1b775` meta CSP with entity quotes (69), native inline-script stacks (70) ·
+  the latest commit: a plain call's `this` (71), `Object.keys(window)` / location accessors (72), deterministic canvas/audio
+  farbling (73), `Error.prepareStackTrace` as the page's own (74), `document.referrer` from the navigation (75), prelude
+  scripts removed (76), **`eval(TrustedScript)` runs — the Glassdoor crash** (77), and **an escape closed: non-string timer
+  handlers ran unrewritten** (78).
+- Verification (the latest commit): cargo 307 / 3 ignored, go ok, test:js 163, test:wasm:ci 13, static-policy 61, test:e2e
+  226. 13-site sweep: all answer; Wikipedia, GitHub, Guardian, MDN, Naver, Apple, npm 0 errors. Known noise, unchanged from
+  earlier sweeps: BBC's GPT `t.getSlotElementId is not a function` (Google's ad tag), CNN's ad-partner 502s and two
+  "Refused to apply style … MIME type ('text/html')" for `www.dianomi.com/…/dianomi-context.css` (upstream serves
+  `text/css`; the HTML was the proxy's own error page for that request — not explained).
+- Detail lives in [ERRATA.md](ERRATA.md) items 62–78 and its Residuals table, the trap-notebook entries
+  (`.ai/trap-notebook/rewriter.md`: `동적-코드-전역-this`, `chrome-hello-trust-anchors`, `coep-워커-부트스트랩`,
+  `lol-html-원시-속성값`, `trusted-script-는-코드`, `캔버스-파블링-결정적`, `prepare-stack-trace-페이지-뷰`,
+  `프렐류드-스크립트-잔존`, `referrer-한-곳에서`), and the verification table in [PHASE2_STATUS.md](PHASE2_STATUS.md). No gate
+  in PHASE2_STATUS is open.
+- **A product decision was made without asking — flag it to the user:** the canvas/audio masking (ERRATA Q6, "intentional")
+  stayed, but became deterministic per profile and origin (item 73). Removing it outright would be the other choice; the
+  Glassdoor experiment showed it is not what decides that verdict.
 
 ## Next steps (suggested, in order)
 
@@ -31,21 +39,21 @@ Written for: the next session (agent or engineer) picking up ZeroProxy cold. Rea
    `CAPTURED_FINGERPRINT_B64` and `third_party-rustls-fork/src/ja3.rs` (exit 1 = drift, 2 = no Chrome). Bump the persona
    (`web/zp-core.js`, `web/worker-prelude.js`, the spec, the constant) together;
    `crates/zp-kernel-bundle/tests/client_hello.rs` pins the result.
-3. **Glassdoor — the one open site.** After items 68–70 the widget frame's VM still throws `reading 'call'`: it calls
-   `ulgk5` on the widget's own window facade, and nothing in that realm has defined it. Natively the widget compiles
-   `function ulgk5(s){…}` from inside its VM ~0.2 s after its document starts, before its first `fo` POST; through the proxy
-   the VM takes another path and calls the decoder first. That is what such a VM does when a value it reads of the
-   environment differs; the stack was one (the error's debug-info hash changed when item 70 landed), another still differs.
-   **Next: find the remaining reading.** Tools in `.lean-ctx/` (local only): `ulgk5-parsed.js` (debugger on every frame,
-   prints the compiled script that brings `ulgk5` and its creator — run it natively to get the creator position, then
-   through the proxy), `ulgk5-trace.js`, `call-receiver.js`, `api-trace3.js` (host-API sequence per frame, streamed through
-   `console.debug`). Compare the widget frame's host-API reads natively and proxied up to the point the native one compiles
-   the decoder. Space the attempts (Cloudflare escalates to "Humans only").
+3. **Glassdoor — the one open site, now a verdict, not a crash.** The `reading 'call'` crash was `eval(TrustedScript)` not
+   running (item 77). The widget's VM now runs to its verdict and the verdict is against us: a fresh Chrome gets "Verify you
+   are human" (no checkbox drawn), the product browser spins and restarts with a new Ray ID. Natively (same IP, same hour) a
+   fresh unautomated Chrome is through in ~4 s. Not the canvas farbling (same result with it off). **Next:** (a) compare the
+   **worker realm** — the VM starts several blob workers, and nothing in a worker was compared yet (navigator, `location`,
+   `self` keys, timing, `Error.stack`); (b) the remaining widget readings in ERRATA's Residuals (Trusted Types / CSP
+   `sandbox` not applied, feature policy, blob URL origin). The method: `.lean-ctx/env-diff.js native|proxied [url]`
+   snapshots every frame's environment as page code sees it (probe list in `env-probe-src.js`, compare with
+   `env-compare.js [frame-substring]`); extend the probe and diff. Space the attempts (Cloudflare escalates to "Humans
+   only").
 4. A page's own `eval` / `new Function` code prints as a script frame, not V8's eval-origin text (ERRATA Residuals) — low
    priority; inline scripts are native since item 70.
 
-Done this round and closed: the meta-CSP lone `'` (item 69), the inline-script stack (item 70), Reddit (parity re-checked
-with a fresh unautomated Chrome — same wall natively).
+Done this round and closed: items 71–78 (see State); before that the meta-CSP lone `'` (69), the inline-script stack (70),
+Reddit (parity re-checked with a fresh unautomated Chrome — same wall natively).
 
 ## How to run things
 
@@ -164,4 +172,11 @@ hand-launched Chrome (above). If that changes, amend the CLAUDE.md policy line f
   e.g. `p151`, may be running: leave it alone).
 - **Never `taskkill //IM chrome.exe`.** It closes the user's own Chrome (happened once). Filter by command line
   (`Get-CimInstance Win32_Process`, `zp-fresh-` in the user-data-dir).
+- **puppeteer element-handle calls hang when attached to a self-started Chrome** (since 2026-10-12, Chrome 154 + puppeteer
+  25.0.4): `page.click` / `page.type` time out in `Runtime.callFunctionOn` even on example.com, while `page.evaluate` works.
+  The `.lean-ctx` scripts now fill and submit the launcher through `page.evaluate` — a run that "never leaves the launcher"
+  is this, not the proxy.
+- **A spec sentence about "a string" may mean "what the host treats as code".** The membrane's `eval` returned a
+  TrustedScript unevaluated (PerformEval step 1), and its timers passed non-string handlers to the native timer, which
+  compiled them unrewritten (items 77–78).
 - Commits: Korean message through `git commit -F file` (or PowerShell), **no** `Co-Authored-By`/"Generated with" trailers.

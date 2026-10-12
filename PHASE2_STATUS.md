@@ -19,20 +19,20 @@ gate is closed.
 > 옛 설계 기록 `PHASE2_PLAN.md`(746줄, 2026-05-28 삭제)는 게이트 라벨이 없는
 > 선행 문서다. 필요하면 `git show f595f1c^:PHASE2_PLAN.md` 로 꺼낸다.
 
-## 현재 검증 (2026-10-07)
+## 현재 검증 (2026-10-12)
 
 아래 Evidence 열의 개수는 대부분 게이트를 닫던 날의 값이다. **지금 값**은 이 표다 — 같은 명령으로 다시 잰다.
 
 | 무엇 | 명령 | 결과 |
 |---|---|---|
 | JS 단위 (정책·코어·SW 플레이리스트·프렐류드) | `npm run test:js` | 163 통과 |
-| Rust 워크스페이스 (리라이터 매트릭스 3,360 조합 포함) | `cargo test --workspace` | 305 통과, 3 무시 |
+| Rust 워크스페이스 (리라이터 매트릭스 3,360 조합 포함) | `cargo test --workspace` | 307 통과, 3 무시 |
 | Go | `go test ./...` | 전부 ok |
 | wasm CI | `npm run test:wasm:ci` | 13 통과 |
-| 브라우저 e2e (네이티브 대조 차분 포함) | `npm run test:e2e` | 223 통과 |
+| 브라우저 e2e (네이티브 대조 차분 포함) | `npm run test:e2e` | 226 통과 |
 | ClientHello 가 설치된 Chrome 과 같은가 (확장 집합 + `trust_anchors` 본문) | `npm run check:chrome-hello` | Chrome 154.0.8037.98 과 일치 (Chrome 이 있어야 돈다; 어긋나면 exit 1) |
 | 리라이트 출력 유효성 (실사이트 스크립트 → V8) | `node --experimental-vm-modules scripts/rewrite-corpus-check.cjs <taskweaver 테이프>` | 13개 사이트 768개 중 732개 검사, 0건 실패 (51.6 MB; 나머지는 스크립트 아님/리라이터가 거부) |
-| 실사이트 | taskweaver `zp`, 아래 13곳 | 전부 응답 — Stack Overflow 포함(2026-10-07 부터 열린다); Wikipedia·GitHub·Guardian·MDN·Apple·npm 오류 0; Naver 는 광고 픽셀 502 와 `ssl.pstatic.net` 이미지의 간헐 504 만 |
+| 실사이트 | taskweaver `zp`, 아래 13곳 | 전부 응답 — Stack Overflow 포함(2026-10-07 부터 열린다); Wikipedia·GitHub·Guardian·MDN·Apple·npm·Naver 오류 0 (2026-10-12) |
 
 실사이트 매트릭스: Wikipedia, GitHub, Guardian, BBC, MDN, CNN, NAVER, NYT, Stack Overflow, Reddit, Apple, npm, IMDb.
 알려진 미해결은 [ERRATA.md](ERRATA.md) 의 Residuals 다. (Stack Overflow 의 Cloudflare 챌린지는 2026-10-07 에 풀렸다 — ERRATA 66. 이 자리에 "자동화된
@@ -50,7 +50,7 @@ Marker key: `[x]` closed · `[~]` partial / explicit follow-up · `[ ]` open.
 | **A1** CSP unification & tightening (`connect-src 'self' <ws>`, no `script-src blob:/data:`) | `[x]` | [`internal/headers/csp.go`](internal/headers/csp.go), [`crates/zp-shared/src/csp.rs`](crates/zp-shared/src/csp.rs), [`test/js/static-policy.test.js`](test/js/static-policy.test.js) (`fixedCSP` projection + Go parity) |
 | **A2** Capability-token defense-in-depth (`event.source.id` required, no `firstTab` fallback) | `[x]` | [`web/sw.js#runtimeMessageAuthorized`](web/sw.js), static-policy `firstTab` absence test |
 | **A3** blob/data script + worker sealing | `[x]` | [`web/runtime-prelude.js#installWorkerHooks`](web/runtime-prelude.js), `application\/octet-stream|^$` empty-MIME branch, static-policy assertions |
-| **A4** Dynamic compilation fail-closed (`eval`, `Function`, string-timers, constructor chain) | `[x]` | `dynamicEval` / `dynamicFunction` / `compileScoped` / `compileDynamic` in runtime-prelude |
+| **A4** Dynamic compilation fail-closed (`eval`, `Function`, string-timers, constructor chain) | `[x]` | `dynamicEval` / `dynamicFunction` / `compileScoped` / `compileDynamic` in runtime-prelude. **2026-10-12** — a timer handler that was neither a function nor a string (`setTimeout({ toString() {…} })`, an array, a TrustedScript) went to the native timer, which compiled it unrewritten in the real global; every non-function handler is now rewritten (page and worker), and `eval(TrustedScript)` compiles the script as Chrome does — e2e `a TrustedScript is code for eval and timers, and no timer handler skips the rewriter (matches native)` (ERRATA 77–78, [trap](.ai/trap-notebook/rewriter.md#trusted-script-는-코드)) |
 | **A5** Styled `/__zp/error?code=…` page (`safeError` + `ERROR_INFO`) | `[x]` | [`web/sw.js#safeError`](web/sw.js), [`web/zp-core.js#ERROR_INFO`](web/zp-core.js), 19 error codes pinned |
 | **A6** P0 regression suite in escape matrix | `[x]` | [`test/e2e/proxy.test.js#escape matrix - strict mode`](test/e2e/proxy.test.js) |
 

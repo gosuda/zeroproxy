@@ -6,6 +6,11 @@
 
 | Date | Category | Summary | Detail |
 |---|---|---|---|
+| 2026-10-12 | membrane / 탈출 | 객체·배열·TrustedScript 타이머 핸들러를 네이티브가 리라이트 없이 컴파일했다. eval(TrustedScript) 미실행이 Glassdoor 크래시. | rewriter.md#trusted-script-는-코드 |
+| 2026-10-12 | membrane / 수정 | 캔버스 노이즈가 읽을 때마다 바뀌고 페이지 캔버스에 그려졌다 — 같은 입력엔 같은 출력, 원본 불변. 훅은 네이티브 모양으로. | rewriter.md#캔버스-파블링-결정적 |
+| 2026-10-12 | membrane / 수정 | Error.prepareStackTrace: V8 이 읽는 자리의 정리기가 페이지에 보였고 delete 로 지워졌다. 페이지 시야는 리라이터 경유로 따로 둔다. | rewriter.md#prepare-stack-trace-페이지-뷰 |
+| 2026-10-12 | membrane / 수정 | 프렐류드 자기 제거 정규식이 없는 경로(/__zp/)를 찾아 한 번도 안 돌았다. 숨김은 일부 API 뿐 — 실행 뒤 요소를 지운다. | rewriter.md#프렐류드-스크립트-잔존 |
+| 2026-10-12 | sw / 수정 | document.referrer 를 프렐류드가 기본 정책으로 재구성해 SW 의 Referer 와 갈라졌다. SW 가 실은 값을 부트로 넘긴다. | rewriter.md#referrer-한-곳에서 |
 | 2026-10-12 | htmltx / 수정 | lol_html get_attribute 는 엔티티 미해석 원문: `&#39;` 안의 `;` 에서 meta CSP 가 잘려 `'` 만 남았다. 값으로 쓰기 전 디코드. | rewriter.md#lol-html-원시-속성값 |
 | 2026-10-12 | sw / 수정 | COEP require-corp 문서가 띄운 워커가 전부 막혔다: 워커는 부트스트랩이라는 네트워크 응답이고 COEP 가 없었다. 상속되던 헤더는 직접 싣는다. | rewriter.md#coep-워커-부트스트랩 |
 | 2026-10-07 | tls / 수정 | Cloudflare 챌린지 원인: Chrome UA 인데 hello 에 trust_anchors(0xCA34)가 없었다. "WebView2 와 일치" ≠ "Chrome 과 일치". 진짜 Chrome 으로 비교. | rewriter.md#chrome-hello-trust-anchors |

@@ -193,11 +193,26 @@
       for (const f of wrapped) { try { out += '\n    at ' + f.toString(); } catch {} }
       return out;
     };
+    // What V8 reads is always zpPrepare; what the page assigned is kept for its own reads (pageStackHook, 00-head.js).
+    // An assignment makes the property enumerable as a native one would be, a `delete` hides it again.
+    const listHook = enumerable => { try { Object.defineProperty(E, 'prepareStackTrace', { enumerable }); } catch {} };
     try {
       defineMasked(E, 'prepareStackTrace', {
         get() { return zpPrepare; },
-        set(v) { userPrepare = typeof v === 'function' && v !== zpPrepare ? v : null; },
+        set(v) {
+          pageStackHook.exists = true;
+          pageStackHook.value = v;
+          userPrepare = typeof v === 'function' && v !== zpPrepare ? v : null;
+          listHook(true);
+        },
         configurable: true, enumerable: false
       });
+      pageStackHook.ctor = E;
+      pageStackHook.forget = () => {
+        pageStackHook.exists = false;
+        pageStackHook.value = undefined;
+        userPrepare = null;
+        listHook(false);
+      };
     } catch {}
   }
