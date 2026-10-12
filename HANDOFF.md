@@ -73,9 +73,44 @@ need into `scripts/`.
 ## TaskWeaver (browser CLI, now 0.18.0)
 
 The user fixed what was asked for last session. Verified in use: `exec-js --target sw`, `nav-log` (per-hop timeline incl.
-frames and blocked reasons — it is how the COEP block was found), `failed-requests`, `--field`/`--jq`/`--raw`. Present per
-`--help`, not exercised: `cookies list|clear`, `reset`, `record on|off`, `--private-profile`, and **`--engine chrome`** (a real
-Chrome, throw-away profile, no automation flags).
+frames and blocked reasons — it is how the COEP block was found), `failed-requests`, `--field`/`--jq`/`--raw`, and `list`'s
+new `current_url` / `last_used` / `engine` / `profile` fields. Exercised afterwards (results below): `console-logs` across
+frames, `cookies list|clear`, `reset`, `record on|off`. Not exercised: `--private-profile`, **`--engine chrome`**.
+
+### Requests for TaskWeaver (measured 2026-10-08 on 0.18.0, Windows/WebView2, instance `zp`)
+
+For whoever works on TaskWeaver. Each item says what was run and what came back.
+
+1. **`console-logs` collects nothing from a cross-site frame.** Repro: a page on `http://localhost:PORT/` that appends an
+   `<iframe src="http://127.0.0.1:PORT/child">`; the child runs `for (i < 700) console.debug(...)`, one `console.error`
+   at once, and 20 more `console.debug` + one `console.error` after `setTimeout(…, 1500)`. `console-logs --max 1000` returned
+   the parent's 5 lines and **none** of the child's — not the early ones, not the late ones, not the errors — while
+   `get-frames` listed the child (its `frame_id` was known). A second, same-origin `<iframe src="/child">` on the same page
+   *was* captured (with `frame_id` and `url` per entry). So: capture reaches the top frame and same-origin frames, not
+   cross-site (out-of-process) ones. This is what blocked using TaskWeaver to trace Cloudflare's widget, which is a
+   `challenges.cloudflare.com` frame. Wanted: capture from every frame target, plus `--frame` and `--text` filters.
+2. **The console buffer is a 500-entry ring and drops the oldest.** In the same run the parent's 5 lines were evicted once the
+   same-origin frame had logged 500. Fine as a default; wanted: a start flag for the size, and the response saying how many
+   entries were dropped.
+3. **`cookies list` reports `httpOnly: null` for every cookie.** The server set `top_http=1; HttpOnly` and `top_vis=1` (and the
+   same pair from the frame); all four were listed with the right `domain`/`path`, all with `httpOnly: null`. HttpOnly cookies
+   are included — the flag just is not filled, so they cannot be told apart.
+4. **`reset` and `cookies clear` wiped the shared profile without asking.** The help says both refuse on a shared profile
+   unless `--force-shared`; the check is "another live daemon shares it". With `zp` the only daemon, `list` showing
+   `profile.kind: "shared"` (`…\com.pipestudio.taskweaver\EBWebView`), `cookies clear` deleted 6 cookies and `reset` cleared
+   the browsing data, no flag needed. The profile outlives the daemon and other sessions use it later, so "no other daemon is
+   up right now" is not "nobody else uses it". Wanted: refuse on `kind: "shared"` unless `--force-shared`, and a dry run that
+   lists what would be deleted. (Nothing of value was lost this time — the only cookies were the test ones — but the storage
+   that `reset` cleared cannot be inspected after the fact.)
+5. **`record off` leaves `armed: true`.** `record on` → `arm_verified: true`, 88 network events for one navigation; after
+   `record off`, `armed` stays `true` and the off state is only in `enabled` / `stopped_at_ms` / `off_periods`. Confusing
+   when `armed` is the field `list` and the docs point at.
+6. Smaller:
+   - `--jq` rejected `sub("…")` with a regex and `capture(...)`; a line in `--help` naming the supported jq subset would do.
+   - On a page busy computing a challenge, evaluating in its frames timed out (seen with puppeteer's `evaluate`, not tried with
+     `exec-js --frame`); if `exec-js` behaves the same, telling "renderer busy" from "no such frame" would help.
+   - `--engine chrome` is ruled out here only by the one-instance policy; a lifetime bound (`--ttl 10m`, or stop with the
+     parent process) would let a Chrome-side comparison run without a second long-lived instance.
 
 **Policy decision:** CLAUDE.md allows only `--id zp`. The user was asked whether a short-lived `--engine chrome` instance
 (`zpc`) may be used for Chrome-side comparisons and said **no — keep `zp` only**. So the Chrome side is done with
@@ -100,6 +135,8 @@ hand-launched Chrome (above). If that changes, amend the CLAUDE.md policy line f
   `this` read the facade without it broke `evalThis`.
 - **The Bash tool halves backslashes inside heredocs / `node -e` / `sed`.** Write any file that contains regexes or escapes with
   the Write/Edit tools.
+- **`taskweaver reset` / `cookies clear` run on the shared profile when `zp` is the only daemon** (see the TaskWeaver requests,
+  item 4). Use `reset --keep-browsing-data`, or check `list` → `profile.kind` first.
 - **Never `taskkill //IM chrome.exe`.** It closes the user's own Chrome (happened once). Filter by command line
   (`Get-CimInstance Win32_Process`, `zp-fresh-` in the user-data-dir).
 - Commits: Korean message through `git commit -F file` (or PowerShell), **no** `Co-Authored-By`/"Generated with" trailers.
