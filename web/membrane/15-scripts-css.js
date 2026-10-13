@@ -1272,7 +1272,7 @@
   // `proxyOrigin` 을 실어 보내는 이유는 resolveProxyOrigin 주석에 있다 —
   // 자식이 `about:srcdoc` 이면 자기 힘으로는 오리진을 알 수 없다.
   function bootJSON() { return JSON.stringify(Object.assign({}, boot, { servers: activeServers, proxyOrigin })).replace(/[<>&]/g, c => c === '<' ? '\\u003c' : c === '>' ? '\\u003e' : '\\u0026'); }
-  function rewriteEventAttribute(source) { return 'return __ZP_EXEC_EVENT(this,event,' + JSON.stringify(String(source || '')).replace(/</g, '\\u003c') + ')'; }
+  function rewriteEventAttribute(source) { return 'return ' + ZP_EVENT_CALL_HEAD + 'this,event,' + JSON.stringify(String(source || '')).replace(/</g, '\\u003c') + ')'; }
   function syncBaseElement(node) {
     if (!node) return;
     if (node.localName === 'base' && Native.getAttribute.call(node, 'href')) updateVirtualBase(Native.getAttribute.call(node, 'href'));

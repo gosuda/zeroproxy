@@ -2564,6 +2564,66 @@ function createTargetServer(requests, pendingResponses) {
       </script></body>`);
       return;
     }
+    if (url.pathname === '/xempty.js') {
+      res.writeHead(200, { 'Content-Type': 'text/javascript', 'Cache-Control': 'no-store' });
+      res.end('');
+      return;
+    }
+    if (url.pathname === '/xempty') {
+      // An external script whose body is empty (an ad partner's user sync answers so): natively it runs as nothing.
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(`<!doctype html><title>empty</title><script>window.__errs = []; addEventListener('error', function (e) { __errs.push(String(e.message)); });</script>
+        <script src="/xempty.js"></script><script>window.__xempty = { errors: __errs, after: 1 };</script>`);
+      return;
+    }
+    if (url.pathname === '/xhelper') {
+      // The helpers rewritten code calls by name are handed the real global object (`__zp_get(globalThis, 'location')`,
+      // `__zp_this(this)`; an `on*` attribute's executor gets the handler's `this`, for `<body onmessage>` the window).
+      // Whoever answers for the name gets it. Every function an attack plants records whether it was handed a window
+      // other than the page's own. Each attack is its own script: one the rewriter refuses dies whole.
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(`<!doctype html><title>helpers</title><body><button id="xb">b</button><script>
+        window.__xh = { leaks: [], ran: [] };
+        window.__xhGrab = function (name) {
+          var foreign = function (a) { return a !== null && typeof a === 'object' && a !== window && Object.prototype.toString.call(a) === '[object Window]'; };
+          return function () {
+            for (var i = 0; i < arguments.length; i++) if (foreign(arguments[i])) window.__xh.leaks.push(name);
+            if (foreign(this)) window.__xh.leaks.push(name + ':this');
+            return arguments[0];
+          };
+        };
+      </script>
+      <script>__xh.ran.push('localShadow'); (function () { var __zp_get = __xhGrab('localShadow'); return location.href; })();</script>
+      <script>__xh.ran.push('paramShadow'); (function (__zp_this) { return function () { return this; }; })(__xhGrab('paramShadow'))();</script>
+      <script>__xh.ran.push('globalWrite'); __zp_get = __xhGrab('globalWrite');</script>
+      <script>__xh.ran.push('executorWrite'); __ZP_EXEC_EVENT = __xhGrab('executorWrite');</script>
+      <script>
+        __xh.ran.push('facade');
+        try { window.__zp_get = __xhGrab('facadeSet'); } catch (e) {}
+        try { window['__zp_' + 'call'] = __xhGrab('facadeSetComputed'); } catch (e) {}
+        try { Object.defineProperty(window, '__zp_set', { value: __xhGrab('facadeDefine') }); } catch (e) {}
+        try { Reflect.set(window, '__ZP_EXEC_EVENT', __xhGrab('facadeReflect')); } catch (e) {}
+        try { delete window.__zp_this; } catch (e) {}
+        // dynamic code names them too
+        try { new Function('__zp_get', 'return location')(__xhGrab('functionParam')); __xh.functionParam = 'compiled'; } catch (e) { __xh.functionParam = e.name; }
+        try { (0, eval)('var __zp_call = __xhGrab("evalBinding")'); __xh.evalBinding = 'ran'; } catch (e) { __xh.evalBinding = e.name; }
+        __xh.withRead = (function () {
+          with ({ __zp_get: __xhGrab('with:get'), __zp_with_get: __xhGrab('with:withGet'), __zp_this: __xhGrab('with:this'), __zp_call: __xhGrab('with:call') }) {
+            return [location.href, (function () { return this; })() === window, document.title];
+          }
+        })();
+        document.__ZP_EXEC_EVENT = __xhGrab('documentExpando');
+        document.body.__ZP_EXEC_EVENT = __xhGrab('bodyExpando');
+        var b = document.getElementById('xb');
+        b.__ZP_EXEC_EVENT = __xhGrab('buttonExpando');
+        b.setAttribute('onclick', 'window.__xh.click = this.id');
+        document.body.setAttribute('onmessage', 'window.__xh.message = [this === window, event.data]');
+        b.click();
+        postMessage('m', '*');
+        setTimeout(function () { __xh.after = location.href; window.__xhDone = __xh; }, 300);
+      </script></body>`);
+      return;
+    }
     if (url.pathname.startsWith('/xfp')) {
       // What a frame reads of its feature policy and its permissions: top, a same-origin frame, a cross-origin frame without
       // and with `allow`. A cross-origin frame is refused notifications at once (asked only there: elsewhere it prompts).
@@ -7717,6 +7777,67 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     const cross = direct.find(o => o.where === '/xfp-cross');
     assert.equal(cross.notif, 'denied');
     assert.notEqual(cross.allowed, direct.find(o => o.where === '/xfp').allowed, 'natively a cross-origin frame is allowed fewer features');
+    assert.deepEqual(proxied, direct);
+  });
+
+  // The helpers rewritten code calls by name receive the real global object, so whoever answers for a name received it:
+  // a page binding (`var __zp_get = f` in a function, a parameter), a bare or window write (the helpers were writable;
+  // `Reflect.set(window, '__ZP_EXEC_EVENT', f)` got `<body onmessage>`'s `this`, the window), the page's own `with`
+  // object (`with({__zp_get: f}) location`). The rewriter refuses a script that binds or writes a runtime name; the
+  // window does not take a write of one; a `with` body binds the helpers before its object can answer; the attribute
+  // reads its executor off the global object with nothing named, so expandos on the element or document cannot either.
+  await t.test('the page cannot answer for the helpers rewritten code calls with the real window (escape)', async () => {
+    const targetBase = `http://${targetHost}:${targetPort}`;
+    const collect = async p => {
+      try {
+        await p.waitForFunction(() => window.__xhDone, { timeout: 60000, polling: 100 });
+        return await p.evaluate(() => window.__xhDone);
+      } finally {
+        await p.close();
+      }
+    };
+    const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    let direct;
+    try {
+      const p = await directBrowser.newPage();
+      await p.goto(`${targetBase}/xhelper`, { waitUntil: 'domcontentloaded' });
+      direct = await collect(p);
+    } finally {
+      await directBrowser.close();
+    }
+    const proxied = await collect(await openProxiedPage(`${targetBase}/xhelper`));
+    fs.writeFileSync(path.join(artifacts, 'helper-escape.json'), JSON.stringify({ direct, proxied }, null, 2));
+    assert.deepEqual(direct.ran, ['localShadow', 'paramShadow', 'globalWrite', 'executorWrite', 'facade'], 'every attack is valid code natively');
+    assert.deepEqual(proxied.leaks, [], 'a page function was handed the real window');
+    assert.deepEqual(proxied.ran, ['facade'], 'a script binding or writing a runtime name ran');
+    assert.deepEqual([direct.functionParam, direct.evalBinding], ['compiled', 'ran']);
+    assert.deepEqual([proxied.functionParam, proxied.evalBinding], ['SyntaxError', 'SyntaxError'], 'dynamic code bound a runtime name');
+    for (const k of ['withRead', 'click', 'message', 'after']) assert.deepEqual(proxied[k], direct[k], k);
+  });
+
+  // An empty script body rewrites to an empty script; the SW read that as a failed rewrite and served its policy stub,
+  // which throws (NYT: two uncaught NotSupportedErrors from an ad partner's empty user-sync script).
+  await t.test('an empty external script runs as nothing (matches native)', async () => {
+    const targetBase = `http://${targetHost}:${targetPort}`;
+    const collect = async p => {
+      try {
+        await p.waitForFunction(() => window.__xempty, { timeout: 30000, polling: 100 });
+        return await p.evaluate(() => window.__xempty);
+      } finally {
+        await p.close();
+      }
+    };
+    const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    let direct;
+    try {
+      const p = await directBrowser.newPage();
+      await p.goto(`${targetBase}/xempty`, { waitUntil: 'domcontentloaded' });
+      direct = await collect(p);
+    } finally {
+      await directBrowser.close();
+    }
+    const proxied = await collect(await openProxiedPage(`${targetBase}/xempty`));
+    assert.deepEqual(direct, { errors: [], after: 1 });
     assert.deepEqual(proxied, direct);
   });
 

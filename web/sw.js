@@ -2509,6 +2509,10 @@ async function rewriteScriptResponse(resp, opt) {
         rewriteStats.rewriteLatencyMs += performance.now() - rewriteT0;
         if (typeof rustCode === 'string' && rustCode.length > 0) {
           code = rustCode;
+        } else if (rustCode === '' && source === '') {
+          // An empty script runs as nothing natively. Read as a failure, it got the policy stub below, which throws
+          // (an ad partner's user-sync script answered with an empty body on NYT: two uncaught NotSupportedErrors).
+          code = '\n';
         }
       }
     } catch (rustErr) { /* swallow; legacy fallback below */ }

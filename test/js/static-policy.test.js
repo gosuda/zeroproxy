@@ -332,9 +332,11 @@ test('compileNested: new Function 의 파라미터/arguments 가 with 스코프�
     return rt.slice(start, next < 0 ? undefined : next);
   };
   const compileNested = new Function(
-    'zpTrace', 'rewriteDynamicFunctionBody', 'Native',
+    'zpTrace', 'rewriteDynamicFunctionBody', 'Native', 'ZP_WITH_PROLOGUE',
     grab('functionPrefix') + '\n' + grab('compileNested') + '\nreturn compileNested;'
-  )(() => {}, (params, body) => String(body), { FunctionCtor: Function });
+  )(() => {}, (params, body) => String(body), { FunctionCtor: Function },
+    new Function(['  const ZP_WITH_HELPERS = [', '  const ZP_WITH_PROLOGUE = ']
+      .map(start => rt.slice(rt.indexOf(start), rt.indexOf(';\n', rt.indexOf(start)) + 2)).join('') + 'return ZP_WITH_PROLOGUE;')());
 
   // `withScope` 의 has 트랩은 모든 이름에 true 다. 파라미터를 with **바깥**에
   // 선언하면 그 트랩이 파라미터까지 가려서 undefined 가 된다 — naver 메인의
@@ -1227,7 +1229,11 @@ test('CSS: 우리가 바꿔 쓴 값은 모든 읽기 경로에서 되돌린다',
 //
 // 넘어가는 계기는 거의 항상 새 전이 의존성이다. 그때는 그 호출을 SW 로
 // 옮기거나 분할 로드할지 다시 판단한다.
-test('E3 크기 가드: zp_page_bundle_bg.wasm 은 500 KB 이하', (t) => {
+//
+// 2026-10-13: 500 → 540 KB. 새 의존성이 아니라 페이지에서 돌아야 하는 리라이터 자체가 컸다(eval 은 페이지에서
+// 리라이트된다): 런타임 이름을 묶거나 쓰는 스크립트 거부(탈출), with 본문의 헬퍼 바인딩, 계산된 멤버의 인라인 가드
+// (Turnstile VM 의 헬퍼 시간 3.2 s → 1 s). 거부 스캔 하나가 8.7 KB 다(OXC 워커가 방문자마다 새로 단형화된다).
+test('E3 크기 가드: zp_page_bundle_bg.wasm 은 540 KB 이하', (t) => {
   const wasmPath = 'dist/web/__zp/zp_page_bundle_bg.wasm';
   if (!fs.existsSync(wasmPath)) {
     // 조용히 통과시키지 않는다 — 안 잰 것과 통과한 것은 다르다.
@@ -1235,8 +1241,8 @@ test('E3 크기 가드: zp_page_bundle_bg.wasm 은 500 KB 이하', (t) => {
     return;
   }
   const size = fs.statSync(wasmPath).size;
-  assert.ok(size <= 500 * 1024,
-    'zp_page_bundle_bg.wasm = ' + size + ' bytes (' + (size / 1024).toFixed(1) + ' KB) > 500 KB');
+  assert.ok(size <= 540 * 1024,
+    'zp_page_bundle_bg.wasm = ' + size + ' bytes (' + (size / 1024).toFixed(1) + ' KB) > 540 KB');
 });
 
 // ── 훅의 소스는 페이지에 보이면 안 된다 (2026-09-10) ────────────────────
@@ -1350,7 +1356,12 @@ test('리라이트 흔적 되돌리기는 뜻을 바꾸지 않는다', () => {
   const from = rt.indexOf('  function unrewriteSourceText(src) {');
   assert.ok(from > 0, 'unrewriteSourceText 가 없다 — 페이지가 자기 소스에서 우리를 읽는다');
   const src = rt.slice(from, rt.indexOf('\n  }', from) + 4);
-  const unrewrite = new Function(src + '\nreturn unrewriteSourceText;')();
+  // The 00-head.js constants it matches against.
+  const head = ['  const ZP_WITH_HELPERS = [', '  const ZP_WITH_PROLOGUE = ', '  const ZP_EVENT_CALL_HEAD = ']
+    .map(start => { const at = rt.indexOf(start); assert.ok(at > 0, start.trim() + ' 가 없다'); return rt.slice(at, rt.indexOf(';\n', at) + 2); })
+    .join('');
+  const unrewrite = new Function(head + src + '\nreturn unrewriteSourceText;')();
+  const prologue = new Function(head + 'return ZP_WITH_PROLOGUE;')();
 
   // 리라이터가 내는 헬퍼를 그대로 정의해 두고, 되돌리기 전후의 **값**을 비교한다.
   const helpers = () => ({
@@ -1415,6 +1426,29 @@ test('리라이트 흔적 되돌리기는 뜻을 바꾸지 않는다', () => {
     unrewrite('function onclick(event) { return __ZP_EXEC_EVENT(this,event,"return tCR(1);") }'),
     'function onclick(event) { return tCR(1); }',
     '인라인 핸들러 래퍼가 그대로 보인다');
+  // The executor is read off the global object with nothing named (the page answers for names in a handler's scope).
+  assert.equal(
+    unrewrite('function onclick(event) { return (function(){return this})().__ZP_EXEC_EVENT(this,event,"return tCR(1);") }'),
+    'function onclick(event) { return tCR(1); }',
+    '이름 없는 핸들러 래퍼가 그대로 보인다');
+  // The helper bindings a `with` body starts with are ours: gone, the body stays.
+  assert.equal(
+    unrewrite('function f(o){ with(o){' + prologue + ' g(__zp_get(globalThis,"window")) } }'),
+    'function f(o){ with(o){ g(window) } }',
+    'with 본문의 헬퍼 바인딩이 보인다');
+  // Inline guards (zp-rewriter guard_claim) and the temps their function declares at its end.
+  assert.equal(
+    unrewrite('function f(a,b,i){return (__zp_t_4=(0,a),__zp_t_5=(0,(__zp_t_1=(0,b),__zp_t_2=(0,i),__zp_fast(__zp_t_1,__zp_t_2)?__zp_t_1[__zp_t_2]:__zp_get(__zp_t_1,__zp_t_2))),__zp_fast(__zp_t_4,__zp_t_5)?__zp_t_4[__zp_t_5]:__zp_get(__zp_t_4,__zp_t_5))\n;var __zp_t_1,__zp_t_2,__zp_t_3,__zp_t_4,__zp_t_5,__zp_t_6;}'),
+    'function f(a,b,i){return a[b[i]]}',
+    '가드된 읽기가 보인다');
+  assert.equal(
+    unrewrite('function f(a,i,v){0,(__zp_t_1=(0,a),__zp_t_2=(0,i),__zp_t_3=(0,v+1),__zp_fastset(__zp_t_1,__zp_t_2)?__zp_t_1[__zp_t_2]=__zp_t_3:__zp_set(__zp_t_1,__zp_t_2,__zp_t_3))\n;var __zp_t_1,__zp_t_2,__zp_t_3;}'),
+    'function f(a,i,v){0,a[i]=v+1}',
+    '가드된 쓰기가 보인다');
+  assert.equal(
+    unrewrite('function f(o,k){return (__zp_t_1=(0,o),__zp_t_2=(0,k),__zp_fast(__zp_t_1,__zp_t_2)?__zp_t_1[__zp_t_2](1, "x,y"):__zp_call(__zp_t_1,__zp_t_2,[1, "x,y"]))\n;var __zp_t_1,__zp_t_2,__zp_t_3;}'),
+    'function f(o,k){return o[k](1, "x,y")}',
+    '가드된 호출이 보인다');
   // ★루프 캡. for(;;) 와 while(true) 가 둘 다 계수기 붙은 for 로 바뀌므로
   // 원본을 구분할 수 없다 — for(;;) 로 되돌린다. 뜻은 같고 표식은 사라진다.
   const lc = [
@@ -1954,4 +1988,38 @@ test('every helper the rewriter emits is defined in page and worker realms', () 
     if (!child.includes(`define(w, '${n}'`)) missing.push(`child:${n}`);
   }
   assert.deepEqual(missing, [], `rewriter emits helpers a realm does not define: ${missing.join(', ')}`);
+});
+
+// ── The helpers rewritten code names: one list in three places (2026-10-13) ──
+//
+// Every `with` the runtime wraps code in, and every page `with` body the rewriter emits, starts by binding the
+// helpers as block constants: inside `with(o)` a free name is looked up in `o` first, on every evaluation — 15 M times
+// through a Proxy trap in one Turnstile VM (5 s), and through whatever a page makes of `o` in its own `with`
+// (`with({__zp_get: f}) location` handed `f` the real global object). The rewriter refuses a page binding or write
+// of these names. A helper missing from a list is a name left to the with object again.
+test('the runtime helper list is the same in the rewriter, the page prelude and the worker prelude', () => {
+  const rs = fs.readFileSync('crates/zp-rewriter/src/lib.rs', 'utf8');
+  const rsList = /pub const RUNTIME_HELPERS: &\[&str\] = &\[([^\]]*)\];/.exec(rs);
+  assert.ok(rsList, 'RUNTIME_HELPERS 가 없다');
+  const rust = [...rsList[1].matchAll(/"([^"]+)"/g)].map(m => m[1]);
+  const listIn = (file) => {
+    const text = fs.readFileSync('web/' + file, 'utf8');
+    const m = /const ZP_WITH_HELPERS = \[([^\]]*)\];/.exec(text);
+    assert.ok(m, file + ' 에 ZP_WITH_HELPERS 가 없다');
+    return [...m[1].matchAll(/'([^']+)'/g)].map(x => x[1]);
+  };
+  assert.deepEqual(listIn('membrane/00-head.js'), rust, 'page prelude list differs from RUNTIME_HELPERS');
+  assert.deepEqual(listIn('worker-prelude.js'), rust, 'worker prelude list differs from RUNTIME_HELPERS');
+  // Every helper the rewriter emits as a call is on the list (comments aside).
+  const code = rs.split('\n').filter(l => !/^\s*\/\//.test(l)).join('\n').split('#[cfg(test)]')[0];
+  const emitted = new Set([...code.matchAll(/(__zp_[A-Za-z_]+)[(.]/g)].map(m => m[1]));
+  for (const name of emitted) assert.ok(rust.includes(name), name + ' is emitted but not in RUNTIME_HELPERS');
+  // Every `with` the runtime builds code into binds them.
+  const rt = preludeSource();
+  const worker = fs.readFileSync('web/worker-prelude.js', 'utf8');
+  for (const [where, text] of [['page prelude', rt], ['worker prelude', worker]]) {
+    for (const m of text.matchAll(/'with\((__zp_[a-z_]+)\)\{(?:\\n)?'( \+ ([A-Z_]+))?/g)) {
+      assert.equal(m[3], 'ZP_WITH_PROLOGUE', where + ': with(' + m[1] + ') does not start with the helper bindings');
+    }
+  }
 });

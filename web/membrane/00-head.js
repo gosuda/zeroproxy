@@ -39,6 +39,27 @@
   // instead. `enumerable: false` does NOT help here: getOwnPropertyNames and
   // Reflect.ownKeys report non-enumerable own properties by spec.
   const ZP_HIDDEN_RE = /^(?:__zp_|__ZP_|ZPBundle$|ZPPageBundleWBG$|ZeroProxyRT$|ZP$)/;
+  // The runtime's names on the global object: the page's window does not take a write of one (07-membrane.js
+  // scopeTraps) — rewritten calls and event attributes hand our helpers the real global object, so whoever replaced one
+  // would receive it. Same rule as the rewriter's refusal of page bindings and bare writes (zp-rewriter
+  // is_reserved_name): every `__zp_*` / `__ZP_*` name but the temps rewritten code declares itself (an eval's `var`
+  // stores them through the window like any other name) and our wrappers' own parameters.
+  const ZP_RESERVED_NAME_RE = /^(?:__ZP_|__zp_(?!(?:(?:w|lc|lbl|vdcl|dp|sk|t)_\d+|bad|oc|dynamic__|dyn__|inner__|scope|args|self|env|src)$))/;
+  // The helpers rewritten code calls by name — zp-rewriter `RUNTIME_HELPERS`, same order (static-policy compares). Every
+  // `with` we run code in starts by binding them as block constants: inside `with(o)` a free name is looked up in `o`
+  // first, at run time, on every evaluation — through a Proxy trap for our with objects (15 M lookups a second VM, 5 s
+  // measured), and through whatever the page made of `o` for its own. The block resolves first, statically. The value
+  // comes off the global object with nothing named: a plainly called sloppy function's `this`.
+  const ZP_WITH_HELPERS = ['__zp_get', '__zp_set', '__zp_call', '__zp_this', '__zp_assign', '__zp_update', '__zp_delete',
+    '__zp_eval', '__zp_has', '__zp_oget', '__zp_ocall', '__zp_ocallv', '__zp_ochain', '__zp_odelete', '__zp_okeys',
+    '__zp_rget', '__zp_rset', '__zp_ownKeys', '__zp_getOwnPropertyDescriptor', '__zp_getOwnPropertyDescriptors',
+    '__zp_getOwnPropertyNames', '__zp_module_url', '__zp_with_get', '__zp_with_set', '__zp_with_assign',
+    '__zp_with_update', '__zp_with_delete', '__zp_with_d', '__zp_lex_decl', '__zp_lex_bind', '__zp_fast', '__zp_fastset'];
+  const ZP_WITH_PROLOGUE = 'const{' + ZP_WITH_HELPERS.join(',') + '}=(function(){return this})();';
+  // An `on*` attribute's body runs as `<this head>"source")`, and `<body onload>`'s `this` is the real window. The
+  // executor is read off the global object with nothing named: the browser compiles an element's handler with the
+  // element, its form and the document in front of the global scope, where any expando would answer for a name.
+  const ZP_EVENT_CALL_HEAD = '(function(){return this})().__ZP_EXEC_EVENT(';
   // The page's own view of `Error.prepareStackTrace` (the stack sanitizer, 06-install.js): V8 reads the sanitizer through
   // the real accessor, page code reads this through the routed member helpers (07-membrane.js) and the key lists below.
   // Natively the property is not there until the page assigns it. Declared up here: the key-list patches run from now on.

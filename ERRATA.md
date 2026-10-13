@@ -816,6 +816,74 @@ claimed:
     whose renderer is slowed 8× fails Glassdoor's interactive check exactly as the proxy does, and passes at 4×
     (`gd-click.js` `THROTTLE=`); through the proxy the renderer was busy 16.8 of 18.9 s against 3.1 of 14.7 s natively.
     See the Residuals row. — e2e suite (the escape matrix exercises the full path); `.lean-ctx/gd-profile.js`.
+86. **The page could answer for the helpers the rewritten code calls — and they are handed the real window.** Rewritten
+    code calls the runtime by name (`__zp_get(globalThis, "location")`, `__zp_this(this)`), and an `on*` attribute's
+    body called `__ZP_EXEC_EVENT(this, event, …)`; those arguments are the real global object. Whoever answered for
+    the name got it: a page binding (`function f(){ var __zp_get = o => o; return location }` returned the real
+    window; a parameter, a `catch` binding, an import), a bare or window write (the helpers were writable:
+    `__zp_get = f`, `window.__zp_get = f`, `Object.defineProperty(window, …)`), the page's own `with` object
+    (`with({__zp_get: f}) location` — inside `with(o)` every free name is looked up in `o` first); a write of the
+    attribute executor (`Reflect.set(window, '__ZP_EXEC_EVENT', f)`) received `<body onmessage>`'s `this`, the window
+    (a window-reflecting handler's scope is the global one; an element's own handler sees expandos on it, its form and its
+    document first, but hands over only the element). Now: the rewriter
+    replaces a script that binds or writes a runtime name (`__zp_*`/`__ZP_*` but its own temps and the runtime's wrapper
+    parameters) with one that throws a SyntaxError — not a rewrite error, which a non-strict caller answers by running
+    the source unrewritten; the window does not take a write, definition or deletion of one; a `with` body starts by
+    binding the helpers as block constants read off the global object with nothing named
+    (`const{…}=(function(){return this})();` — a block inside the `with` resolves before its object); the attribute
+    reads its executor the same way, so no expando answers for it either (defence in depth: measured, the two other
+    paths were the ones that leaked). Found while making the `with` lookups cheap (item 87). Found with it: a srcless
+    child frame never defined `__zp_eval`, so every direct `eval` there threw ReferenceError (now global code of that
+    realm, see Residuals), and the membrane's fast path called the page-writable `Array.isArray` (now captured). — e2e
+    `the page cannot answer for the helpers rewritten code calls with the real window (escape)` (`/xhelper`: local and
+    parameter shadowing, bare and window writes, `with`, attribute expandos, `new Function`/`eval` bindings; no window
+    handed out, refused scripts do not run, `with` reads, handlers and `location` equal to native; with all four
+    defences off it leaks through the local and parameter bindings, the `with` object and the window write); matrix
+    `a_page_binding_or_write_of_a_helper_name_is_refused`, `with_body_binds_the_helpers_before_the_page_object_can_answer`;
+    static-policy (one helper list in the rewriter and both preludes, every runtime `with` binds them).
+87. **Every name in an inline script or dynamic code was a run-time search through a Proxy.** Inline scripts run inside
+    `with(__zp_lex_scope)` (the cross-script `let`/`const` registry), `new Function` bodies and evals inside
+    `with(__zp_scope)`: V8 cannot resolve any free name in there statically, so each read of `__zp_get` was a runtime
+    lookup that called the with object's `has` trap (and `get`, for the scope). Turnstile's VM is an inline script:
+    15 M helper references in 15 s, 5 s of them in the lookup (measured in Node: a loop calling a helper 15 M times
+    took 5.1 s through `with(Proxy)`, 20 ms with the helper bound in the block). Every runtime `with` now starts with
+    the item-86 helper bindings; rewritten code that is rewritten once more (a child frame booted into a reused
+    `about:blank` window compiles its wrappers through the parent's facade) keeps them as they are. The widget's own
+    functions went from 7.1 s to 1.9 s of a 15 s profile. — static-policy (every runtime `with` binds them), matrix
+    (a second rewrite keeps one set), `.lean-ctx/gd-profile2.js`.
+88. **Every computed member access went through one helper call.** `o[k]`, `o[k] = v` and `o[k](…)` became
+    `__zp_get`/`__zp_set`/`__zp_call` — one access site in the runtime for every access in the page, so V8's inline
+    cache there was megamorphic, and a call allocated its argument array (3.2 s of 15 in the widget after item 87).
+    For an array, a string, a typed array or a function — never a window, document, Location or facade — the helpers
+    already answer with the native access (item 85). A site in a function now keeps that access behind the same test
+    (`__zp_fast` / `__zp_fastset`), its operands in temps so each is evaluated once and in native order (a method read
+    before its arguments run, as natively — the helper read it after): `(t1=(0,o),t2=(0,k),__zp_fast(t1,t2)?t1[t2]:
+    __zp_get(t1,t2))`. Temps are `var`s declared at the end of the function (nothing the page wrote moves), in groups:
+    a site's group is above every group inside its operands, siblings share one. Not at the top level (a `var` there
+    is a window property), in an expression-bodied arrow, a default value, a class field, or inside a page `with`;
+    `(0,x)` keeps a function or class assigned there from taking the temp's name; a guard that starts a statement gets
+    `0,` so it cannot continue the line before. Measured on a VM-shaped loop: 720 ms with the helpers, 50 ms guarded,
+    22 ms native; the widget's helpers 3.2 s → about 1 s. Three bugs on the way, each caught after the unit tests passed (two by real pages, one by the e2e): a temp
+    declaration inserted at a function's last brace was taken into the operand of a site ending there (Glassdoor's
+    challenge script stopped parsing), and a statement-start `0,` on a guard nested inside a method-call marker became
+    an extra argument (`e.ports[0].postMessage(x)` in a SharedWorker), and that `0,` glued to a minified `else(…)` made
+    an identifier `else0` (BBC: some 300 ReferenceErrors a load — the older `_STMT` forms shared the hole; every `0,`
+    now takes a space after a word character). — matrix `computed_members_keep_their_native_access_behind_a_guard`,
+    `a_guard_needs_a_function_var_outside_any_page_with`, `a_guard_that_starts_a_statement_does_not_continue_the_line_before`,
+    `the_dynamic_function_unwrapper_still_finds_the_body`; rewriter.test `inline-guarded members behave exactly as the
+    native ones` (results, evaluation trace, names, `this`, generators, recursion, ASI, strict writes against native);
+    the 705 cached real scripts of the 13-site corpus (`.lean-ctx/corpus2`, 195 k guarded sites) rewrite to code V8
+    parses (the check of `scripts/rewrite-corpus-check.cjs`).
+89. **Dynamic code was rewritten again on every evaluation.** Turnstile evaluates `this` dozens of times and times
+    `eval(<1,337,331 spaces> + "0, /.*honk.*/, " + Date.now())` again and again — natively a whitespace scan of about a
+    millisecond, here 20-30 ms each of copying it into the rewriter and back (WASM and its glue: 1.4 s of 15). The page
+    rewriter now caches by source (kind and URL checked), leaves the whitespace around the code out of the rewrite and
+    puts it back around the output (every position stays), and compiles an expression eval once per rewritten source.
+    WASM and glue: 1.4 s → 0.4 s. — `.lean-ctx/gd-profile2.js`; prelude units.
+90. **An empty external script threw.** Its body rewrites to an empty script, which the SW read as a failed rewrite
+    and answered with its policy stub — `throw new DOMException('Blocked by ZeroProxy rewrite policy', …)`. Natively
+    an empty script runs as nothing (NYT: two uncaught `NotSupportedError`s from an ad partner's user-sync script that
+    answers with an empty body). Found by the site sweep. — e2e `an empty external script runs as nothing (matches native)`.
 
 ### Residuals (documented, not fixed)
 
@@ -824,6 +892,9 @@ claimed:
 | A srcdoc child reports the parent's virtual URL, not `about:srcdoc` | Needs the document URL split from the origin identity that drives storage, cookies and `postMessage` (100+ uses of `virtualURL`). | surface `framesByName`, iframe `srcdocLocation` |
 | V8 names the rewritten callee in some messages (`__zp_get(...).item is not a function`) | V8 renders the call-site AST; matching it needs per-call emission changes. Only buggy call sites surface it. | surface `framesItem` |
 | Direct `eval` inside `with(o)` does not see `o` | The eval descriptor carries lexical bindings, not with-objects. Rare (legacy templating uses `new Function`). | surface `withEvalScope` |
+| A direct `eval` in a srcless child frame (a written or `about:blank` frame, no prelude of its own) runs as that frame's global code: the caller's locals are not in view | Item 86 gave such frames a `__zp_eval` at all (every direct eval there threw ReferenceError); the caller-scope machinery lives in the parent realm's runtime. Rare: ad frames run written scripts, not direct evals of locals. | `web/membrane/20-containment.js` `childDirectEval` |
+| A function a guarded site assigns is named after the temp in V8's own inferred names (profiles, stack frames before sanitizing); `.name` is native (`""`) | V8 infers a debug name from the nearest assignment; the stack sanitizer already turns `__zp_*` frame names into `<anonymous>`, as for the helper form before. | rewriter.test `inline-guarded members…` (`.name`) |
+| The page WASM is 527 KB (budget raised 500 → 540 KB) | The rewriter itself grew: the reserved-name scan (8.7 KB — OXC's walker is monomorphized per visitor), the `with` bindings, the guards. It runs in the page because evals are rewritten there. | static-policy `E3 크기 가드` |
 | A `var` from a script rejected for redeclaration survives as `undefined` | Eval declaration instantiation runs before the emitted conflict check; splitting the check trades this for registrations surviving a syntax error. | surface `ownKeysLeak` |
 | An uninitialized-lexical (TDZ) `ReferenceError` is thrown from the prelude, so `ErrorEvent.filename` is the prelude URL | Moving the throw into emitted code means emitting a check per read. | [trap 에러-filename-누출](.ai/trap-notebook/rewriter.md#에러-filename-누출) |
 | A page's own `eval`/`new Function` code prints as a script frame (`at url:L:C`), not as native eval code (`at eval (eval at f (url:L:C), <anonymous>:1:1)`) | The proxy runs dynamic code with a `sourceURL` naming the virtual document; reproducing V8's eval-origin text means knowing the caller's position at compile time. Inline scripts, which are far more common, are equal to native since item 70. | e2e `/xstack` (inline), `/xframe-env` (external) |
@@ -851,7 +922,7 @@ claimed:
 | A cloned frame, read before it is inserted, shows the rewritten `sandbox` and an absolute `src` | The page's text lives in element-keyed maps that `cloneNode` does not carry; insertion restores the sandbox, not the `src` text. | — |
 | A cookie written by `document.cookie` may miss a navigation or an `<img>` request made in the same task | Runtime `fetch` and asynchronous XHR wait for the write's acknowledgement (item 40) and a synchronous XHR carries the write (item 44); these cannot wait. | — |
 | `Reflect.getOwnPropertyDescriptor(null, k)` throws `Cannot convert undefined or null to object` (the `Object.` message; native: `Reflect.getOwnPropertyDescriptor called on non-object`) | The rewriter sends `Object.getOwnPropertyDescriptor` and `Reflect.getOwnPropertyDescriptor` to one helper. Always a `TypeError`; only the text differs. | — |
-| Glassdoor's Cloudflare challenge does not finish through the proxy | Two verdicts, measured 2026-10-13. **The first is the transport's:** Cloudflare serves the challenge page with `cType: 'interactive'` (a checkbox) to the proxy and `'managed'` (passes by itself in ~4 s) to a default Chrome — and a native Chrome with QUIC off (`--disable-quic`) gets `'interactive'` too: natively Chrome reaches Glassdoor over HTTP/3, the proxy over TCP/HTTP/2 (row below). Client hints (item 81) did not change it. **The second is the click's:** a native HTTP/2 Chrome passes ~2 s after a trusted click on the checkbox — also with its renderer slowed 4× — but **fails with it slowed 8×**, exactly as the proxy fails: the spinner shows, then the widget restarts with a new Ray ID. Through the proxy the click reaches the widget (trusted events at the checkbox, measured in the frame) and the widget frame now reads as natively in everything the probes cover (items 81–84: the IPv6 probe fails as a network error, `Notification`, the feature policy, the permission states); what remains is speed — the renderer is busy 16.8 of 18.9 s (natively 3.1 of 14.7 s), almost all of it the rewritten VM: every computed member access and method call goes through one helper (`__zp_get`/`__zp_call`), which defeats V8's inline caches and allocates an argument array per call (Turnstile decodes its strings character by character that way). Item 85 took the helper's own cost from 2.0 s to 0.75 s; the rest needs the rewriter to keep native accesses in place behind an inline guard. Also still different, not shown to matter: Trusted Types and CSP `sandbox` not applied (rows below), the blob URL origin, `history.length` (the launcher's entry), the farbled canvas values. | e2e `/xtt`, `/xwenv`, `/xch`, `/xfp`; `.lean-ctx/gd-click.js` (`CHROME_ARGS=--disable-quic`, `THROTTLE=`), `gd-profile.js`, `gd-profile-native.js`, `gd-click-diag.js`, `gd-shadow.js`, `env-diff.js` |
+| Glassdoor's Cloudflare challenge does not finish through the proxy | Two verdicts, measured 2026-10-13. **The first is the transport's:** Cloudflare serves the challenge page with `cType: 'interactive'` (a checkbox) to the proxy and `'managed'` (passes by itself in ~4 s) to a default Chrome — and a native Chrome with QUIC off (`--disable-quic`) gets `'interactive'` too: natively Chrome reaches Glassdoor over HTTP/3, the proxy over TCP/HTTP/2 (row below). Client hints (item 81) did not change it. **The second is the click's:** a native HTTP/2 Chrome passes ~2 s after a trusted click on the checkbox — also with its renderer slowed 4× — but **fails with it slowed 8×**, exactly as the proxy fails: the spinner shows, then the widget restarts with a new Ray ID. Through the proxy the click reaches the widget (trusted events at the checkbox, measured in the frame) and the widget frame now reads as natively in everything the probes cover (items 81–84: the IPv6 probe fails as a network error, `Notification`, the feature policy, the permission states); speed was the next difference — the renderer was busy 16.8 of 18.9 s (natively 3.1 of 14.7 s), almost all of it the rewritten VM. Items 85–89 took it to about 6.9 of 15 s (every name of an inline script was a Proxy-trapped lookup; computed members now keep their native access behind an inline guard; dynamic code is not rewritten again), and the 6 s after the click to 2.1 s busy of a 2.7 s profile against 1.6 of 3.4 s natively — well inside what a native Chrome slowed 4× passes with. **It still fails the same way**, so speed alone no longer explains it; the next suspects are the remaining differences: Trusted Types and CSP `sandbox` not applied (rows below), the blob URL origin, `history.length` (the launcher's entry), the farbled canvas values. | e2e `/xtt`, `/xwenv`, `/xch`, `/xfp`; `.lean-ctx/gd-click.js` (`CHROME_ARGS=--disable-quic`, `THROTTLE=`), `gd-click-prof.js` (the 6 s after the click, both sides), `gd-profile2.js`, `gd-profile-native.js`, `gd-click-diag.js`, `gd-shadow.js`, `env-diff.js` |
 | HTTP/3: a default Chrome reaches Cloudflare sites over QUIC, the proxy over TCP + TLS + HTTP/2 | The transport has no QUIC (a UDP path through the relay, a QUIC stack in the kernel, Chrome's QUIC fingerprint). Cloudflare scores it: on Glassdoor a native Chrome with QUIC off gets the interactive challenge the proxy gets (measured 2026-10-13). The proxy reports `nextHopProtocol` `h2` consistently. | `.lean-ctx/chl-req.js` (`CHROME_ARGS=--disable-quic`) |
 | `iframe.featurePolicy.getAllowlistForFeature` (an embedder reading a child's container policy) names the embedder's origin where natively it names the frame's | The allowlist mapping (item 84) puts the reading document's virtual origin in place of the proxy origin; for a container policy that should be the frame's `src` origin. `allowedFeatures`/`allowsFeature` of it are right. Rarely read. | — |
 | A sub-request's header order outside the measured name sets is approximate | Blink keeps a request's headers in a hash table, so the order changes with the set of names (Cloudflare's `cf-chl-ra` swaps `sec-ch-ua-model` and `-mobile`). Three sets are exact (no high-entropy hints, Cloudflare's nine, all of them); a page's own header goes where `cf-chl` did. Exact for every set means emulating Blink's string hash and table. | e2e `/xch` |
@@ -1004,7 +1075,8 @@ Dangerous names inside `with(o)` consult `o` first (innermost-first chain);
 the native SyntaxError. Pins: matrix `with_body_dangerous_names_chain_innermost_first`;
 surface `withShadow` (obj-first), `withDocIdentity`, `withDocWrite`,
 `strictWith`; dyn `fnWith`. Direct `eval` inside `with` not seeing `o` —
-**residual** (surface `withEvalScope`).
+**residual** (surface `withEvalScope`). The rewritten code inside a page's `with` body names our
+helpers too, so the body starts by binding them before `o` can answer for them (item 86, e2e `/xhelper`).
 
 ---
 
@@ -1194,7 +1266,9 @@ Async polls keep `await`/`break` semantics (perf `asyncPollBreak`,
 `asyncPollFlag`). Membrane hot loop ~1.1 s per 6.8M reads, MutationObserver
 ~40 ms per 2k nodes, bulk DOM 5k nodes ~30 ms, five iframes ~0.5 s (perf
 `membraneRead`, `moOverhead`, `bulkDom`, `iframes`). Prelude re-parse per frame
-and rewriter latency on large bundles — **residual** (performance track).
+and rewriter latency on large bundles — **residual** (performance track). Rewritten code's own cost —
+helper names looked up through `with` traps, one megamorphic helper per computed member, dynamic code rewritten on
+every evaluation — items 87–89 (Turnstile's widget: renderer busy 13.3 → 6.9 s of 15).
 
 ---
 

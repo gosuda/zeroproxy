@@ -83,10 +83,12 @@
       // `this` 는 파라미터로 전달한다 — 바깥 래퍼도 sloppy 라 apply(this=undefined)
       // 하면 래퍼 경계에서 진짜 globalThis 로 강제변환되어 strict inner 까지
       // 오염된다. 파라미터는 강제변환을 타지 않으므로 의도한 thisArg 가 그대로 간다.
-      const src = 'var __zp_inner__ = (function(){\nwith(__zp_scope){\nreturn (' + inner + ');\n}\n})();\n'
+      const src = 'var __zp_inner__ = (function(){\n' + 'with(__zp_scope){' + ZP_WITH_PROLOGUE + '\nreturn (' + inner + ');\n}\n})();\n'
         + 'if (new.target) return Reflect.construct(__zp_inner__, __zp_args, new.target);\n'
-        + 'return __zp_inner__.apply(__zp_this, __zp_args);';
-      return Reflect.construct(Native.FunctionCtor, ['__zp_scope', '__zp_args', '__zp_this', src]);
+        + 'return __zp_inner__.apply(__zp_self, __zp_args);';
+      // `__zp_self`, not a helper's name: in a child frame booted into a reused window `Native.FunctionCtor` is the
+      // parent's facade, which rewrites this wrapper too, and the rewriter refuses a binding of a helper's name.
+      return Reflect.construct(Native.FunctionCtor, ['__zp_scope', '__zp_args', '__zp_self', src]);
     }
     function nestedCall(compiled, thisArg, callArgs, newTarget, sloppy) {
       // Sloppy bodies coerce nullish `this` to the global object — here the
@@ -146,6 +148,7 @@
     function isEvalExpressionCandidate(text) {
       return !/^(?:function|class|var|let|const|if|for|while|do|switch|try|throw|return|break|continue|with|import|export|debugger)\b/.test(text.trimStart());
     }
+    const evalExpressionCache = new Map();
     function dynamicEval(source) {
       // 네이티브 eval 은 생성자가 아니다 — `new eval()` 은 TypeError.
       if (new.target) throw new TypeError('eval is not a constructor');
@@ -163,7 +166,17 @@
         // 실패하면 그대로 던져서 unrewritten 코드가 실행되지 않게 한다.
         try {
           const rewritten = callPageRewriter(text, 'classic');
-          expr = Reflect.construct(Native.FunctionCtor, ['__zp_scope', 'with(__zp_scope){return (' + rewritten + '\n);}']);
+          // Compiled once per rewritten source (the rewrite cache hands back the same string): `eval('this')` came dozens
+          // of times. The wrapper keeps nothing between calls — each evaluates its expression afresh.
+          const cacheable = rewritten.length <= 65536;
+          expr = cacheable ? evalExpressionCache.get(rewritten) : undefined;
+          if (expr === undefined) {
+            expr = Reflect.construct(Native.FunctionCtor, ['__zp_scope', 'with(__zp_scope){' + ZP_WITH_PROLOGUE + 'return (' + rewritten + '\n);}']);
+            if (cacheable) {
+              evalExpressionCache.set(rewritten, expr);
+              if (evalExpressionCache.size > 256) evalExpressionCache.delete(evalExpressionCache.keys().next().value);
+            }
+          }
         } catch (e) {
           if (e && e.name === 'NotSupportedError') throw e;
         }
@@ -301,7 +314,7 @@
         // sourceURL — eval 소스의 에러 filename 이 호출자 스크립트(가상
         // 문서 URL)를 가리키게 — 네이티브는 eval 소스 에러도 호출 스크립트
         // URL 을 reporting 한다.
-        const body = strictSrc ? '"use strict";' + rewritten : 'with(__zp_env){' + rewritten + '\n}';
+        const body = strictSrc ? '"use strict";' + rewritten : 'with(__zp_env){' + ZP_WITH_PROLOGUE + rewritten + '\n}';
         // The caller's `this`, with the real global object (what a sloppy function called plainly gets) shown as the facade.
         return zpDirectEvalRunner.call(this === root ? scope : this, Native.globalEval, env, body + '\n//# sourceURL=' + virtualURL.href);
       } finally {
@@ -1239,6 +1252,9 @@
       get(_target, prop) { return scopeGet(prop, true); },
       set(_target, prop, value) {
         if (prop === 'location') { setVirtualLocation(value); return true; }
+        // `window.__zp_get = f` would replace the helper every rewritten access calls with the real global object. The
+        // write is dropped (the name already reads as absent).
+        if (typeof prop === 'string' && ZP_RESERVED_NAME_RE.test(prop)) return true;
         if (prop === 'name') { setVirtualWindowName(root, value); return true; }
         // `window.onload = 'code'` falls through to the native setter, which
         // turns a string into null — no real browser compiles it (see the
@@ -1277,6 +1293,7 @@
       ownKeys() { return nativeOwnKeys(root).filter(k => typeof k !== 'string' || !ZP_HIDDEN_RE.test(k)); },
       defineProperty(target, prop, desc) {
         if (prop === 'location') return Reflect.defineProperty(target, prop, desc);
+        if (typeof prop === 'string' && ZP_RESERVED_NAME_RE.test(prop)) return false;
         if (!Reflect.defineProperty(root, prop, desc)) return false;
         const installed = Reflect.getOwnPropertyDescriptor(root, prop);
         if (installed && !installed.configurable) Reflect.defineProperty(target, prop, installed);
@@ -1284,6 +1301,7 @@
       },
       deleteProperty(target, prop) {
         if (prop === 'location') return false;
+        if (typeof prop === 'string' && ZP_RESERVED_NAME_RE.test(prop)) return true;
         if (!Reflect.deleteProperty(root, prop)) return false;
         return Reflect.deleteProperty(target, prop);
       },
@@ -1401,8 +1419,16 @@
     // an array, a typed array, a string or a function is never a window, a document, a Location or a facade — except the
     // few names the full path answers for any base. `Array.isArray`, `ArrayBuffer.isView` and `typeof` run no trap of a
     // page's Proxy. (A renderer this busy fails Cloudflare's interactive check natively too: ERRATA 85.)
+    // Taken now: the page can replace `Array.isArray`, and one answering true would send every base down this path.
+    const nativeIsArray = Array.isArray, nativeIsView = ArrayBuffer.isView;
     function fastDataBase(base) {
-      return typeof base === 'string' || typeof base === 'function' || Array.isArray(base) || ArrayBuffer.isView(base);
+      return typeof base === 'string' || typeof base === 'function' || nativeIsArray(base) || nativeIsView(base);
+    }
+    // Writes: into a VM's own arrays only (a string is immutable and a function's own data is the page's: both keep the
+    // full path).
+    function fastSet(base, prop) {
+      return base != null && (nativeIsArray(base) || nativeIsView(base))
+        && (typeof prop === 'number' || (typeof prop === 'string' && prop !== 'location' && prop !== 'name'));
     }
     function fastDataKey(prop) {
       return typeof prop === 'number' || (typeof prop === 'string' && prop !== 'constructor' && prop !== 'prepareStackTrace'
@@ -1528,8 +1554,7 @@
     function set(base, prop, value) {
       // the same fast path for writes into a VM's own arrays (a string is immutable and a function's own data is the
       // page's: both keep the full path)
-      if (base != null && (Array.isArray(base) || ArrayBuffer.isView(base))
-          && (typeof prop === 'number' || (typeof prop === 'string' && prop !== 'location' && prop !== 'name'))) {
+      if (fastSet(base, prop)) {
         Reflect.set(base, prop, value);
         return value;
       }
@@ -1933,6 +1958,10 @@
       return (Native.createObjectURL || URL.createObjectURL).call(URL, blob);
     }
     define(root, '__zp_get', get);
+    // The rewriter's inline guards (zp-rewriter `guard_claim`): a site keeps its native access when these answer true —
+    // exactly when `get`/`set`/`call` would have taken their fast path.
+    define(root, '__zp_fast', (base, prop) => base != null && fastDataKey(prop) && fastDataBase(base));
+    define(root, '__zp_fastset', fastSet);
     define(root, '__zp_set', set);
     // This document's security origin, for the embedder and for frames it contains.
     define(root, '__zp_origin', function () { return securityOrigin(); });
@@ -2038,15 +2067,62 @@
       parseErrors.add(err);
       return err;
     }
+    // The rewrite is a function of the source, its kind and the document's URL. A challenge VM compiles the same strings
+    // again and again: Turnstile's widget evaluated one 1.3 MB source fifteen times, `this` dozens of times, and each went
+    // through the rewriter anew (1.4 s of 15). Keyed by the source string itself — the page mostly hands over the same
+    // string, whose hash V8 keeps — with the kind and URL checked on a hit. Bounded by entries and by characters;
+    // re-inserted on a hit so the oldest unused leave first.
+    const rewriteCache = new Map();
+    let rewriteCacheChars = 0;
+    const REWRITE_CACHE_ENTRIES = 512, REWRITE_CACHE_CHARS = 32 << 20, REWRITE_CACHE_ONE = 8 << 20;
+    // Whitespace around the code is left out of the rewrite and put back around its output: Turnstile times
+    // `eval(<1.3 million spaces> + "0, /.*honk.*/, " + Date.now())` again and again — natively a scan V8 does in about a
+    // millisecond, here 20-30 ms each of copying it into the rewriter and back. Every position in the code stays where
+    // it was. (`trimStart`/`trimEnd` slice without copying.)
     function callPageRewriter(source, kind) {
+      if (typeof source === 'string' && source.length > 65536) {
+        const core = source.trimStart();
+        const lead = source.length - core.length;
+        const end = lead + core.trimEnd().length;
+        if (lead + (source.length - end) > 4096) {
+          return source.slice(0, lead) + rewriteCore(source.slice(lead, end), kind) + source.slice(end);
+        }
+      }
+      return rewriteCore(source, kind);
+    }
+    function rewriteCore(source, kind) {
       if (!root.ZPBundle || !root.ZPBundle.ready || typeof root.ZPBundle.rewriteScript !== 'function') {
         throw normalizedError('NotSupportedError');
       }
+      const href = virtualURL.href;
+      const cacheable = typeof source === 'string' && source.length <= REWRITE_CACHE_ONE;
+      if (cacheable) {
+        const hit = rewriteCache.get(source);
+        if (hit !== undefined && hit.kind === kind && hit.href === href) {
+          rewriteCache.delete(source);
+          rewriteCache.set(source, hit);
+          return hit.out;
+        }
+      }
       let parseFailure = null;
       try {
-        const out = root.ZPBundle.rewriteScript(source, kind, virtualURL.href);
+        const out = root.ZPBundle.rewriteScript(source, kind, href);
         // Empty in, empty out is a valid rewrite: native `eval('')` is undefined.
-        if (typeof out === 'string' && (out.length > 0 || source === '')) return out;
+        if (typeof out === 'string' && (out.length > 0 || source === '')) {
+          if (cacheable) {
+            const old = rewriteCache.get(source);
+            if (old !== undefined) rewriteCacheChars -= source.length + old.out.length;
+            rewriteCache.delete(source);
+            rewriteCache.set(source, { kind, href, out });
+            rewriteCacheChars += source.length + out.length;
+            for (const [k, v] of rewriteCache) {
+              if (rewriteCache.size <= REWRITE_CACHE_ENTRIES && rewriteCacheChars <= REWRITE_CACHE_CHARS) break;
+              rewriteCache.delete(k);
+              rewriteCacheChars -= k.length + v.out.length;
+            }
+          }
+          return out;
+        }
       } catch (e) {
         const msg = String(e && e.message || '');
         if (msg.startsWith('parse failed:')) parseFailure = msg.slice('parse failed:'.length).trim();
@@ -2062,9 +2138,15 @@
       const suffix = '\n}';
       const wrapped = prefix + String(body || '') + suffix;
       const code = callPageRewriter(wrapped, 'classic');
-      const end = code.length - suffix.length;
-      if (end < prefix.length) throw normalizedError('NotSupportedError');
-      return code.slice(prefix.length, end);
+      // The wrapper's closing brace may come back after the temps its inline guards declare (`…\n;var __zp_t_1;}`).
+      if (!code.startsWith(prefix) || !code.endsWith('}')) {
+        // A body naming one of our runtime names comes back as a script that throws (zp-rewriter
+        // reserved_name_violation): the constructor throws that SyntaxError, as for any body it cannot compile.
+        const refused = /^throw new SyntaxError\("([^"]*)"\);$/.exec(code);
+        if (refused) throw parseSyntaxError(refused[1]);
+        throw normalizedError('NotSupportedError');
+      }
+      return code.slice(prefix.length, code.length - (code.endsWith(suffix) ? suffix.length : 1));
     }
     function rewriteWithPageRewriter(source, kind) {
       return callPageRewriter(String(source || ''), kind);
@@ -2177,7 +2259,7 @@
         // 에뮬레이션 — 등록되지 않은 식별자는 has=false 로 진짜 전역 통과.
         // strict eval 에선 with 자체가 불법이라 지시자 소스는 래핑하지
         // 않는다 (strict 잔여 gap — 등록은 되지만 bare 식별자 읽기 불가).
-        if (!ZP_STRICT_DIRECTIVE_RE.test(code)) return geval('with(__zp_lex_scope){' + code + '\n}' + tagged);
+        if (!ZP_STRICT_DIRECTIVE_RE.test(code)) return geval('with(__zp_lex_scope){' + ZP_WITH_PROLOGUE + code + '\n}' + tagged);
         return geval(code + tagged);
       }
       return Native.FunctionCtor(code).call(root);

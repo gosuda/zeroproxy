@@ -7,7 +7,7 @@
 //! the output itself re-parses (a second `rewrite_script` call is the cheapest
 //! parser we have; it must not error).
 
-use zp_rewriter::{rewrite_script, RewriteOpts, ScriptKind};
+use zp_rewriter::{rewrite_script, with_helper_prefix, RewriteOpts, ScriptKind};
 
 fn opts() -> RewriteOpts {
     RewriteOpts {
@@ -267,8 +267,8 @@ fn with_body_dangerous_names_chain_innermost_first() {
         "with(o){ delete location; }",
         &["__zp_with_delete(__zp_w_1,\"location\""],
     );
-    // Negative: non-dangerous names in `with` stay native.
-    emits("with(o){ x = 1; }", &["with(__zp_w_1=(o)){ x = 1; }"]);
+    // Negative: non-dangerous names in `with` stay native (after the helper bindings).
+    emits("with(o){ x = 1; }", &[&format!("with(__zp_w_1=(o)){{{} x = 1; }}", with_helper_prefix())]);
     emits("with(o){ delete x.p; }", &["delete x.p;"]);
     reparses("with(a){ with(b){ location = u; } }");
     reparses("with(o){ ({location} = y); }");
@@ -922,3 +922,166 @@ fn sloppy_function_this_maps_only_the_real_global() {
     assert!(worker.contains("var t = __zp_get(globalThis,\"self\");"), "got: {worker}");
     assert!(worker.contains(&format!("return {mapped}")), "got: {worker}");
 }
+
+// ---------------------------------------------------------------------------
+// The runtime helpers the emitted code names: a page `with` cannot answer for them, a page binding or write of
+// one is refused.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn with_body_binds_the_helpers_before_the_page_object_can_answer() {
+    let prefix = with_helper_prefix();
+    // `with({__zp_get: f}) location` used to call f with the real global object.
+    emits("with(o){ location }", &[&format!("with(__zp_w_1=(o)){{{prefix} __zp_with_get(__zp_w_1,\"location\"")]);
+    // A body that is not a block becomes one, so the bindings have a block to live in.
+    emits("with(o) location;", &[&format!("with(__zp_w_1=(o)) {{{prefix}__zp_with_get(")]);
+    emits("if (q) with(o) x = 1; else y();", &[&format!("{{{prefix}x = 1;}}}} else y();")]);
+    // Nested: each body gets its own.
+    assert_eq!(out("with(a){ with(b) location; }").matches(&prefix).count(), 2);
+    reparses("with(o) location;");
+    reparses("with(o){ function f(){ return location } var v = 1; let w = 2; }");
+    reparses("with(a) with(b) for(;;) x();");
+    // Our own wrapper rewritten once more (a child frame booted into a reused window compiles through the parent's
+    // facade): its body already binds them, a second set would redeclare.
+    let ours = format!("with(__zp_lex_scope){{{prefix}var a = location;
+}}");
+    assert_eq!(out(&ours).matches(&prefix).count(), 1, "{}", out(&ours));
+    reparses(&ours);
+}
+
+#[test]
+fn a_page_binding_or_write_of_a_helper_name_is_refused() {
+    let refused = |src: &str, kind: ScriptKind, name: &str| {
+        let code = rewrite_script(src, &RewriteOpts { kind, ..opts() }).unwrap().code;
+        assert_eq!(code, format!("throw new SyntaxError(\"Unexpected identifier '{name}'\");"), "for {src:?}");
+    };
+    for (src, name) in [
+        ("function f(){ var __zp_get = function(o){ return o }; return location }", "__zp_get"),
+        ("var __zp_call = 1;", "__zp_call"),
+        ("let __zp_set; const x = 1;", "__zp_set"),
+        ("function __zp_this(t){ return t }", "__zp_this"),
+        ("class __zp_has {}", "__zp_has"),
+        ("(function(__zp_get){ return location })(x)", "__zp_get"),
+        ("var f = (__zp_with_get) => location;", "__zp_with_get"),
+        ("try {} catch (__zp_get) { location }", "__zp_get"),
+        ("var {a: __zp_eval} = o;", "__zp_eval"),
+        ("__zp_get = function(o){ return o };", "__zp_get"),
+        ("__zp_update++;", "__zp_update"),
+        ("[__zp_set] = [f];", "__zp_set"),
+        ("({__zp_get} = o);", "__zp_get"),
+        ("({a: __zp_call} = o);", "__zp_call"),
+        ("for (__zp_get in o);", "__zp_get"),
+        ("for (__zp_this of a);", "__zp_this"),
+        ("with(o){ __zp_lex_decl = f }", "__zp_lex_decl"),
+    ] {
+        refused(src, ScriptKind::Classic, name);
+    }
+    refused("import { x as __zp_get } from './m.js'; location;", ScriptKind::Module, "__zp_get");
+    refused("return __zp_call = f", ScriptKind::Function, "__zp_call");
+    // Reading them is what rewritten code does — a function's own source run again (`eval(f.toString())`, a worker
+    // made from it) carries the calls and the temps the rewriter declares.
+    for src in [
+        "function f(){ with(o){ location } for(;;){ break } let a = 1; return x[k](1) + this.y }",
+        "var a = b?.c.d; ({location} = y); location = u;",
+    ] {
+        let once = out(src);
+        let twice = out(&once);
+        assert!(!twice.starts_with("throw new SyntaxError"), "re-rewrite refused for {src:?}:\n{once}");
+    }
+    // The other runtime names: the executors code outside the rewriter calls by name, our own globals.
+    refused("__ZP_EXEC_EVENT = function(self){ leak(self) };", ScriptKind::Classic, "__ZP_EXEC_EVENT");
+    refused("var __zp_lex_scope = new Proxy({}, h);", ScriptKind::Classic, "__zp_lex_scope");
+    refused("function f(__zp_runEvent){}", ScriptKind::Classic, "__zp_runEvent");
+    // The rewriter's own temps and the dynamic-function wrapper's name come back when rewritten code is rewritten.
+    not_emits("var __zp_w_1, __zp_lc_2 = 0, __zp_dp_3, __zp_vdcl_4, __zp_sk_5; let __zp_bad; f(__zp_oc => 1); function __zp_dynamic__(){}", &["Unexpected identifier"]);
+    // The runtime's wrappers, rewritten when a child frame compiles through the parent's facade.
+    not_emits("(function anonymous(eval,__zp_env,__zp_src) { return eval(__zp_src) })", &["Unexpected identifier"]);
+    not_emits("(function anonymous(__zp_scope,__zp_args,__zp_self) { var __zp_inner__ = function __zp_dyn__(){}; return __zp_inner__.apply(__zp_self, __zp_args) })", &["Unexpected identifier"]);
+    refused("(function anonymous(__zp_scope,__zp_args,__zp_this) {})", ScriptKind::Classic, "__zp_this");
+    // Other objects' members and other spellings are the page's own.
+    not_emits("o.__zp_get = 1; document.__ZP_EXEC_EVENT = f; var zp_get = 3, _zp_x = 4, __zpx = 5, __zp = 6;", &["Unexpected identifier"]);
+}
+
+// ---------------------------------------------------------------------------
+// Inline guards: a computed member keeps its native access for data bases (arrays, strings, typed arrays,
+// functions), its operands in function temps.
+// ---------------------------------------------------------------------------
+
+const G1: &str = "(__zp_t_1=(0,a),__zp_t_2=(0,i),__zp_fast(__zp_t_1,__zp_t_2)?__zp_t_1[__zp_t_2]:__zp_get(__zp_t_1,__zp_t_2))";
+
+#[test]
+fn computed_members_keep_their_native_access_behind_a_guard() {
+    // A read, its temps declared after everything else in the function.
+    let read = out("function f(a, i) { return a[i] }");
+    assert!(read.contains(&format!("return {G1}")), "{read}");
+    assert!(read.ends_with("\n;var __zp_t_1,__zp_t_2,__zp_t_3;}"), "{read}");
+    // A write: the value in the third temp, evaluated once after the object and the key.
+    emits("function f(a, i, v) { x = a[i] = v }", &["x = (__zp_t_1=(0,a),__zp_t_2=(0,i),__zp_t_3=(0,v),__zp_fastset(__zp_t_1,__zp_t_2)?__zp_t_1[__zp_t_2]=__zp_t_3:__zp_set(__zp_t_1,__zp_t_2,__zp_t_3))"]);
+    // A call: the method read before the arguments run, as natively; the callee is not a site of its own.
+    let call = out("function f(o, k, x) { return o[k](x, 1) }");
+    assert!(call.contains("return (__zp_t_1=(0,o),__zp_t_2=(0,(k)),__zp_fast(__zp_t_1,__zp_t_2)?__zp_t_1[__zp_t_2](x, 1):__zp_call(__zp_t_1,__zp_t_2,[x, 1]))"), "{call}");
+    assert!(call.ends_with("\n;var __zp_t_1,__zp_t_2,__zp_t_3;}"), "{call}");
+    // Sites inside one another take different groups, siblings share one.
+    let nested = out("function f(a, b, i) { return a[b[i]] }");
+    assert!(nested.contains("(__zp_t_4=(0,a),__zp_t_5=(0,(__zp_t_1=(0,b),__zp_t_2=(0,i),"), "{nested}");
+    assert!(nested.ends_with("\n;var __zp_t_1,__zp_t_2,__zp_t_3,__zp_t_4,__zp_t_5,__zp_t_6;}"), "{nested}");
+    let siblings = out("function f(a, b, i) { return a[i] + b[i] + a[i](b[i]) }");
+    assert!(siblings.ends_with("\n;var __zp_t_1,__zp_t_2,__zp_t_3,__zp_t_4,__zp_t_5,__zp_t_6;}"), "{siblings}");
+    // Arguments holding guards of their own are not copied into both arms.
+    emits("function f(o, k, a, i) { return o[k](a[i]) }", &["return __zp_call((o),(k),[(__zp_t_1=(0,a)"]);
+    reparses("function f(a, b, i) { return a[b[i]] + b[i](a[i], a[b[i]]) }");
+    // A function whose body ends with a site: its temps are its own, after that site, not inside its operand
+    // (Glassdoor's challenge script: `I[k] = function(){ …, I[aN(gB.a)] = !0 }` stopped parsing).
+    let tail = out("function f(I, k, n) { I[k] = function () { n = 1, I[n] = !0 } }");
+    assert!(tail.contains("__zp_t_3=(0,!0),__zp_fastset("), "{tail}");
+    assert_eq!(tail.matches(";var ").count(), 2, "{tail}");
+    reparses("function f(I, k, n) { I[k] = function () { n = 1, I[n] = !0 } }");
+    reparses("function f(o, k) { return o[k](function () { return o[k] }) }");
+}
+
+#[test]
+fn a_guard_needs_a_function_var_outside_any_page_with() {
+    // The top level: a `var` would be a property of the window.
+    emits("a[i]; a[i] = 1; o[k](x)", &["__zp_get((a),(i))", "__zp_set((a),(i),(1))", "__zp_call((o),(k),[x])"]);
+    not_emits("a[i]", &["__zp_t_"]);
+    // An expression-bodied arrow has nowhere to declare them; a block-bodied one does.
+    emits("var f = i => a[i];", &["i => __zp_get((a),(i))"]);
+    emits("var f = i => { return a[i] };", &["\n;var __zp_t_1,__zp_t_2,__zp_t_3;}"]);
+    // Default values run in the parameters' scope, which the body's `var`s are not in.
+    emits("function f(x = a[i]) { return x }", &["x = __zp_get((a),(i))"]);
+    // A class field initializer is a scope of its own; a method opens its own.
+    let class = out("class A { x = a[i]; m() { return a[i] } }");
+    assert!(class.contains("x = __zp_get((a),(i))") && class.contains(&format!("return {G1}")), "{class}");
+    // Inside a page `with` the object answers for every name first, the temps included.
+    emits("function f(o, a, i) { with (o) { return a[i] } }", &["return __zp_get((a),(i))"]);
+    not_emits("function f(o, a, i) { with (o) { return a[i] } }", &["__zp_t_"]);
+}
+
+#[test]
+fn a_guard_that_starts_a_statement_does_not_continue_the_line_before() {
+    // `var x = y` then `(…)` would call `y`.
+    let code = out("function f(a, i) { var x = y\na[i] = 1\na[i]\na[i](2) }");
+    assert!(code.contains("var x = y\n0,(__zp_t_1=(0,a)"), "{code}");
+    assert_eq!(code.matches("\n0,(").count(), 3, "{code}");
+    reparses("function f(a, i) { var x = y\na[i] = 1\na[i]\na[i](2) }");
+    // …but a guard inside another patch that starts the statement is that patch's operand.
+    emits("function f(e) { e.ports[0].postMessage(1) }", &["{ __zp_call((__zp_t_1=(0,e.ports)"]);
+    not_emits("function f(e) { e.ports[0].postMessage(1) }", &["__zp_call(0,"]);
+    // Minified `else(…)` has no space: the prefix must not join `else` (BBC: `else0` is not defined).
+    let glued = out("function f(a, i, c) { if (c) g(); else(a)[i] = 1; if (c) g(); else(a)[i] += 1 }");
+    assert!(!glued.contains("else0"), "{glued}");
+    assert!(glued.contains("else 0,("), "{glued}");
+    reparses("function f(a, i, c) { if (c) g(); else(a)[i] = 1; if (c) g(); else(a)[i] += 1 }");
+}
+
+#[test]
+fn the_dynamic_function_unwrapper_still_finds_the_body() {
+    // web/membrane/07-membrane.js rewriteDynamicFunctionBody slices the body out by the wrapper's lengths.
+    let prefix = "function __zp_dynamic__(a,i){\n";
+    let code = out(&format!("{prefix}return a[i] // last\n}}"));
+    assert!(code.starts_with(prefix), "{code}");
+    let body = &code[prefix.len()..code.len() - 2];
+    assert!(body.starts_with(&format!("return {G1} // last\n")), "{body}");
+    reparses(&format!("function g(a,i){{{body}\n}}"));
+}
+

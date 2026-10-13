@@ -76,6 +76,13 @@ function executionContext() {
   };
   ctx.__zp_get.d = new Proxy({}, { set: (_, key, value) => { ctx.__zp_set(ctx, key, value); return true; } });
   ctx.__zp_call = (base, key, args) => Reflect.apply(base[key], base, args);
+  // The inline guards' tests (07-membrane.js): a data base with an ordinary key keeps the native access.
+  const dataBase = b => typeof b === 'string' || typeof b === 'function' || Array.isArray(b) || ArrayBuffer.isView(b);
+  ctx.__zp_fast = (b, k) => b != null && dataBase(b) && (typeof k === 'number'
+    || (typeof k === 'string' && k !== 'constructor' && k !== 'prepareStackTrace' && k !== 'postMessage' && k !== 'location'));
+  ctx.__zp_fastset = (b, k) => b != null && (Array.isArray(b) || ArrayBuffer.isView(b))
+    && (typeof k === 'number' || (typeof k === 'string' && k !== 'location' && k !== 'name'));
+  ctx.__zp_guards = { fast: 0 };
   vm.createContext(ctx);
   // Node contextifies the global object: code inside the VM sees a distinct
   // identity from the host sandbox, unlike ordinary objects passed through it.
@@ -355,4 +362,71 @@ test('optional chains keep native short-circuit and evaluation order', () => {
     const code = rewrite(src);
     assert.equal(run(ctx, code), native, `${src}\n  rewritten: ${code.replace(/;\{const __zp_bad[^}]*\}/, '')}`);
   }
+});
+
+// Inline guards (zp-rewriter guard_claim): a computed member read, write or call keeps its native access when the base is
+// data, its operands in function temps. Whatever arm runs, the program must not notice: same results, each operand
+// evaluated once and in native order, a method read before its arguments run, `this` the base, nested and sibling sites
+// apart, generators and recursion through the temps, a line before a statement-start site left alone.
+test('inline-guarded members behave exactly as the native ones', () => {
+  const program = `
+    const trace = [];
+    const t = (tag, v) => (trace.push(tag), v);
+    const obj = { get k() { trace.push('get k'); return 2; }, m(x) { return [this === obj, x]; } };
+    function f(arr, str, ta, fn, i) {
+      'use strict';
+      const out = [];
+      out.push(t('o1', arr)[t('k1', i)], str[i], ta[i], fn['length'], arr[arr[0]]);
+      t('o2', arr)[t('k2', i + 1)] = t('v2', 9);
+      out.push(arr[1 + i]);
+      arr[3] = function () {}; out.push(arr[3].name); arr[3] = class {}; out.push(arr[3].name); arr[3] = () => 1; out.push(arr[3].name);
+      out.push([function () {}][0].name, fnv[t('k6', 'name')]);
+      const recv = [{ replace(q) { trace.push('replace:' + q); return q; } }];
+      recv[0].replace('q');
+      out.push(t('o3', arr)[t('k3', 'indexOf')](t('a3', 9)), str['charCodeAt'](i), fn['call'](null, 4));
+      out.push(obj[t('k4', 'k')], obj['m'](5)[0], obj[t('k5', 'm')](6)[1]);
+      out.push([1, 2, 3][arr[0] - 1], arr[i](0)[0]);
+      let n = 0
+      arr[n] = 'asi'
+      arr[n]
+      out.push(arr[n]);
+      try { Object.freeze(ta.slice())[0] = 1; const fz = Object.freeze([1]); fz[0] = 2; out.push('no throw'); } catch (e) { out.push(e.constructor.name); }
+      function* g(a) { a[0] = yield a[0]; return a[0]; }
+      const it = g(arr); out.push(it.next().value, it.next('y').value);
+      const rec = (a, d) => { if (d === 0) return a[0]; return a[rec(a, d - 1) === 'y' ? 0 : 1]; };
+      out.push(rec(arr, 3));
+      return out;
+    }
+    const fnv = function (a, b) { return a + b; };
+    const r = f([1, x => [x], 3, 4], 'hello', new Uint8Array([7, 8, 9]), fnv, 1);
+    window.result = JSON.stringify({ r, trace });
+  `;
+  const native = vm.createContext({ window: {} });
+  vm.runInContext(program, native);
+  const rewritten = rewrite(program);
+  assert.match(rewritten, /__zp_t_1=/, 'no guard was emitted');
+  const { ctx } = executionContext();
+  vm.runInContext(rewritten, ctx);
+  assert.equal(ctx.window.result, native.window.result);
+});
+
+// `new Function(params, body)`: the prelude rewrites the body inside a wrapper and slices it back out. With inline guards
+// the wrapper's closing brace comes back after the temps the guards declare; NYT's dynamic functions were refused
+// ("Blocked by ZeroProxy rewrite policy") when the slice wanted the bare closing brace. A body binding a runtime name is
+// a SyntaxError, as any body the constructor cannot compile.
+test('the prelude slices a rewritten Function body back out, guards and refusals included', () => {
+  const src = preludeSource().split('\r\n').join('\n');
+  const grab = (start, end) => { const a = src.indexOf(start); const b = src.indexOf(end, a); assert.ok(a >= 0 && b > a, start); return src.slice(a, b); };
+  const code = grab('    function functionPrefix(kind) {', '    function dynamicSource(')
+    + grab('    function rewriteDynamicFunctionBody(params, body, kind) {', '    function rewriteWithPageRewriter(');
+  const parseSyntaxError = message => new SyntaxError(message);
+  const normalizedError = name => Object.assign(new Error(name), { name });
+  const unwrap = new Function('callPageRewriter', 'parseSyntaxError', 'normalizedError', code + '\nreturn rewriteDynamicFunctionBody;')(
+    source => rewrite(source, 'classic'), parseSyntaxError, normalizedError);
+  const { ctx } = executionContext();
+  const body = unwrap(['a', 'i'], 'var t = [];\nt.push(a[i], a[i + 1]);\nreturn t[0] + t[1] // last line', 'function');
+  assert.match(body, /__zp_t_1=/, 'no guard in the body');
+  const fn = vm.runInContext('(function (a, i) {\n' + body + '\n})', ctx);
+  assert.equal(fn([3, 4, 5], 1), 9);
+  assert.throws(() => unwrap(['__zp_get'], 'return location', 'function'), SyntaxError);
 });

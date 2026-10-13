@@ -43,6 +43,8 @@ const DYN_BLOCK = slice(
   '    function stringArgs(args) {',
   '    const dynamicFunction = function Function'
 );
+// The helper bindings every `with` starts with (00-head.js).
+const ZP_WITH_PROLOGUE = load(slice('  const ZP_WITH_HELPERS = [', '  const ZP_EVENT_CALL_HEAD = '), ['ZP_WITH_PROLOGUE'], {}).ZP_WITH_PROLOGUE;
 
 function dynEnv(overrides = {}) {
   const SCOPE = { __scope: true };
@@ -69,6 +71,7 @@ function dynEnv(overrides = {}) {
       // R1: dynamicEval 이 eval 렉시컬 환경 분리를 위해 읽는 슬롯 —
       // 추출 블록 밖 선언이라 dep 으로 주입해야 ReferenceError 가 안 난다.
       __zp_lex_env: null,
+      ZP_WITH_PROLOGUE,
     }, overrides));
   return { env, SCOPE, withScope, calls, toStringMap };
 }

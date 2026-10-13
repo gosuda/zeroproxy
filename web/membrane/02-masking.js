@@ -230,6 +230,28 @@
       return null;
     }
 
+    // `(__zp_t_1=(o),__zp_t_2=(k),__zp_fast(…)?__zp_t_1[__zp_t_2]:__zp_get(…))` → `o[k]`; with a third temp
+    // (`=(v)`) a write → `o[k]=v`; with `[__zp_t_2](args)` in the native arm a call → `o[k](args)`. [text, next index].
+    function zpSrcGuard(s, i) {
+      const sp = zpSrcSplitArgs(s, i);
+      if (!sp) return null;
+      const parts = sp[0], next = sp[1] + 1;
+      // `=(0,x)`: the comma keeps a function or class there from taking the temp's name.
+      const temp = /^\s*__zp_t_\d+=\(0,([\s\S]*)\)\s*$/;
+      const o = temp.exec(parts[0] || ''), k = temp.exec(parts[1] || '');
+      if (!o || !k) return null;
+      const member = unrewriteSource(o[1]).trim() + '[' + unrewriteSource(k[1]).trim() + ']';
+      if (parts.length === 4) {
+        const v = temp.exec(parts[2]);
+        return v && /^__zp_fastset\(/.test(parts[3]) ? [member + '=' + unrewriteSource(v[1]).trim(), next] : null;
+      }
+      if (parts.length !== 3 || !/^__zp_fast\(/.test(parts[2])) return null;
+      const call = /^__zp_fast\((__zp_t_\d+),(__zp_t_\d+)\)\?\1\[\2\]\(/.exec(parts[2]);
+      if (!call) return [member, next];
+      const args = zpSrcSplitArgs(parts[2], call[0].length - 1);
+      return args ? [member + '(' + unrewriteSource(args[0].join(',')).trim() + ')', next] : null;
+    }
+
     // "abc" / 'abc' 리터럴이면 그 값을, 아니면 null.
     function zpSrcLiteral(a) {
       const t = a.trim();
@@ -303,14 +325,27 @@
           i = j;
           continue;
         }
-        if (c !== '_') { out += c; i++; continue; }
-        const prev = i > 0 ? s[i - 1] : '';
-        if (prev && /[A-Za-z0-9_$.]/.test(prev)) { out += c; i++; continue; }
+        // The helper bindings a `with` body starts with (zp-rewriter with_helper_prefix): nothing of the page's.
+        if (c === 'c' && s.startsWith(ZP_WITH_PROLOGUE, i)) { i += ZP_WITH_PROLOGUE.length; continue; }
+        // An inline-guarded member (zp-rewriter guard_claim), and the temps its function declares at its end.
+        if (c === '(' && s.startsWith('(__zp_t_', i)) {
+          const g = zpSrcGuard(s, i);
+          if (g) { out += g[0]; i = g[1]; continue; }
+        }
+        if (c === '\n' && s.startsWith('\n;var __zp_t_', i)) {
+          const tail = /^\n;var __zp_t_\d+(?:,__zp_t_\d+)*;/.exec(s.slice(i, i + 8192));
+          if (tail) { i += tail[0].length; continue; }
+        }
         // ★인라인 이벤트 핸들러(`<a onclick="…">`)는 래퍼로 감싸 두는데, 그
         // 래퍼의 세 번째 인자가 **원본 속성 본문 그대로**다(리라이트는 호출
         // 시점에 한다). 그래서 여기서는 정확한 복구가 된다. 래퍼가 붙인
         // `return ` 도 같이 걷어낸다 — 브라우저가 보여 주는 본문에는 없다.
-        const ev = /^__ZP_EXEC_EVENT\(/.exec(s.slice(i));
+        // (The executor is reached through ZP_EVENT_CALL_HEAD; the bare name is the older form.)
+        const evHead = c === '(' && s.startsWith(ZP_EVENT_CALL_HEAD, i) ? ZP_EVENT_CALL_HEAD.length : 0;
+        if (c !== '_' && !evHead) { out += c; i++; continue; }
+        const prev = i > 0 ? s[i - 1] : '';
+        if (!evHead && prev && /[A-Za-z0-9_$.]/.test(prev)) { out += c; i++; continue; }
+        const ev = evHead ? [ZP_EVENT_CALL_HEAD] : /^__ZP_EXEC_EVENT\(/.exec(s.slice(i));
         if (ev) {
           const sub = zpSrcSplitArgs(s, i + ev[0].length - 1);
           let body = null;

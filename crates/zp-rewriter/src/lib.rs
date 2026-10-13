@@ -176,6 +176,169 @@ pub(crate) const DANGEROUS_METHODS: &[&str] = &[
     "replaceState",
 ];
 
+/// The runtime helpers rewritten code names as free identifiers (`__zp_get(o,k)`, `__zp_this(this)`, …). The runtime
+/// keeps the same list (`ZP_WITH_HELPERS` in web/membrane/00-head.js and web/worker-prelude.js; static-policy compares
+/// them). Two things follow from naming them:
+/// - Whoever binds the name receives what the call passes, and the calls pass the real global object (`globalThis`, a
+///   sloppy `this`). A page binding or write of one of these names is refused (`reserved_name_violation`).
+/// - Inside `with(o)` every free name is looked up in `o` first, at run time, on every evaluation. A page's `with` body
+///   (and every `with` the runtime wraps code in) therefore starts by binding them as block constants
+///   (`with_helper_prefix`): a block inside the `with` resolves before the with object, statically.
+pub const RUNTIME_HELPERS: &[&str] = &[
+    "__zp_get",
+    "__zp_set",
+    "__zp_call",
+    "__zp_this",
+    "__zp_assign",
+    "__zp_update",
+    "__zp_delete",
+    "__zp_eval",
+    "__zp_has",
+    "__zp_oget",
+    "__zp_ocall",
+    "__zp_ocallv",
+    "__zp_ochain",
+    "__zp_odelete",
+    "__zp_okeys",
+    "__zp_rget",
+    "__zp_rset",
+    "__zp_ownKeys",
+    "__zp_getOwnPropertyDescriptor",
+    "__zp_getOwnPropertyDescriptors",
+    "__zp_getOwnPropertyNames",
+    "__zp_module_url",
+    "__zp_with_get",
+    "__zp_with_set",
+    "__zp_with_assign",
+    "__zp_with_update",
+    "__zp_with_delete",
+    "__zp_with_d",
+    "__zp_lex_decl",
+    "__zp_lex_bind",
+    "__zp_fast",
+    "__zp_fastset",
+];
+
+fn is_runtime_helper(name: &str) -> bool {
+    RUNTIME_HELPERS.iter().any(|h| *h == name)
+}
+
+/// A name the page may not bind or write: the runtime's (`__zp_*` / `__ZP_*` on the global object — the helpers above,
+/// and the executors code outside the rewriter calls by name, like an `on*` attribute's `__ZP_EXEC_EVENT`). Not the
+/// temps the rewriter declares itself (rewritten code carries them when it is rewritten again), nor the names of the
+/// runtime's own wrappers — parameters and locals read only outside the code they wrap (`with(__zp_scope)`,
+/// `eval(__zp_src)`, `__zp_inner__.apply(__zp_self, __zp_args)`). A child frame that reuses its `about:blank` window
+/// boots its runtime with the parent's `Function` facade, which rewrites those wrappers too.
+fn is_reserved_name(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix("__zp_").or_else(|| name.strip_prefix("__ZP_")) else { return false };
+    if name.starts_with("__ZP_") {
+        return true;
+    }
+    if matches!(rest, "bad" | "oc" | "dynamic__" | "dyn__" | "inner__" | "scope" | "args" | "self" | "env" | "src") {
+        return false;
+    }
+    let temp = rest.split_once('_').is_some_and(|(tag, n)| {
+        matches!(tag, "w" | "lc" | "lbl" | "vdcl" | "dp" | "sk" | "t") && !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())
+    });
+    !temp
+}
+
+/// `const{__zp_get,…}=(function(){return this})();` — the helpers as block constants, read off the global object
+/// without naming anything: inside a `with` body the code is sloppy, so a plainly called function expression's `this` is
+/// the global object of its realm, and no with object can answer for it.
+pub fn with_helper_prefix() -> String {
+    format!("const{{{}}}=(function(){{return this}})();", RUNTIME_HELPERS.join(","))
+}
+
+/// A page binding (`var`, `let`, `const`, `function`, `class`, parameter, `catch`, import) or a write (`x = …`, `x++`,
+/// a destructuring or `for (x in …)` target) of a reserved name (`is_reserved_name`). The bound name would receive the
+/// real global object the rewritten calls pass; the overwritten global would be every later script's helper. No site
+/// names these.
+fn reserved_name_violation(program: &Program<'_>) -> Option<String> {
+    struct Scan {
+        hit: Option<String>,
+    }
+    impl Scan {
+        fn check(&mut self, name: &str) {
+            if self.hit.is_none() && is_reserved_name(name) {
+                self.hit = Some(name.to_string());
+            }
+        }
+    }
+    impl<'a> Visit<'a> for Scan {
+        fn visit_variable_declaration(&mut self, it: &VariableDeclaration<'a>) {
+            // Our own `with_helper_prefix`, met again when rewritten code is rewritten once more (a function's source
+            // run again). It binds the real helpers whoever writes it.
+            if !is_helper_prefix_declaration(it) {
+                walk::walk_variable_declaration(self, it);
+            }
+        }
+        fn visit_binding_identifier(&mut self, it: &BindingIdentifier<'a>) {
+            self.check(it.name.as_str());
+        }
+        fn visit_simple_assignment_target(&mut self, it: &SimpleAssignmentTarget<'a>) {
+            if let SimpleAssignmentTarget::AssignmentTargetIdentifier(id) = it {
+                self.check(id.name.as_str());
+            }
+            walk::walk_simple_assignment_target(self, it);
+        }
+        fn visit_assignment_target_property_identifier(&mut self, it: &AssignmentTargetPropertyIdentifier<'a>) {
+            self.check(it.binding.name.as_str());
+            walk::walk_assignment_target_property_identifier(self, it);
+        }
+    }
+    let mut scan = Scan { hit: None };
+    scan.visit_program(program);
+    scan.hit
+}
+
+/// Exactly the shape `with_helper_prefix` emits: `const{<helpers, shorthand>}=(function(){return this})();`.
+fn is_helper_prefix_declaration(decl: &VariableDeclaration<'_>) -> bool {
+    if decl.kind != VariableDeclarationKind::Const || decl.declarations.len() != 1 {
+        return false;
+    }
+    let d = &decl.declarations[0];
+    let BindingPattern::ObjectPattern(pattern) = &d.id else { return false };
+    if pattern.rest.is_some() || pattern.properties.is_empty() {
+        return false;
+    }
+    let helpers_only = pattern.properties.iter().all(|p| {
+        p.shorthand
+            && !p.computed
+            && matches!(&p.value, BindingPattern::BindingIdentifier(id) if is_runtime_helper(id.name.as_str()))
+    });
+    if !helpers_only {
+        return false;
+    }
+    let Some(Expression::CallExpression(call)) = &d.init else { return false };
+    if call.optional || !call.arguments.is_empty() {
+        return false;
+    }
+    let mut callee = &call.callee;
+    while let Expression::ParenthesizedExpression(p) = callee {
+        callee = &p.expression;
+    }
+    let Expression::FunctionExpression(f) = callee else { return false };
+    if f.generator || f.r#async || f.id.is_some() || !f.params.items.is_empty() || f.params.rest.is_some() {
+        return false;
+    }
+    let Some(body) = &f.body else { return false };
+    body.directives.is_empty()
+        && body.statements.len() == 1
+        && matches!(&body.statements[0], Statement::ReturnStatement(r) if matches!(r.argument, Some(Expression::ThisExpression(_))))
+}
+
+/// What a script that names a reserved helper becomes: it throws before running anything. An error result would not
+/// do — a non-strict caller runs the unrewritten source when the rewrite fails. No braces, so the dynamic-function
+/// unwrappers (which slice the body out between the first `{` and the last `}`) refuse it as well.
+fn reserved_name_patch(source_len: usize, name: &str) -> Patch {
+    Patch {
+        start: 0,
+        end: source_len as u32,
+        replacement: format!("throw new SyntaxError(\"Unexpected identifier '{name}'\");"),
+    }
+}
+
 fn is_dangerous_global(name: &str) -> bool {
     DANGEROUS_GLOBALS.iter().any(|g| *g == name)
 }
@@ -214,6 +377,7 @@ pub fn rewrite_script_patches(
         RewriteVisitor::new(opts.target_url.clone(), opts.proxy_origin.clone(), kind);
     visitor.local_this = opts.kind == ScriptKind::ClassicLocal;
     visitor.visit_program(&ret.program);
+    visitor.refuse_reserved_names(&ret.program, source.len());
 
     let mut patches = visitor.patches;
     patches.sort_by_key(|p| p.start);
@@ -321,6 +485,7 @@ pub fn rewrite_script(source: &str, opts: &RewriteOpts) -> Result<RewriteResult,
         RewriteVisitor::new(opts.target_url.clone(), opts.proxy_origin.clone(), kind);
     visitor.local_this = opts.kind == ScriptKind::ClassicLocal;
     visitor.visit_program(&ret.program);
+    visitor.refuse_reserved_names(&ret.program, source.len());
 
     // Apply patches to produce final code. Patches sorted by start ascending
     // and non-overlapping (visitor guarantees this for identifier rewrites).
@@ -482,6 +647,22 @@ fn obj_key(
     Some(((rewrite(os, oe), rewrite(ks, ke)), ()))
 }
 
+/// An inline-guarded site's marker tail: its temp group (0: none) and whether it starts a statement (`S`), where a
+/// leading `(` would continue the previous line (`var x = y` then `(…)` calls `y`).
+fn guard_fields(parts: &[&str], i: usize) -> (u32, bool) {
+    let group = parts.get(i).and_then(|g| g.parse::<u32>().ok()).unwrap_or(0);
+    (group, parts.get(i + 1) == Some(&"S"))
+}
+
+/// The three temps of a guard group (`RewriteVisitor::guard_claim`).
+fn guard_temps(group: u32) -> Option<(String, String, String)> {
+    if group == 0 {
+        return None;
+    }
+    let c = group * 3;
+    Some((format!("__zp_t_{}", c - 2), format!("__zp_t_{}", c - 1), format!("__zp_t_{c}")))
+}
+
 /// `obj_key` + a trailing value span at `i+4`,`i+5`.
 fn obj_key_val(
     parts: &[&str],
@@ -554,6 +735,15 @@ pub fn apply_patches(source: &str, patches: &[Patch]) -> String {
     //   call 을 capture 함 → paren 으로 격리 필요.
     // - 그 외 (`(`/`,`/`{`/`}`/`;`/`=`/`\n` + identifier-continue 가 아닌 경우)
     //   는 paren 미추가 — `var x=1\n(call)` 같은 ASI 위험 회피.
+    // The `0,` a statement-start form begins with must not join the token before it: minified `else(a||b)[k]=v`
+    // became `else0,(…)` — an identifier `else0` (BBC: 300 ReferenceErrors a load).
+    let stmt_zero = |start: usize| -> &'static str {
+        let joins = start > 0 && {
+            let b = bytes[start - 1];
+            b.is_ascii_alphanumeric() || b == b'_' || b == b'$' || b >= 0x80
+        };
+        if joins { " 0," } else { "0," }
+    };
     let needs_paren_prefix = |start: usize| -> bool {
         if start == 0 {
             return false;
@@ -861,7 +1051,7 @@ pub fn apply_patches(source: &str, patches: &[Patch]) -> String {
                     // The adapter retains the receiver once without a closure.
                     if parts[1] == "MEMBER_REF_STMT" {
                         // A leading '(' would join a preceding ASI statement.
-                        out.push_str("0,");
+                        out.push_str(stmt_zero(start));
                     }
                     out.push_str(&format!(
                         "({{b:({}),get v(){{return __zp_get(this.b,{:?})}},set v(v){{__zp_set(this.b,{:?},v)}}}}).v",
@@ -984,7 +1174,7 @@ pub fn apply_patches(source: &str, patches: &[Patch]) -> String {
                 let name = parts[3];
                 let sink = with_d_chain(parts[2], name);
                 if parts[1] == "WTREF_STMT" {
-                    out.push_str("0,");
+                    out.push_str(stmt_zero(start));
                 }
                 out.push_str(&format!("{sink}.v"));
                 cursor = end;
@@ -1039,11 +1229,18 @@ pub fn apply_patches(source: &str, patches: &[Patch]) -> String {
                 }
             }
         } else if p.replacement.starts_with("\u{1}CGET\u{1}") {
-            // \u{1}CGET\u{1}<os>\u{1}<oe>\u{1}<ks>\u{1}<ke>\u{1}
+            // \u{1}CGET\u{1}<os>\u{1}<oe>\u{1}<ks>\u{1}<ke>\u{1}<group>\u{1}[S\u{1}]
             let parts: Vec<&str> = p.replacement.split('\u{1}').collect();
             if let Some(((obj, key), _)) = obj_key(&parts, 2, bytes.len(), &rewrite_range) {
-                let e = format!("__zp_get(({obj}),({key}))");
-                if needs_paren_prefix(start) {
+                let (group, at_stmt) = guard_fields(&parts, 6);
+                let e = match guard_temps(group) {
+                    Some((a, b, _)) => format!("({a}=(0,{obj}),{b}=(0,{key}),__zp_fast({a},{b})?{a}[{b}]:__zp_get({a},{b}))"),
+                    None => format!("__zp_get(({obj}),({key}))"),
+                };
+                if group > 0 && at_stmt {
+                    out.push_str(stmt_zero(start));
+                    out.push_str(&e);
+                } else if needs_paren_prefix(start) {
                     out.push_str(&format!("({e})"));
                 } else {
                     out.push_str(&e);
@@ -1052,14 +1249,24 @@ pub fn apply_patches(source: &str, patches: &[Patch]) -> String {
                 continue;
             }
         } else if p.replacement.starts_with("\u{1}CSET\u{1}") {
-            // \u{1}CSET\u{1}<os>\u{1}<oe>\u{1}<ks>\u{1}<ke>\u{1}<vs>\u{1}<ve>\u{1}
+            // \u{1}CSET\u{1}<os>\u{1}<oe>\u{1}<ks>\u{1}<ke>\u{1}<vs>\u{1}<ve>\u{1}<group>\u{1}[S\u{1}]
             let parts: Vec<&str> = p.replacement.split('\u{1}').collect();
             if let Some(((obj, key), vs)) =
                 obj_key_val(&parts, 6, bytes.len(), &rewrite_range)
             {
                 if let Some(v) = vs {
-                    let e = format!("__zp_set(({obj}),({key}),({v}))");
-                    if needs_paren_prefix(start) {
+                    let (group, at_stmt) = guard_fields(&parts, 8);
+                    // The value lands in a temp too: it is evaluated once, after the object and the key, as natively.
+                    let e = match guard_temps(group) {
+                        Some((a, b, c)) => format!(
+                            "({a}=(0,{obj}),{b}=(0,{key}),{c}=(0,{v}),__zp_fastset({a},{b})?{a}[{b}]={c}:__zp_set({a},{b},{c}))"
+                        ),
+                        None => format!("__zp_set(({obj}),({key}),({v}))"),
+                    };
+                    if group > 0 && at_stmt {
+                        out.push_str(stmt_zero(start));
+                        out.push_str(&e);
+                    } else if needs_paren_prefix(start) {
                         out.push_str(&format!("({e})"));
                     } else {
                         out.push_str(&e);
@@ -1089,7 +1296,7 @@ pub fn apply_patches(source: &str, patches: &[Patch]) -> String {
                             out.push_str(&format!("({e})"));
                         } else {
                             if parts[1] == "CASSIGN_STMT" {
-                                out.push_str("0,");
+                                out.push_str(stmt_zero(start));
                             }
                             out.push_str(&e);
                         }
@@ -1107,7 +1314,7 @@ pub fn apply_patches(source: &str, patches: &[Patch]) -> String {
             let parts: Vec<&str> = p.replacement.split('\u{1}').collect();
             if let Some(((obj, key), _)) = obj_key(&parts, 2, bytes.len(), &rewrite_range) {
                 if parts[1] == "CREF_STMT" {
-                    out.push_str("0,");
+                    out.push_str(stmt_zero(start));
                 }
                 out.push_str(&format!(
                     "({{b:({obj}),k:({key}),get v(){{return __zp_get(this.b,this.k)}},set v(v){{__zp_set(this.b,this.k,v)}}}}).v"
@@ -1200,12 +1407,22 @@ pub fn apply_patches(source: &str, patches: &[Patch]) -> String {
                         } else {
                             String::new()
                         };
+                        // \u{1}CCALL\u{1}…\u{1}<as>\u{1}<ae>\u{1}<group>\u{1}[S\u{1}]
+                        let (group, at_stmt) = if optional { (0, false) } else { guard_fields(&parts, ai + 2) };
+                        // The arguments appear in both arms (one runs): only short ones, and none holding guards of their
+                        // own — a copy of those would double again at every level.
+                        let guard = guard_temps(group).filter(|_| args.len() <= 512 && !args.contains("__zp_t_"));
                         let e = if optional {
                             format!("__zp_ocall(({obj}),{key},[{args}],{flags})")
+                        } else if let Some((a, b, _)) = &guard {
+                            format!("({a}=(0,{obj}),{b}=(0,{key}),__zp_fast({a},{b})?{a}[{b}]({args}):__zp_call({a},{b},[{args}]))")
                         } else {
                             format!("__zp_call(({obj}),{key},[{args}])")
                         };
-                        if needs_paren_prefix(start) {
+                        if guard.is_some() && at_stmt {
+                            out.push_str(stmt_zero(start));
+                            out.push_str(&e);
+                        } else if needs_paren_prefix(start) {
                             out.push_str(&format!("({e})"));
                         } else {
                             out.push_str(&e);
@@ -1397,7 +1614,7 @@ pub fn apply_patches(source: &str, patches: &[Patch]) -> String {
                     } else {
                         if parts[1] == "MEMBER_A_STMT" {
                             // A leading '(' would join a preceding ASI statement.
-                            out.push_str("0,");
+                            out.push_str(stmt_zero(start));
                         }
                         out.push_str(&e);
                     }
@@ -1535,6 +1752,7 @@ impl RewriterInstance {
             RewriteVisitor::new(opts.target_url.clone(), opts.proxy_origin.clone(), kind);
         visitor.local_this = opts.kind == ScriptKind::ClassicLocal;
         visitor.visit_program(&ret.program);
+        visitor.refuse_reserved_names(&ret.program, source.len());
 
         let mut patches = visitor.patches;
         patches.sort_by_key(|p| p.start);
@@ -1566,6 +1784,14 @@ impl RewriterInstance {
 struct RewriteVisitor {
     patches: Vec<Patch>,
     diagnostics: Vec<String>,
+    /// Inline guards (`guard_claim`): one entry per function being visited — where its temps are declared (the body's
+    /// closing brace; `None` where a `var` cannot go: the top level, an expression-bodied arrow, parameters, a class
+    /// body) and how many temp groups its sites used.
+    guard_fns: Vec<(Option<u32>, u32)>,
+    /// The highest temp group claimed inside the operands visited since the enclosing site began.
+    guard_height: u32,
+    /// The callee of a computed call (`o[k](…)`): the call is the site, its member expression is not.
+    ccall_callees: HashSet<(u32, u32)>,
     /// Stack of lexical scopes; each scope holds names that should NOT be
     /// rewritten because they shadow the dangerous globals.
     scopes: Vec<HashSet<String>>,
@@ -1645,6 +1871,9 @@ impl RewriteVisitor {
         Self {
             patches: Vec::new(),
             diagnostics: Vec::new(),
+            guard_fns: Vec::new(),
+            guard_height: 0,
+            ccall_callees: HashSet::new(),
             scopes: vec![HashSet::new()],
             var_env_stack: Vec::new(),
             infinite_loop_caps: 0,
@@ -1863,6 +2092,69 @@ impl RewriteVisitor {
 
     fn pop_scope(&mut self) {
         self.scopes.pop();
+    }
+
+    // ── Inline guards ──
+    // Every computed member read, write and call goes through a helper (`__zp_get(o,k)`, `__zp_set`, `__zp_call`). That
+    // is one access site in the runtime for every access the page makes: V8's inline cache there sees every shape and
+    // stays megamorphic, and a call allocates its argument array — Turnstile's VM spent 3.2 s of 15 in the three.
+    // An array, a string, a typed array or a function is never a window, document, Location or facade, so for those the
+    // native access is the membrane's answer too (the helpers' own fast path, `__zp_fast` / `__zp_fastset`). The site
+    // keeps it behind that guard, its operands in temps so each is evaluated once, in native order; anything else takes
+    // the helper. Temps are `var`s of the enclosing function (declared at its end), in groups of three: a site's group
+    // is one above every group inside its operands, so sites inside one another never share and siblings do.
+
+    fn guard_enter(&mut self) -> u32 {
+        std::mem::replace(&mut self.guard_height, 0)
+    }
+
+    fn guard_leave(&mut self, saved: u32) {
+        self.guard_height = self.guard_height.max(saved);
+    }
+
+    /// The temp group for the site whose operands were just visited — 0 where no `var` can hold them, and inside a page
+    /// `with`, whose object answers for every name first.
+    fn guard_claim(&mut self) -> u32 {
+        if !self.with_temps.is_empty() {
+            return 0;
+        }
+        match self.guard_fns.last_mut() {
+            Some((Some(_), max)) => {
+                let group = self.guard_height + 1;
+                *max = (*max).max(group);
+                self.guard_height = group;
+                group
+            }
+            _ => 0,
+        }
+    }
+
+    /// A function-like scope begins: its temps go at `at` (the body's closing brace), or nowhere.
+    fn guard_fn_enter(&mut self, at: Option<u32>) -> u32 {
+        self.guard_fns.push((at, 0));
+        std::mem::replace(&mut self.guard_height, 0)
+    }
+
+    /// …and ends. The declaration goes after everything in the body, on a line of its own, so nothing the page wrote
+    /// moves (error positions, the dynamic-function unwrapper's slice) and a trailing `//` comment cannot swallow it.
+    /// It replaces the closing brace rather than going in front of it: an insertion there is also the end of whatever
+    /// the body ends with, and a site ending there (`function(){ o[k] = !0 }`) took it into its own operand.
+    fn guard_fn_leave(&mut self, saved: u32) {
+        if let Some((Some(at), groups)) = self.guard_fns.pop() {
+            if groups > 0 {
+                let temps: Vec<String> = (1..=groups * 3).map(|i| format!("__zp_t_{i}")).collect();
+                self.patches.push(Patch { start: at, end: at + 1, replacement: format!("\n;var {};}}", temps.join(",")) });
+            }
+        }
+        self.guard_height = saved;
+    }
+
+    /// A script that binds or writes a runtime helper's name is replaced by one that throws (`reserved_name_violation`).
+    fn refuse_reserved_names(&mut self, program: &Program<'_>, source_len: usize) {
+        if let Some(name) = reserved_name_violation(program) {
+            self.patches = vec![reserved_name_patch(source_len, &name)];
+            self.diagnostics.push(format!("reserved identifier refused: {name}"));
+        }
     }
 
     fn declare(&mut self, name: &str) {
@@ -2587,377 +2879,13 @@ fn is_truthy_constant(expr: &Expression) -> bool {
     }
 }
 
-impl<'a> Visit<'a> for RewriteVisitor {
-    fn visit_program(&mut self, program: &Program<'a>) {
-        // Hoist-aware pre-collection: the sequential walk used to declare
-        // names as it met them, so `f(){ location; var location; }` read the
-        // *virtual* location where the engine sees a hoisted local
-        // (undefined → TypeError). Collect every binding that this scope
-        // level owns before walking the body.
-        //
-        // Classic top level only: `var`/`function` declarations for
-        // unforgeable browser globals DO NOT create bindings — `var location`
-        // is silently ignored and `location` still resolves to the real
-        // window.location. Recording them as shadowed emitted bare
-        // references that bypassed the membrane entirely. Lexical/module/
-        // function-local declarations shadow normally.
-        self.cur_sloppy = self.kind != ScriptKind::Module && !Self::has_use_strict(&program.directives);
-        let mut top_varlikes: Vec<String> = Vec::new();
-        collect_scope_decl_names(&program.body, true, self.cur_sloppy, &mut |name, cat| {
-            // `__zp_dynamic__` 같은 내부 래퍼 함수명은 checkvar 대상이 아니다 —
-            // 방출된 접두가 래퍼 앞에 붙어 rewriteDynamicFunctionBody 의
-            // slice 가 decl 중간을 잘라내는 사고가 있었다.
-            if cat == BindCat::VarLike
-                && !name.starts_with("__zp_")
-                && !name.starts_with("__ZP_")
-                && !top_varlikes.iter().any(|n| n == name)
-            {
-                top_varlikes.push(name.to_string());
-            }
-            if !(cat == BindCat::VarLike && self.global_classic() && is_dangerous_global(name)) {
-                self.declare(name);
-            }
-        });
-        // R1: classic top-level let/const/class 는 스크립트를 넘어 공유되는
-        // 전역 렉시컬 환경에 산다. eval 의 렉시컬 환경은 버려지므로, 이름을
-        // `__zp_lex` 레지스트리에 등록하고 각 선언 뒤에 accessor 클로저를
-        // 심어 다음 스크립트가 살아있는 바인딩을 읽게 한다.
-        if self.kind == ScriptKind::Classic {
-            self.emit_lex_registry(program, &top_varlikes);
+/// The site visitors, wrapped by the `Visit` methods of the same names, which measure inline-guard heights around them
+/// (`guard_enter` / `guard_leave`).
+impl RewriteVisitor {
+    fn call_site<'a>(&mut self, expr: &CallExpression<'a>) {
+        if let Expression::ComputedMemberExpression(member) = &expr.callee {
+            self.ccall_callees.insert((member.span.start, member.span.end));
         }
-        walk::walk_program(self, program);
-    }
-
-    fn visit_function(&mut self, func: &Function<'a>, flags: oxc_syntax::scope::ScopeFlags) {
-        self.push_scope();
-        self.var_env_stack.push(match &func.body {
-            Some(b) => (self.scopes.len() - 1, Self::body_insert_pos(b)),
-            None => (self.scopes.len() - 1, u32::MAX),
-        });
-        for param in &func.params.items {
-            collect_binding_pattern(&param.pattern, &mut |a| self.declare(a));
-        }
-        if let Some(id) = &func.id {
-            self.declare(id.name.as_str());
-        }
-        let prev_sloppy = self.cur_sloppy;
-        if let Some(body) = &func.body {
-            self.cur_sloppy = prev_sloppy && !Self::has_use_strict(&body.directives);
-            collect_scope_decl_names(&body.statements, true, self.cur_sloppy, &mut |name, _cat| {
-                self.declare(name);
-            });
-        }
-        self.fn_depth += 1;
-        self.nt_depth += 1;
-        walk::walk_function(self, func, flags);
-        self.fn_depth -= 1;
-        self.nt_depth -= 1;
-        self.cur_sloppy = prev_sloppy;
-        self.pop_scope();
-        self.var_env_stack.pop();
-    }
-
-    fn visit_arrow_function_expression(&mut self, arrow: &ArrowFunctionExpression<'a>) {
-        self.push_scope();
-        // 표현식 본문 화살표(`() => expr`)에는 `var` 를 삽입할 수 없다.
-        self.var_env_stack.push(if arrow.expression {
-            (self.scopes.len() - 1, u32::MAX)
-        } else {
-            (self.scopes.len() - 1, Self::body_insert_pos(&arrow.body))
-        });
-        for param in &arrow.params.items {
-            collect_binding_pattern(&param.pattern, &mut |a| self.declare(a));
-        }
-        let prev_sloppy = self.cur_sloppy;
-        self.cur_sloppy = prev_sloppy && !Self::has_use_strict(&arrow.body.directives);
-        // `x => expr` 의 본문은 OXC 가 합성한 ExpressionStatement 다. 문
-        // 위치가 아니므로 `_STMT` 형(ASI 가드 `0,`)을 붙이면 안 된다 —
-        // `(e,t)=>t[e]??=[]` 가 `(e,t)=>0,(…).v??=…` 가 되어 선언 전체가
-        // SyntaxError 였다(CNN 의 Permutive SDK, 2026-09-29).
-        if arrow.expression {
-            if let Some(Statement::ExpressionStatement(s)) = arrow.body.statements.first() {
-                self.arrow_expr_bodies.insert(s.span.start);
-            }
-        }
-        collect_scope_decl_names(&arrow.body.statements, true, self.cur_sloppy, &mut |name, _cat| {
-            self.declare(name);
-        });
-        // Arrow bodies are real function scopes for `var` — the counter
-        // keeps `var location` inside `() => {}` out of the global transform.
-        // `nt_depth` is NOT bumped: an arrow's new.target is the enclosing
-        // real function's, so dynamic-body mapping still applies.
-        self.fn_depth += 1;
-        walk::walk_arrow_function_expression(self, arrow);
-        self.fn_depth -= 1;
-        self.cur_sloppy = prev_sloppy;
-        self.pop_scope();
-        self.var_env_stack.pop();
-    }
-
-    fn visit_block_statement(&mut self, block: &BlockStatement<'a>) {
-        self.push_scope();
-        // Block-level pre-collection: `let`/`const`/`class` are TDZ'd, so a
-        // reference *before* the declaration text must still be treated as
-        // shadowed (the engine throws ReferenceError — emitting __zp_get
-        // would silently return a value). `var` names hoist past the block;
-        // the fn_depth==0 classic filter drops the unforgeable ones.
-        collect_scope_decl_names(&block.body, false, self.cur_sloppy, &mut |name, cat| {
-            if !(cat == BindCat::VarLike && self.global_classic() && is_dangerous_global(name)) {
-                self.declare(name);
-            }
-        });
-        walk::walk_block_statement(self, block);
-        self.pop_scope();
-    }
-
-    fn visit_class(&mut self, class: &Class<'a>) {
-        // Class names bind: declaration names are collected by the enclosing
-        // pre-collection pass; expression names bind inside the class body.
-        self.push_scope();
-        if let Some(id) = &class.id {
-            self.declare(id.name.as_str());
-        }
-        // R4: 클래스 본문·메서드는 선언 없이도 항상 strict — Annex B 불가.
-        let prev_sloppy = self.cur_sloppy;
-        self.cur_sloppy = false;
-        self.class_depth += 1;
-        walk::walk_class(self, class);
-        self.class_depth -= 1;
-        self.cur_sloppy = prev_sloppy;
-        self.pop_scope();
-    }
-
-    /// `this` in the top level of a classic script is the global object — natively `this === window`. The page's `window` is
-    /// the membrane's facade, never the real global, so the real one used to arrive through `this` (a script's top level, a
-    /// string eval): `this === window` was false, `var self = this; self.location = …` skipped the facade, and a bot-management
-    /// VM that checks `eval('this') === window` stopped. It reads the same thing `window` does.
-    ///
-    /// Everywhere else in sloppy code `this` is the caller's receiver — except that a plain call (`f()`, `Function('return
-    /// this')()`, `[].map(f)`) gets the real global from the engine, where natively it is the window. That one value is
-    /// mapped at runtime (`__zp_this`), every other receiver passes through. Strict code and class bodies get `undefined`
-    /// for a plain call, so they are left alone, and so is module code. A classic worker script is the same with `self`
-    /// for `window`: the worker's helper maps its real global to the worker's facade.
-    /// `'prepareStackTrace' in Error` — the presence test of the one routed member a page checks with `in` (the membrane's
-    /// sanitizer is there, natively nothing is). Other `in` tests stay native.
-    fn visit_binary_expression(&mut self, expr: &BinaryExpression<'a>) {
-        if expr.operator == BinaryOperator::In {
-            if let Expression::StringLiteral(s) = &expr.left {
-                if s.value == "prepareStackTrace" {
-                    let (os, ks) = (expr.right.span(), s.span);
-                    self.patches.push(Patch {
-                        start: expr.span.start,
-                        end: expr.span.end,
-                        replacement: format!("\u{1}RHAS\u{1}{}\u{1}{}\u{1}{}\u{1}{}\u{1}", os.start, os.end, ks.start, ks.end),
-                    });
-                }
-            }
-        }
-        walk::walk_binary_expression(self, expr);
-    }
-
-    fn visit_this_expression(&mut self, expr: &ThisExpression) {
-        let top = !self.local_this && self.nt_depth == 0 && self.class_depth == 0;
-        if self.kind == ScriptKind::Classic && top {
-            self.emit_global_get(expr.span, "window");
-        } else if self.kind == ScriptKind::Worker && top {
-            // a classic worker script's top level: the global, which worker code knows as `self` (the worker's facade)
-            self.emit_global_get(expr.span, "self");
-        } else if self.cur_sloppy && self.class_depth == 0 && self.kind != ScriptKind::Module {
-            self.patches.push(Patch { start: expr.span.start, end: expr.span.end, replacement: "\u{1}THIS_MAP\u{1}".to_string() });
-        }
-    }
-
-    fn visit_variable_declaration(&mut self, decl: &VariableDeclaration<'a>) {
-        // Names were already declared by the enclosing scope's
-        // pre-collection; this visit handles initializer reads and the
-        // classic-global `var` transform for unforgeable names.
-        let global_var_ctx = decl.kind == VariableDeclarationKind::Var && self.global_classic();
-        for d in &decl.declarations {
-            if global_var_ctx {
-                self.global_var_declarator(d);
-            } else {
-                let mut names: Vec<String> = Vec::new();
-                collect_binding_pattern(&d.id, &mut |n| names.push(n.to_string()));
-                for n in names {
-                    self.declare(&n);
-                }
-                walk::walk_binding_pattern(self, &d.id);
-                if let Some(init) = &d.init {
-                    self.visit_expression(init);
-                }
-            }
-        }
-    }
-
-    fn visit_catch_parameter(&mut self, param: &CatchParameter<'a>) {
-        collect_binding_pattern(&param.pattern, &mut |a| self.declare(a));
-        walk::walk_catch_parameter(self, param);
-    }
-
-    fn visit_statement(&mut self, stmt: &Statement<'a>) {
-        // `pending_labels` only describes the *immediate* child of a labeled
-        // statement. Any other statement shape arriving here consumed the
-        // slot, so stale names can't leak into a deeper loop.
-        if !matches!(
-            stmt,
-            Statement::ForStatement(_)
-                | Statement::WhileStatement(_)
-                | Statement::DoWhileStatement(_)
-        ) {
-            self.pending_labels.clear();
-        }
-        // Classic top-level `function location(){}` — like `var location`,
-        // the binding cannot overwrite the unforgeable global. Keep the
-        // declaration (hoisting shape, arity) but rename it to a temp so the
-        // emitted code never assigns the real global slot.
-        if self.global_classic() {
-            if let Statement::FunctionDeclaration(f) = stmt {
-                if let Some(id) = &f.id {
-                    if is_dangerous_global(id.name.as_str()) {
-                        let tmp = self.fresh("vdcl");
-                        self.patches.push(Patch {
-                            start: id.span.start,
-                            end: id.span.end,
-                            replacement: tmp,
-                        });
-                    }
-                }
-            }
-        }
-        walk::walk_statement(self, stmt);
-    }
-
-    fn visit_identifier_reference(&mut self, ident: &IdentifierReference<'a>) {
-        let name = ident.name.as_str();
-        if !is_dangerous_global(name) || self.is_shadowed(name) {
-            return;
-        }
-        if self.in_target > 0 {
-            self.emit_target_ident(ident.span, name);
-            return;
-        }
-        if !self.with_temps.is_empty() {
-            let replacement = self.with_get_chain(name);
-            self.patches.push(Patch {
-                start: ident.span.start,
-                end: ident.span.end,
-                replacement,
-            });
-            return;
-        }
-        self.emit_global_get(ident.span, name);
-    }
-
-    fn visit_object_property(&mut self, prop: &ObjectProperty<'a>) {
-        // `{ window, document, navigator }` — shorthand properties reuse one
-        // identifier as key AND value, so patching it as a plain reference
-        // produces `{__zp_get(globalThis,"window"), ...}` which fails to parse
-        // and takes the whole file down (observed on NAVER's
-        // ntm.pstatic.net/scripts/ntm_*.js: `this.dom = { window, document,
-        // navigator }`). Expand to the explicit `key: value` form.
-        if prop.shorthand {
-            if let Expression::Identifier(ident) = &prop.value {
-                let name = ident.name.as_str();
-                if is_dangerous_global(name) && !self.is_shadowed(name) {
-                    if self.with_temps.is_empty() {
-                        self.emit_shorthand_global_get(ident.span, name);
-                    } else {
-                        // `{location}` inside `with` — value resolves against
-                        // the with-object first, then the membrane global.
-                        let value = self.with_get_chain(name);
-                        self.patches.push(Patch {
-                            start: ident.span.start,
-                            end: ident.span.end,
-                            replacement: format!("{name}: {value}"),
-                        });
-                    }
-                    // Do not walk the value — it would re-emit the broken
-                    // plain patch over the same span. The key is an
-                    // IdentifierName and is never rewritten.
-                    return;
-                }
-            }
-        }
-        walk::walk_object_property(self, prop);
-    }
-
-    fn visit_import_expression(&mut self, expr: &ImportExpression<'a>) {
-        // Computed sources (variable / template / concatenation) can't be
-        // resolved at rewrite time, so wrap them in the runtime helper — it
-        // performs the same target→proxy mapping on the evaluated value.
-        //
-        // Leaving them alone is not neutral: the specifier resolves against
-        // the *importing script's own* URL, which for us is
-        // `<proxy>/zp/api/script?…`, so `"./x.js"` became a request for
-        // `/zp/api/x.js` → 404. That is how NAVER's ad SDK failed
-        // (`/zp/api/gfp-display-sdk.js`, then `initAd is not defined`).
-        // 래퍼는 MODULE_URL **마커**로 emit 한다 (resolver 주석 참조) —
-        // zero-width 패치 두 개로 감싸면 인자가 리라이트 대상일 때 안팎이
-        // 뒤집힌다.
-        //
-        // `data:`/`blob:` **리터럴**도 런타임 경로로 보낸다 — 런타임이 모듈을
-        // 읽어 재작성한 blob 으로 다시 import 한다(computed 와 같은 길). 그대로
-        // 두면 리라이터를 통째로 건너뛰었다: CSP 만이 막았고, 크롬에서 되는
-        // 정상 `import('data:…')` 는 깨졌다. ERRATA §E, 2026-09-29.
-        let runtime_literal = match &expr.source {
-            Expression::StringLiteral(lit) => {
-                let l = lit.value.as_str().trim_start().to_ascii_lowercase();
-                l.starts_with("data:") || l.starts_with("blob:")
-            }
-            _ => false,
-        };
-        let static_literal = match &expr.source {
-            Expression::StringLiteral(lit) if !runtime_literal => Some(lit),
-            _ => None,
-        };
-        let Some(lit) = static_literal else {
-            let span = expr.source.span();
-            if !self.target_url.is_empty() {
-                // **walk 보다 먼저 push 한다.** apply_patches 의 정렬은 stable
-                // 이라, 같은 range 를 갖는 안쪽 마커(인자 전체가 하나의 호출인
-                // `import(u.replace(…))` 가 정확히 이 경우)와 tie 가 나면
-                // **먼저 들어간 쪽이 바깥**이 된다. 뒤에 push 하면 안쪽
-                // METHOD_CALL 이 이기고 래퍼가 인자 안으로 들어간다.
-                self.patches.push(Patch {
-                    start: span.start,
-                    end: span.end,
-                    replacement: format!(
-                        "\u{1}MODULE_URL\u{1}{}\u{1}{}\u{1}{}\u{1}",
-                        span.start,
-                        span.end,
-                        js_quote_body(&self.target_url)
-                    ),
-                });
-            }
-            // Recurse so any dangerous-global identifiers inside the argument
-            // expression still get patched (e.g. `import(window.__cdn +
-            // '/mod.js')` — `window` here still routes through __zp_get).
-            walk::walk_import_expression(self, expr);
-            return;
-        };
-        walk::walk_import_expression(self, expr);
-        self.rewrite_module_specifier(lit);
-    }
-
-    fn visit_import_declaration(&mut self, decl: &ImportDeclaration<'a>) {
-        walk::walk_import_declaration(self, decl);
-        self.rewrite_module_specifier(&decl.source);
-    }
-
-    fn visit_export_named_declaration(&mut self, decl: &ExportNamedDeclaration<'a>) {
-        walk::walk_export_named_declaration(self, decl);
-        // `export { a }` with no `from` clause has no specifier to rewrite.
-        if let Some(source) = &decl.source {
-            self.rewrite_module_specifier(source);
-        }
-    }
-
-    fn visit_export_all_declaration(&mut self, decl: &ExportAllDeclaration<'a>) {
-        walk::walk_export_all_declaration(self, decl);
-        self.rewrite_module_specifier(&decl.source);
-    }
-
-    fn visit_call_expression(&mut self, expr: &CallExpression<'a>) {
         // First walk children (args + callee) so global identifiers are
         // patched normally. Then check if this is a dangerous method call.
         walk::walk_call_expression(self, expr);
@@ -3022,9 +2950,10 @@ impl<'a> Visit<'a> for RewriteVisitor {
                         key_span.start, key_span.end, as_, ae
                     )
                 } else {
+                    let group = self.guard_claim();
                     format!(
-                        "\u{1}CCALL\u{1}{}\u{1}{}\u{1}{}\u{1}{}\u{1}{}\u{1}{}\u{1}",
-                        obj_span.start, obj_span.end, key_span.start, key_span.end, as_, ae
+                        "\u{1}CCALL\u{1}{}\u{1}{}\u{1}{}\u{1}{}\u{1}{}\u{1}{}\u{1}{}\u{1}",
+                        obj_span.start, obj_span.end, key_span.start, key_span.end, as_, ae, group
                     )
                 };
                 self.patches.push(Patch {
@@ -3247,106 +3176,7 @@ impl<'a> Visit<'a> for RewriteVisitor {
         }
     }
 
-    fn visit_with_statement(&mut self, stmt: &WithStatement<'a>) {
-        // `with(obj){...}` resolves free identifiers against obj first.
-        // Statically routing dangerous names to the membrane broke object
-        // precedence (`with({location:fake}) location` returned the virtual
-        // location, not `fake`). Bind the object to a temp once — reusing the
-        // expression per reference would re-run its side effects — then
-        // emit `__zp_with_*` resolvers inside the body.
-        let tmp = self.fresh("w");
-        self.patches.push(Patch {
-            start: stmt.span.start,
-            end: stmt.span.start,
-            replacement: format!("{{let {tmp};"),
-        });
-        self.patches.push(Patch {
-            start: stmt.span.end,
-            end: stmt.span.end,
-            replacement: "}".to_string(),
-        });
-        let obj_span = stmt.object.span();
-        self.patches.push(Patch {
-            start: obj_span.start,
-            end: obj_span.end,
-            replacement: format!(
-                "\u{1}WITH_OBJ\u{1}{}\u{1}{}\u{1}{}\u{1}",
-                tmp, obj_span.start, obj_span.end
-            ),
-        });
-        self.visit_expression(&stmt.object);
-        self.with_temps.push(tmp);
-        self.visit_body_statement(&stmt.body);
-        self.with_temps.pop();
-    }
-
-    /// `label: stmt` — collect the whole label chain (a label's body may be
-    /// another labeled statement) and expose it to the *final* body via
-    /// `pending_labels`. The final body is a bare statement position.
-    fn visit_labeled_statement(&mut self, stmt: &LabeledStatement<'a>) {
-        let mut names = vec![stmt.label.name.to_string()];
-        let mut body: &Statement<'a> = &stmt.body;
-        while let Statement::LabeledStatement(inner) = body {
-            names.push(inner.label.name.to_string());
-            body = &inner.body;
-        }
-        let saved = std::mem::replace(&mut self.pending_labels, names);
-        self.visit_body_statement(body);
-        self.pending_labels = saved;
-    }
-
-    /// `if/else` arms are bare statement positions — a `let`-prefixing
-    /// transform (loop caps) must know.
-    fn visit_if_statement(&mut self, stmt: &IfStatement<'a>) {
-        self.visit_expression(&stmt.test);
-        self.visit_body_statement(&stmt.consequent);
-        if let Some(alt) = &stmt.alternate {
-            self.visit_body_statement(alt);
-        }
-    }
-
-    /// `break outer` / `continue outer` inside a block-wrapped capped loop —
-    /// the loop re-bound its labels on a fresh inner name (`__zp_lbl_N`), so
-    /// references to the source label must follow it.
-    fn visit_continue_statement(&mut self, it: &ContinueStatement<'a>) {
-        if let Some(label) = &it.label {
-            if let Some((_, new)) = self
-                .label_renames
-                .iter()
-                .rev()
-                .find(|(old, _)| old.as_str() == label.name.as_str())
-            {
-                self.patches.push(Patch {
-                    start: label.span.start,
-                    end: label.span.end,
-                    replacement: new.clone(),
-                });
-                return;
-            }
-        }
-        walk::walk_continue_statement(self, it);
-    }
-
-    fn visit_break_statement(&mut self, it: &BreakStatement<'a>) {
-        if let Some(label) = &it.label {
-            if let Some((_, new)) = self
-                .label_renames
-                .iter()
-                .rev()
-                .find(|(old, _)| old.as_str() == label.name.as_str())
-            {
-                self.patches.push(Patch {
-                    start: label.span.start,
-                    end: label.span.end,
-                    replacement: new.clone(),
-                });
-                return;
-            }
-        }
-        walk::walk_break_statement(self, it);
-    }
-
-    fn visit_assignment_expression(&mut self, expr: &AssignmentExpression<'a>) {
+    fn assignment_site<'a>(&mut self, expr: &AssignmentExpression<'a>) {
         // A bare dangerous global as the assignment TARGET (`location = url`).
         // The identifier visitor patches it to `__zp_get(globalThis,"location")`,
         // which is not a valid assignment target: V8 accepts the parse but
@@ -3442,10 +3272,11 @@ impl<'a> Visit<'a> for RewriteVisitor {
             let value_span = expr.right.span();
             let op = expr.operator;
             let replacement = if op == oxc_syntax::operator::AssignmentOperator::Assign {
+                let group = self.guard_claim();
                 format!(
-                    "\u{1}CSET\u{1}{}\u{1}{}\u{1}{}\u{1}{}\u{1}{}\u{1}{}\u{1}",
+                    "\u{1}CSET\u{1}{}\u{1}{}\u{1}{}\u{1}{}\u{1}{}\u{1}{}\u{1}{}\u{1}",
                     obj_span.start, obj_span.end, key_span.start, key_span.end,
-                    value_span.start, value_span.end
+                    value_span.start, value_span.end, group
                 )
             } else {
                 let Some(op_str) = assignment_operator_str(op) else {
@@ -3518,6 +3349,569 @@ impl<'a> Visit<'a> for RewriteVisitor {
         self.visit_expression(&expr.right);
     }
 
+    fn computed_member_site<'a>(&mut self, expr: &ComputedMemberExpression<'a>) {
+        // Computed member reads were entirely unmediated — `this['location']`
+        // / `document['location']` / `frames[0]` sailed through and produced
+        // real natives. Route every non-literal or dangerous-literal access
+        // through `__zp_cget`, which falls back to plain `x[k]` for unrelated
+        // names (and preserves the nullish TypeError).
+        walk::walk_computed_member_expression(self, expr);
+        if matches!(expr.object, Expression::Super(_)) {
+            return;
+        }
+        if let Expression::StringLiteral(lit) = &expr.expression {
+            let name = lit.value.as_str();
+            if !is_dangerous_member(name) && !is_dangerous_global(name) && !is_dangerous_method(name) {
+                return;
+            }
+        }
+        use oxc_span::GetSpan;
+        let obj_span = expr.object.span();
+        let key_span = expr.expression.span();
+        // A computed call's callee: the call is the site (`call_site`).
+        let group = if expr.optional || self.ccall_callees.contains(&(expr.span.start, expr.span.end)) {
+            0
+        } else {
+            self.guard_claim()
+        };
+        self.patches.push(Patch {
+            start: expr.span.start,
+            end: expr.span.end,
+            replacement: if expr.optional {
+                format!(
+                    "\u{1}OGET\u{1}{}\u{1}{}\u{1}E\u{1}{}\u{1}{}\u{1}",
+                    obj_span.start, obj_span.end, key_span.start, key_span.end
+                )
+            } else {
+                format!(
+                    "\u{1}CGET\u{1}{}\u{1}{}\u{1}{}\u{1}{}\u{1}{}\u{1}",
+                    obj_span.start, obj_span.end, key_span.start, key_span.end, group
+                )
+            },
+        });
+    }
+}
+
+impl<'a> Visit<'a> for RewriteVisitor {
+    fn visit_program(&mut self, program: &Program<'a>) {
+        // Hoist-aware pre-collection: the sequential walk used to declare
+        // names as it met them, so `f(){ location; var location; }` read the
+        // *virtual* location where the engine sees a hoisted local
+        // (undefined → TypeError). Collect every binding that this scope
+        // level owns before walking the body.
+        //
+        // Classic top level only: `var`/`function` declarations for
+        // unforgeable browser globals DO NOT create bindings — `var location`
+        // is silently ignored and `location` still resolves to the real
+        // window.location. Recording them as shadowed emitted bare
+        // references that bypassed the membrane entirely. Lexical/module/
+        // function-local declarations shadow normally.
+        self.cur_sloppy = self.kind != ScriptKind::Module && !Self::has_use_strict(&program.directives);
+        let mut top_varlikes: Vec<String> = Vec::new();
+        collect_scope_decl_names(&program.body, true, self.cur_sloppy, &mut |name, cat| {
+            // `__zp_dynamic__` 같은 내부 래퍼 함수명은 checkvar 대상이 아니다 —
+            // 방출된 접두가 래퍼 앞에 붙어 rewriteDynamicFunctionBody 의
+            // slice 가 decl 중간을 잘라내는 사고가 있었다.
+            if cat == BindCat::VarLike
+                && !name.starts_with("__zp_")
+                && !name.starts_with("__ZP_")
+                && !top_varlikes.iter().any(|n| n == name)
+            {
+                top_varlikes.push(name.to_string());
+            }
+            if !(cat == BindCat::VarLike && self.global_classic() && is_dangerous_global(name)) {
+                self.declare(name);
+            }
+        });
+        // R1: classic top-level let/const/class 는 스크립트를 넘어 공유되는
+        // 전역 렉시컬 환경에 산다. eval 의 렉시컬 환경은 버려지므로, 이름을
+        // `__zp_lex` 레지스트리에 등록하고 각 선언 뒤에 accessor 클로저를
+        // 심어 다음 스크립트가 살아있는 바인딩을 읽게 한다.
+        if self.kind == ScriptKind::Classic {
+            self.emit_lex_registry(program, &top_varlikes);
+        }
+        walk::walk_program(self, program);
+    }
+
+    fn visit_function(&mut self, func: &Function<'a>, flags: oxc_syntax::scope::ScopeFlags) {
+        self.push_scope();
+        self.var_env_stack.push(match &func.body {
+            Some(b) => (self.scopes.len() - 1, Self::body_insert_pos(b)),
+            None => (self.scopes.len() - 1, u32::MAX),
+        });
+        for param in &func.params.items {
+            collect_binding_pattern(&param.pattern, &mut |a| self.declare(a));
+        }
+        if let Some(id) = &func.id {
+            self.declare(id.name.as_str());
+        }
+        let prev_sloppy = self.cur_sloppy;
+        if let Some(body) = &func.body {
+            self.cur_sloppy = prev_sloppy && !Self::has_use_strict(&body.directives);
+            collect_scope_decl_names(&body.statements, true, self.cur_sloppy, &mut |name, _cat| {
+                self.declare(name);
+            });
+        }
+        self.fn_depth += 1;
+        self.nt_depth += 1;
+        let guards = self.guard_fn_enter(func.body.as_ref().map(|b| b.span.end - 1));
+        walk::walk_function(self, func, flags);
+        self.guard_fn_leave(guards);
+        self.fn_depth -= 1;
+        self.nt_depth -= 1;
+        self.cur_sloppy = prev_sloppy;
+        self.pop_scope();
+        self.var_env_stack.pop();
+    }
+
+    fn visit_arrow_function_expression(&mut self, arrow: &ArrowFunctionExpression<'a>) {
+        self.push_scope();
+        // 표현식 본문 화살표(`() => expr`)에는 `var` 를 삽입할 수 없다.
+        self.var_env_stack.push(if arrow.expression {
+            (self.scopes.len() - 1, u32::MAX)
+        } else {
+            (self.scopes.len() - 1, Self::body_insert_pos(&arrow.body))
+        });
+        for param in &arrow.params.items {
+            collect_binding_pattern(&param.pattern, &mut |a| self.declare(a));
+        }
+        let prev_sloppy = self.cur_sloppy;
+        self.cur_sloppy = prev_sloppy && !Self::has_use_strict(&arrow.body.directives);
+        // `x => expr` 의 본문은 OXC 가 합성한 ExpressionStatement 다. 문
+        // 위치가 아니므로 `_STMT` 형(ASI 가드 `0,`)을 붙이면 안 된다 —
+        // `(e,t)=>t[e]??=[]` 가 `(e,t)=>0,(…).v??=…` 가 되어 선언 전체가
+        // SyntaxError 였다(CNN 의 Permutive SDK, 2026-09-29).
+        if arrow.expression {
+            if let Some(Statement::ExpressionStatement(s)) = arrow.body.statements.first() {
+                self.arrow_expr_bodies.insert(s.span.start);
+            }
+        }
+        collect_scope_decl_names(&arrow.body.statements, true, self.cur_sloppy, &mut |name, _cat| {
+            self.declare(name);
+        });
+        // Arrow bodies are real function scopes for `var` — the counter
+        // keeps `var location` inside `() => {}` out of the global transform.
+        // `nt_depth` is NOT bumped: an arrow's new.target is the enclosing
+        // real function's, so dynamic-body mapping still applies.
+        self.fn_depth += 1;
+        let guards = self.guard_fn_enter(if arrow.expression { None } else { Some(arrow.body.span.end - 1) });
+        walk::walk_arrow_function_expression(self, arrow);
+        self.guard_fn_leave(guards);
+        self.fn_depth -= 1;
+        self.cur_sloppy = prev_sloppy;
+        self.pop_scope();
+        self.var_env_stack.pop();
+    }
+
+    /// A default value runs in the parameters' own scope, which the body's `var`s are not in.
+    fn visit_formal_parameters(&mut self, params: &FormalParameters<'a>) {
+        let guards = self.guard_fn_enter(None);
+        walk::walk_formal_parameters(self, params);
+        self.guard_fn_leave(guards);
+    }
+
+    fn visit_block_statement(&mut self, block: &BlockStatement<'a>) {
+        self.push_scope();
+        // Block-level pre-collection: `let`/`const`/`class` are TDZ'd, so a
+        // reference *before* the declaration text must still be treated as
+        // shadowed (the engine throws ReferenceError — emitting __zp_get
+        // would silently return a value). `var` names hoist past the block;
+        // the fn_depth==0 classic filter drops the unforgeable ones.
+        collect_scope_decl_names(&block.body, false, self.cur_sloppy, &mut |name, cat| {
+            if !(cat == BindCat::VarLike && self.global_classic() && is_dangerous_global(name)) {
+                self.declare(name);
+            }
+        });
+        walk::walk_block_statement(self, block);
+        self.pop_scope();
+    }
+
+    fn visit_class(&mut self, class: &Class<'a>) {
+        // Class names bind: declaration names are collected by the enclosing
+        // pre-collection pass; expression names bind inside the class body.
+        self.push_scope();
+        if let Some(id) = &class.id {
+            self.declare(id.name.as_str());
+        }
+        // R4: 클래스 본문·메서드는 선언 없이도 항상 strict — Annex B 불가.
+        let prev_sloppy = self.cur_sloppy;
+        self.cur_sloppy = false;
+        self.class_depth += 1;
+        // Field initializers and static blocks are scopes of their own; methods open theirs.
+        let guards = self.guard_fn_enter(None);
+        walk::walk_class(self, class);
+        self.guard_fn_leave(guards);
+        self.class_depth -= 1;
+        self.cur_sloppy = prev_sloppy;
+        self.pop_scope();
+    }
+
+    /// `this` in the top level of a classic script is the global object — natively `this === window`. The page's `window` is
+    /// the membrane's facade, never the real global, so the real one used to arrive through `this` (a script's top level, a
+    /// string eval): `this === window` was false, `var self = this; self.location = …` skipped the facade, and a bot-management
+    /// VM that checks `eval('this') === window` stopped. It reads the same thing `window` does.
+    ///
+    /// Everywhere else in sloppy code `this` is the caller's receiver — except that a plain call (`f()`, `Function('return
+    /// this')()`, `[].map(f)`) gets the real global from the engine, where natively it is the window. That one value is
+    /// mapped at runtime (`__zp_this`), every other receiver passes through. Strict code and class bodies get `undefined`
+    /// for a plain call, so they are left alone, and so is module code. A classic worker script is the same with `self`
+    /// for `window`: the worker's helper maps its real global to the worker's facade.
+    /// `'prepareStackTrace' in Error` — the presence test of the one routed member a page checks with `in` (the membrane's
+    /// sanitizer is there, natively nothing is). Other `in` tests stay native.
+    fn visit_binary_expression(&mut self, expr: &BinaryExpression<'a>) {
+        if expr.operator == BinaryOperator::In {
+            if let Expression::StringLiteral(s) = &expr.left {
+                if s.value == "prepareStackTrace" {
+                    let (os, ks) = (expr.right.span(), s.span);
+                    self.patches.push(Patch {
+                        start: expr.span.start,
+                        end: expr.span.end,
+                        replacement: format!("\u{1}RHAS\u{1}{}\u{1}{}\u{1}{}\u{1}{}\u{1}", os.start, os.end, ks.start, ks.end),
+                    });
+                }
+            }
+        }
+        walk::walk_binary_expression(self, expr);
+    }
+
+    fn visit_this_expression(&mut self, expr: &ThisExpression) {
+        let top = !self.local_this && self.nt_depth == 0 && self.class_depth == 0;
+        if self.kind == ScriptKind::Classic && top {
+            self.emit_global_get(expr.span, "window");
+        } else if self.kind == ScriptKind::Worker && top {
+            // a classic worker script's top level: the global, which worker code knows as `self` (the worker's facade)
+            self.emit_global_get(expr.span, "self");
+        } else if self.cur_sloppy && self.class_depth == 0 && self.kind != ScriptKind::Module {
+            self.patches.push(Patch { start: expr.span.start, end: expr.span.end, replacement: "\u{1}THIS_MAP\u{1}".to_string() });
+        }
+    }
+
+    fn visit_variable_declaration(&mut self, decl: &VariableDeclaration<'a>) {
+        // Our own helper bindings met again (rewritten code rewritten once more): left exactly as they are. Their
+        // `this` is the global object they read the helpers off; mapped to the window facade it hides them.
+        if is_helper_prefix_declaration(decl) {
+            return;
+        }
+        // Names were already declared by the enclosing scope's
+        // pre-collection; this visit handles initializer reads and the
+        // classic-global `var` transform for unforgeable names.
+        let global_var_ctx = decl.kind == VariableDeclarationKind::Var && self.global_classic();
+        for d in &decl.declarations {
+            if global_var_ctx {
+                self.global_var_declarator(d);
+            } else {
+                let mut names: Vec<String> = Vec::new();
+                collect_binding_pattern(&d.id, &mut |n| names.push(n.to_string()));
+                for n in names {
+                    self.declare(&n);
+                }
+                walk::walk_binding_pattern(self, &d.id);
+                if let Some(init) = &d.init {
+                    self.visit_expression(init);
+                }
+            }
+        }
+    }
+
+    fn visit_catch_parameter(&mut self, param: &CatchParameter<'a>) {
+        collect_binding_pattern(&param.pattern, &mut |a| self.declare(a));
+        walk::walk_catch_parameter(self, param);
+    }
+
+    fn visit_statement(&mut self, stmt: &Statement<'a>) {
+        // `pending_labels` only describes the *immediate* child of a labeled
+        // statement. Any other statement shape arriving here consumed the
+        // slot, so stale names can't leak into a deeper loop.
+        if !matches!(
+            stmt,
+            Statement::ForStatement(_)
+                | Statement::WhileStatement(_)
+                | Statement::DoWhileStatement(_)
+        ) {
+            self.pending_labels.clear();
+        }
+        // Classic top-level `function location(){}` — like `var location`,
+        // the binding cannot overwrite the unforgeable global. Keep the
+        // declaration (hoisting shape, arity) but rename it to a temp so the
+        // emitted code never assigns the real global slot.
+        if self.global_classic() {
+            if let Statement::FunctionDeclaration(f) = stmt {
+                if let Some(id) = &f.id {
+                    if is_dangerous_global(id.name.as_str()) {
+                        let tmp = self.fresh("vdcl");
+                        self.patches.push(Patch {
+                            start: id.span.start,
+                            end: id.span.end,
+                            replacement: tmp,
+                        });
+                    }
+                }
+            }
+        }
+        walk::walk_statement(self, stmt);
+    }
+
+    fn visit_identifier_reference(&mut self, ident: &IdentifierReference<'a>) {
+        let name = ident.name.as_str();
+        if !is_dangerous_global(name) || self.is_shadowed(name) {
+            return;
+        }
+        if self.in_target > 0 {
+            self.emit_target_ident(ident.span, name);
+            return;
+        }
+        if !self.with_temps.is_empty() {
+            let replacement = self.with_get_chain(name);
+            self.patches.push(Patch {
+                start: ident.span.start,
+                end: ident.span.end,
+                replacement,
+            });
+            return;
+        }
+        self.emit_global_get(ident.span, name);
+    }
+
+    fn visit_object_property(&mut self, prop: &ObjectProperty<'a>) {
+        // `{ window, document, navigator }` — shorthand properties reuse one
+        // identifier as key AND value, so patching it as a plain reference
+        // produces `{__zp_get(globalThis,"window"), ...}` which fails to parse
+        // and takes the whole file down (observed on NAVER's
+        // ntm.pstatic.net/scripts/ntm_*.js: `this.dom = { window, document,
+        // navigator }`). Expand to the explicit `key: value` form.
+        if prop.shorthand {
+            if let Expression::Identifier(ident) = &prop.value {
+                let name = ident.name.as_str();
+                if is_dangerous_global(name) && !self.is_shadowed(name) {
+                    if self.with_temps.is_empty() {
+                        self.emit_shorthand_global_get(ident.span, name);
+                    } else {
+                        // `{location}` inside `with` — value resolves against
+                        // the with-object first, then the membrane global.
+                        let value = self.with_get_chain(name);
+                        self.patches.push(Patch {
+                            start: ident.span.start,
+                            end: ident.span.end,
+                            replacement: format!("{name}: {value}"),
+                        });
+                    }
+                    // Do not walk the value — it would re-emit the broken
+                    // plain patch over the same span. The key is an
+                    // IdentifierName and is never rewritten.
+                    return;
+                }
+            }
+        }
+        walk::walk_object_property(self, prop);
+    }
+
+    fn visit_import_expression(&mut self, expr: &ImportExpression<'a>) {
+        // Computed sources (variable / template / concatenation) can't be
+        // resolved at rewrite time, so wrap them in the runtime helper — it
+        // performs the same target→proxy mapping on the evaluated value.
+        //
+        // Leaving them alone is not neutral: the specifier resolves against
+        // the *importing script's own* URL, which for us is
+        // `<proxy>/zp/api/script?…`, so `"./x.js"` became a request for
+        // `/zp/api/x.js` → 404. That is how NAVER's ad SDK failed
+        // (`/zp/api/gfp-display-sdk.js`, then `initAd is not defined`).
+        // 래퍼는 MODULE_URL **마커**로 emit 한다 (resolver 주석 참조) —
+        // zero-width 패치 두 개로 감싸면 인자가 리라이트 대상일 때 안팎이
+        // 뒤집힌다.
+        //
+        // `data:`/`blob:` **리터럴**도 런타임 경로로 보낸다 — 런타임이 모듈을
+        // 읽어 재작성한 blob 으로 다시 import 한다(computed 와 같은 길). 그대로
+        // 두면 리라이터를 통째로 건너뛰었다: CSP 만이 막았고, 크롬에서 되는
+        // 정상 `import('data:…')` 는 깨졌다. ERRATA §E, 2026-09-29.
+        let runtime_literal = match &expr.source {
+            Expression::StringLiteral(lit) => {
+                let l = lit.value.as_str().trim_start().to_ascii_lowercase();
+                l.starts_with("data:") || l.starts_with("blob:")
+            }
+            _ => false,
+        };
+        let static_literal = match &expr.source {
+            Expression::StringLiteral(lit) if !runtime_literal => Some(lit),
+            _ => None,
+        };
+        let Some(lit) = static_literal else {
+            let span = expr.source.span();
+            if !self.target_url.is_empty() {
+                // **walk 보다 먼저 push 한다.** apply_patches 의 정렬은 stable
+                // 이라, 같은 range 를 갖는 안쪽 마커(인자 전체가 하나의 호출인
+                // `import(u.replace(…))` 가 정확히 이 경우)와 tie 가 나면
+                // **먼저 들어간 쪽이 바깥**이 된다. 뒤에 push 하면 안쪽
+                // METHOD_CALL 이 이기고 래퍼가 인자 안으로 들어간다.
+                self.patches.push(Patch {
+                    start: span.start,
+                    end: span.end,
+                    replacement: format!(
+                        "\u{1}MODULE_URL\u{1}{}\u{1}{}\u{1}{}\u{1}",
+                        span.start,
+                        span.end,
+                        js_quote_body(&self.target_url)
+                    ),
+                });
+            }
+            // Recurse so any dangerous-global identifiers inside the argument
+            // expression still get patched (e.g. `import(window.__cdn +
+            // '/mod.js')` — `window` here still routes through __zp_get).
+            walk::walk_import_expression(self, expr);
+            return;
+        };
+        walk::walk_import_expression(self, expr);
+        self.rewrite_module_specifier(lit);
+    }
+
+    fn visit_import_declaration(&mut self, decl: &ImportDeclaration<'a>) {
+        walk::walk_import_declaration(self, decl);
+        self.rewrite_module_specifier(&decl.source);
+    }
+
+    fn visit_export_named_declaration(&mut self, decl: &ExportNamedDeclaration<'a>) {
+        walk::walk_export_named_declaration(self, decl);
+        // `export { a }` with no `from` clause has no specifier to rewrite.
+        if let Some(source) = &decl.source {
+            self.rewrite_module_specifier(source);
+        }
+    }
+
+    fn visit_export_all_declaration(&mut self, decl: &ExportAllDeclaration<'a>) {
+        walk::walk_export_all_declaration(self, decl);
+        self.rewrite_module_specifier(&decl.source);
+    }
+
+    fn visit_call_expression(&mut self, expr: &CallExpression<'a>) {
+        let saved = self.guard_enter();
+        self.call_site(expr);
+        self.guard_leave(saved);
+    }
+
+    fn visit_with_statement(&mut self, stmt: &WithStatement<'a>) {
+        // `with(obj){...}` resolves free identifiers against obj first.
+        // Statically routing dangerous names to the membrane broke object
+        // precedence (`with({location:fake}) location` returned the virtual
+        // location, not `fake`). Bind the object to a temp once — reusing the
+        // expression per reference would re-run its side effects — then
+        // emit `__zp_with_*` resolvers inside the body.
+        let tmp = self.fresh("w");
+        self.patches.push(Patch {
+            start: stmt.span.start,
+            end: stmt.span.start,
+            replacement: format!("{{let {tmp};"),
+        });
+        self.patches.push(Patch {
+            start: stmt.span.end,
+            end: stmt.span.end,
+            replacement: "}".to_string(),
+        });
+        let obj_span = stmt.object.span();
+        self.patches.push(Patch {
+            start: obj_span.start,
+            end: obj_span.end,
+            replacement: format!(
+                "\u{1}WITH_OBJ\u{1}{}\u{1}{}\u{1}{}\u{1}",
+                tmp, obj_span.start, obj_span.end
+            ),
+        });
+        // The helpers the body's rewritten code calls, bound before anything in it runs: otherwise each would resolve
+        // through the page's object first, and `with({__zp_get: f}) location` handed `f` the real global object.
+        // (Also the cheap way to name them: a with-object lookup is a run-time search on every evaluation.)
+        let prefix = with_helper_prefix();
+        // A body that already starts with them is code of ours rewritten once more (a child frame booted into a reused
+        // window runs its wrappers through the parent's facade): a second set in the same block is a redeclaration.
+        let bound = matches!(&stmt.body, Statement::BlockStatement(b)
+            if matches!(b.body.first(), Some(Statement::VariableDeclaration(d)) if is_helper_prefix_declaration(d)));
+        match &stmt.body {
+            _ if bound => {}
+            Statement::BlockStatement(block) => {
+                let at = block.span.start + 1;
+                self.patches.push(Patch { start: at, end: at, replacement: prefix });
+            }
+            body => {
+                let span = body.span();
+                self.patches.push(Patch { start: span.start, end: span.start, replacement: format!("{{{prefix}") });
+                self.patches.push(Patch { start: span.end, end: span.end, replacement: "}".to_string() });
+            }
+        }
+        self.visit_expression(&stmt.object);
+        self.with_temps.push(tmp);
+        self.visit_body_statement(&stmt.body);
+        self.with_temps.pop();
+    }
+
+    /// `label: stmt` — collect the whole label chain (a label's body may be
+    /// another labeled statement) and expose it to the *final* body via
+    /// `pending_labels`. The final body is a bare statement position.
+    fn visit_labeled_statement(&mut self, stmt: &LabeledStatement<'a>) {
+        let mut names = vec![stmt.label.name.to_string()];
+        let mut body: &Statement<'a> = &stmt.body;
+        while let Statement::LabeledStatement(inner) = body {
+            names.push(inner.label.name.to_string());
+            body = &inner.body;
+        }
+        let saved = std::mem::replace(&mut self.pending_labels, names);
+        self.visit_body_statement(body);
+        self.pending_labels = saved;
+    }
+
+    /// `if/else` arms are bare statement positions — a `let`-prefixing
+    /// transform (loop caps) must know.
+    fn visit_if_statement(&mut self, stmt: &IfStatement<'a>) {
+        self.visit_expression(&stmt.test);
+        self.visit_body_statement(&stmt.consequent);
+        if let Some(alt) = &stmt.alternate {
+            self.visit_body_statement(alt);
+        }
+    }
+
+    /// `break outer` / `continue outer` inside a block-wrapped capped loop —
+    /// the loop re-bound its labels on a fresh inner name (`__zp_lbl_N`), so
+    /// references to the source label must follow it.
+    fn visit_continue_statement(&mut self, it: &ContinueStatement<'a>) {
+        if let Some(label) = &it.label {
+            if let Some((_, new)) = self
+                .label_renames
+                .iter()
+                .rev()
+                .find(|(old, _)| old.as_str() == label.name.as_str())
+            {
+                self.patches.push(Patch {
+                    start: label.span.start,
+                    end: label.span.end,
+                    replacement: new.clone(),
+                });
+                return;
+            }
+        }
+        walk::walk_continue_statement(self, it);
+    }
+
+    fn visit_break_statement(&mut self, it: &BreakStatement<'a>) {
+        if let Some(label) = &it.label {
+            if let Some((_, new)) = self
+                .label_renames
+                .iter()
+                .rev()
+                .find(|(old, _)| old.as_str() == label.name.as_str())
+            {
+                self.patches.push(Patch {
+                    start: label.span.start,
+                    end: label.span.end,
+                    replacement: new.clone(),
+                });
+                return;
+            }
+        }
+        walk::walk_break_statement(self, it);
+    }
+
+    fn visit_assignment_expression(&mut self, expr: &AssignmentExpression<'a>) {
+        let saved = self.guard_enter();
+        self.assignment_site(expr);
+        self.guard_leave(saved);
+    }
+
     fn visit_update_expression(&mut self, expr: &UpdateExpression<'a>) {
         // `location++` has the same invalid-target problem as `location = x`.
         if let SimpleAssignmentTarget::AssignmentTargetIdentifier(ident) = &expr.argument {
@@ -3551,8 +3945,24 @@ impl<'a> Visit<'a> for RewriteVisitor {
         if self.arrow_expr_bodies.contains(&stmt.span.start) {
             return;
         }
+        // Only the outermost patch at the statement's start is emitted there; one inside it is emitted inside its
+        // operand (`e.ports[0].postMessage(x)` — the guard is the base argument of `__zp_call(…)`, where a `0,` is an
+        // argument of its own).
+        let outer_end = self.patches[first_patch..]
+            .iter()
+            .filter(|p| p.start == stmt.span.start)
+            .map(|p| p.end)
+            .max()
+            .unwrap_or(0);
         for patch in &mut self.patches[first_patch..] {
             if patch.start != stmt.span.start {
+                continue;
+            }
+            // An inline-guarded site renders as a parenthesized sequence (`guard_fields`).
+            if ["\u{1}CGET\u{1}", "\u{1}CSET\u{1}", "\u{1}CCALL\u{1}"].iter().any(|m| patch.replacement.starts_with(m)) {
+                if patch.end == outer_end {
+                    patch.replacement.push_str("S\u{1}");
+                }
                 continue;
             }
             for (plain, stmted) in [
@@ -3909,39 +4319,9 @@ impl<'a> Visit<'a> for RewriteVisitor {
     }
 
     fn visit_computed_member_expression(&mut self, expr: &ComputedMemberExpression<'a>) {
-        // Computed member reads were entirely unmediated — `this['location']`
-        // / `document['location']` / `frames[0]` sailed through and produced
-        // real natives. Route every non-literal or dangerous-literal access
-        // through `__zp_cget`, which falls back to plain `x[k]` for unrelated
-        // names (and preserves the nullish TypeError).
-        walk::walk_computed_member_expression(self, expr);
-        if matches!(expr.object, Expression::Super(_)) {
-            return;
-        }
-        if let Expression::StringLiteral(lit) = &expr.expression {
-            let name = lit.value.as_str();
-            if !is_dangerous_member(name) && !is_dangerous_global(name) && !is_dangerous_method(name) {
-                return;
-            }
-        }
-        use oxc_span::GetSpan;
-        let obj_span = expr.object.span();
-        let key_span = expr.expression.span();
-        self.patches.push(Patch {
-            start: expr.span.start,
-            end: expr.span.end,
-            replacement: if expr.optional {
-                format!(
-                    "\u{1}OGET\u{1}{}\u{1}{}\u{1}E\u{1}{}\u{1}{}\u{1}",
-                    obj_span.start, obj_span.end, key_span.start, key_span.end
-                )
-            } else {
-                format!(
-                    "\u{1}CGET\u{1}{}\u{1}{}\u{1}{}\u{1}{}\u{1}",
-                    obj_span.start, obj_span.end, key_span.start, key_span.end
-                )
-            },
-        });
+        let saved = self.guard_enter();
+        self.computed_member_site(expr);
+        self.guard_leave(saved);
     }
 
     /// `for (;;) body` — unbounded loop. The classic anti-bot probe

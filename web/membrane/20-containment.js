@@ -48,6 +48,8 @@
     // wrap·dangerous-prop dispatch 모두 부모 closure 가 처리). 자식 native
     // global 접근은 base[prop] 으로 fall through.
     if (root.__zp_get && !define(w, '__zp_get', root.__zp_get)) throw normalizedError('SecurityError');
+    if (root.__zp_fast && !define(w, '__zp_fast', root.__zp_fast)) throw normalizedError('SecurityError');
+    if (root.__zp_fastset && !define(w, '__zp_fastset', root.__zp_fastset)) throw normalizedError('SecurityError');
     // a plain call in the child gets the child's own global: it reads what the child's `window` reads
     if (root.__zp_get && !define(w, '__zp_this', t => t === w ? root.__zp_get(w, 'window') : root.__zp_this(t))) throw normalizedError('SecurityError');
     if (root.__zp_origin && !define(w, '__zp_origin', root.__zp_origin)) throw normalizedError('SecurityError');
@@ -145,7 +147,7 @@
       const childStrictRE = /^(\s|\/\*[^]*?\*\/|\/\/[^\n]*)*('use strict'|"use strict")/;
       const childExecGlobal = code => {
         if (!childEval) return (new childFunction(code)).call(w);
-        return childEval(childStrictRE.test(code) ? code : 'with(__zp_lex_scope){' + code + '\n}');
+        return childEval(childStrictRE.test(code) ? code : 'with(__zp_lex_scope){' + ZP_WITH_PROLOGUE + code + '\n}');
       };
       // `pageRewriteHooks` rather than the bare helpers: they are locals of
       // `installPhase2Membrane`, invisible from this function's scope.
@@ -175,6 +177,16 @@
       maskNativeFunction(childDynamicEval, 'eval');
       maskNativeFunction(childFunctionFacade, 'Function');
       if (!define(w, 'eval', childDynamicEval) || !define(w, 'Function', childFunctionFacade)) throw normalizedError('SecurityError');
+      // A direct `eval(x)` is rewritten to `__zp_eval.call(this, <eval>, [x], …)`. It was never defined here, so every
+      // direct eval in this realm threw ReferenceError. It runs as this realm's global code — the caller's locals are not
+      // in view (ERRATA residual); a rebound `eval` is called like any function, as natively.
+      const childDirectEval = function (callee, args) {
+        if (new.target) throw new TypeError('eval is not a constructor');
+        const list = Array.isArray(args) ? args : [];
+        if (callee !== childDynamicEval && callee !== root.eval) return Reflect.apply(callee, undefined, list);
+        return childDynamicEval(list[0]);
+      };
+      if (!define(w, '__zp_eval', childDirectEval)) throw normalizedError('SecurityError');
       // Ordered script pipeline for this child realm.
       //
       // A `<script src>` written by `document.write` is PARSER-BLOCKING: the

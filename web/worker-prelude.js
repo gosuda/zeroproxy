@@ -8,6 +8,15 @@
   // 네이티브는 프로토타입에 그대로 남아 `WorkerGlobalScope.prototype.setTimeout.call(self, '…')` 같은 리라이트
   // 우회 문이 된다(2026-10-12 e2e `/xwenv` 로 측정).
   const ZP_HIDDEN_RE = /^(?:__zp_|__ZP_|ZPBundle$|ZPPageBundleWBG$|ZeroProxyRT$|ZP$)/;
+  // The helpers rewritten code names — zp-rewriter RUNTIME_HELPERS (static-policy compares). Every `with` code runs in
+  // starts by binding them as block constants, read off the global object with nothing named: a with object answers for
+  // every free name first, on every lookup (see web/membrane/00-head.js).
+  const ZP_WITH_HELPERS = ['__zp_get', '__zp_set', '__zp_call', '__zp_this', '__zp_assign', '__zp_update', '__zp_delete',
+    '__zp_eval', '__zp_has', '__zp_oget', '__zp_ocall', '__zp_ocallv', '__zp_ochain', '__zp_odelete', '__zp_okeys',
+    '__zp_rget', '__zp_rset', '__zp_ownKeys', '__zp_getOwnPropertyDescriptor', '__zp_getOwnPropertyDescriptors',
+    '__zp_getOwnPropertyNames', '__zp_module_url', '__zp_with_get', '__zp_with_set', '__zp_with_assign',
+    '__zp_with_update', '__zp_with_delete', '__zp_with_d', '__zp_lex_decl', '__zp_lex_bind', '__zp_fast', '__zp_fastset'];
+  const ZP_WITH_PROLOGUE = 'const{' + ZP_WITH_HELPERS.join(',') + '}=(function(){return this})();';
   const origFnToString = Function.prototype.toString;
   // 훅 → 그것이 대신한 네이티브의 소스. Function.prototype.toString 훅(settleNatives)이 읽는다.
   const maskedSource = new WeakMap();
@@ -97,7 +106,7 @@
     if (!EXPR_STMT_RE.test(text.trimStart())) {
       try {
         const rw = zpRewrite(text);
-        const expr = Reflect.construct(NativeFunctionCtor, ['__zp_scope', 'with(__zp_scope){return (' + rw + '\n);}']);
+        const expr = Reflect.construct(NativeFunctionCtor, ['__zp_scope', 'with(__zp_scope){' + ZP_WITH_PROLOGUE + 'return (' + rw + '\n);}']);
         return Reflect.apply(expr, self, [scope]);
       } catch (e) { if (e && e.name === 'NotSupportedError') throw e; }
     }
@@ -170,7 +179,7 @@
         },
       });
       // sourceURL — eval 소스 에러 filename 을 가상 워커 URL 로 태깅.
-      const body = strictSrc ? '"use strict";' + rewritten : 'with(__zp_env){' + rewritten + '\n}';
+      const body = strictSrc ? '"use strict";' + rewritten : 'with(__zp_env){' + ZP_WITH_PROLOGUE + rewritten + '\n}';
       return zpDirectEvalRunner.call(this, nativeEval, env, body + '\n//# sourceURL=' + base.href);
     } finally {
       __zp_eval_desc = prev;
@@ -255,7 +264,7 @@
     const tagged = '\n//# sourceURL=' + base.href;
     try {
       if (ZP_STRICT_DIRECTIVE_RE.test(code)) return nativeEval.call(self, code + tagged);
-      return nativeEval.call(self, 'with(__zp_lex_scope){' + code + '\n}' + tagged);
+      return nativeEval.call(self, 'with(__zp_lex_scope){' + ZP_WITH_PROLOGUE + code + '\n}' + tagged);
     } finally {
       __zp_lex_env = prevLexEnv;
     }
@@ -478,6 +487,16 @@
     };
   }
   expose('__zp_get', get);
+  // The rewriter's inline guards (zp-rewriter `guard_claim`, web/membrane/07-membrane.js): an array, a typed array, a
+  // string or a function is never the worker's global, its location or a facade, so outside a few names its member is
+  // the native one.
+  const nativeIsArray = Array.isArray, nativeIsView = ArrayBuffer.isView;
+  expose('__zp_fast', (base, prop) => base != null
+    && (typeof prop === 'number' || (typeof prop === 'string' && prop !== 'constructor' && prop !== 'prepareStackTrace'
+      && prop !== 'postMessage' && prop !== 'location'))
+    && (typeof base === 'string' || typeof base === 'function' || nativeIsArray(base) || nativeIsView(base)));
+  expose('__zp_fastset', (base, prop) => base != null && (nativeIsArray(base) || nativeIsView(base))
+    && (typeof prop === 'number' || (typeof prop === 'string' && prop !== 'location' && prop !== 'name')));
   // `this` of a plain call in sloppy code: the engine gives the real global, worker code knows `self` as the facade
   // (natively `(function () { return this; })() === self`)
   expose('__zp_this', function (t) { return t === self ? scope : t; });
