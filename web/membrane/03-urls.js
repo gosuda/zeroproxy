@@ -113,7 +113,7 @@
   //
   // Stored as { lastRaw, target } per element. Overwritten on new raw.
   // WeakMap so GC removes entries when element is detached.
-  const urlClassifyCache = new WeakMap();
+  const urlClassifyCache = newWeakMap();
   function targetURLForElement(el, raw) {
     const key = String(raw);
     const cached = urlClassifyCache.get(el);

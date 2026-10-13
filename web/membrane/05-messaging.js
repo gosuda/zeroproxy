@@ -52,7 +52,7 @@
   // ★2026-08-23 — 압축 크기 수신. SW 가 응답마다 **요청한 클라이언트에게만**
   // 상류의 와이어 바이트 수를 보낸다. 이게 없으면 `encodedBodySize` 가 항상
   // decoded 와 같아져 모든 응답이 비압축처럼 보인다(타이밍 축 참조).
-  const encodedSizes = new Map();
+  const encodedSizes = newMap();
   const onBridgeMessage = (d) => {
     if (d && d.type === ZP.MSG.COOKIE_CHANGE) { applyCookieChanges(d.changes); return; }
     if (!d || d.type !== ZP.MSG.ENCODED_SIZE || !d.url) return;
@@ -391,7 +391,7 @@
   // with the tab — native semantics). Child windows get in-memory names.
   // NOTE: 이 블록은 install 시퀀스보다 먼저 있어야 한다 — scope 프록시의
   // `name` 게터가 부팅 중에도 발사될 수 있어 `let` 을 아래로 내리면 TDZ.
-  const virtualFrameNames = new WeakMap();
+  const virtualFrameNames = newWeakMap();
   let rootWindowNameStore = null;
   function virtualWindowNameFor(win) {
     if (win === root) return rootWindowNameStore ? rootWindowNameStore.get() : '';

@@ -70,8 +70,8 @@
   // acknowledgement of the writes still in flight.
   // sent → { wid, line }. A write has an id so the worker applies it once even when it arrives twice (as the
   // message and with a synchronous request) and so this document can tell the push of its own write.
-  const cookieWritesInFlight = new Map();
-  const ownCookieWrites = new Set();
+  const cookieWritesInFlight = newMap();
+  const ownCookieWrites = newSet();
   function sendCookieSet(line) {
     const wid = 'w' + ZP.randomId();
     ownCookieWrites.add(wid);
@@ -92,7 +92,7 @@
   function pendingCookieWrites() {
     return Array.from(cookieWritesInFlight.values()).slice(-MAX_CARRIED_COOKIE_WRITES).map(w => [w.wid, w.line]);
   }
-  const appliedCookieChanges = new Set();
+  const appliedCookieChanges = newSet();
   function applyCookieChanges(changes) {
     if (!Array.isArray(changes)) return;
     const host = virtualURL.hostname.toLowerCase();
@@ -123,7 +123,7 @@
   // `window.cookieStore` would read/write REAL proxy-origin cookies (leak +
   // cross-target pollution). The facade is backed by documentCookieRecords.
   let virtualCookieStoreSingleton = null;
-  const cookieStoreListeners = new Set();
+  const cookieStoreListeners = newSet();
   let cookieStoreOnChange = null;
   function cookieItemFromRec(r) {
     return Object.freeze({

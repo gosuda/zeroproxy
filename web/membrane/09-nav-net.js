@@ -10,7 +10,7 @@
   function installProtocolHandlerFacade() {
     const proto = root.Navigator && root.Navigator.prototype;
     if (!proto || typeof navigator.registerProtocolHandler !== 'function') return;
-    const SAFELIST = new Set(['bitcoin','geo','im','irc','ircs','magnet','mailto','matrix','mms','news','nntp','openpgp4fpr','sip','sms','smsto','ssh','tel','urn','webcal','wtai','xmpp']);
+    const SAFELIST = newSet(['bitcoin','geo','im','irc','ircs','magnet','mailto','matrix','mms','news','nntp','openpgp4fpr','sip','sms','smsto','ssh','tel','urn','webcal','wtai','xmpp']);
     const SCHEME_RE = /^[a-z][a-z0-9+\-.]*$/i;
     function validate(scheme, url) {
       const s = String(scheme).toLowerCase();
@@ -840,7 +840,7 @@
     // whose baseVal/animVal go through the hooked attribute path; every other
     // member reaches the real object as its own receiver, so brand checks,
     // `instanceof SVGAnimatedString` and `el.href === el.href` all hold.
-    const svgHrefProxies = new WeakMap();
+    const svgHrefProxies = newWeakMap();
     const XLINK_NS = 'http://www.w3.org/1999/xlink';
     for (const Ctor of [w.SVGImageElement, w.SVGUseElement, w.SVGFEImageElement, w.SVGScriptElement, w.SVGAElement]) {
       const proto = Ctor && Ctor.prototype;

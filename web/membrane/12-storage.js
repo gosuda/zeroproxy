@@ -689,7 +689,7 @@
       const nativeAllowlist = fpProto.getAllowlistForFeature;
       const nativeAllows = fpProto.allowsFeature;
       // which document (or iframe element, for its container policy) a policy object answers for
-      const owners = new WeakMap();
+      const owners = newWeakMap();
       const hookOwner = (proto, kind) => {
         const d = proto && Object.getOwnPropertyDescriptor(proto, 'featurePolicy');
         if (!d || typeof d.get !== 'function') return;
@@ -821,7 +821,7 @@
     // permissions we can observe (camera/mic via getUserMedia, display via
     // getDisplayMedia, geolocation via success callback) and answer 'prompt'
     // for unrecorded names; other permission names fall through to native.
-    const grantedPerms = new Set();
+    const grantedPerms = newSet();
     try {
       const storedGrants = prefixedStorage(nativeLocalStorage, localPrefix).getItem('__zp_grants');
       if (storedGrants) for (const g of String(storedGrants).split(',')) if (g) grantedPerms.add(g);
@@ -874,8 +874,8 @@
     const permProto = w.Permissions && w.Permissions.prototype;
     const statusProto = w.PermissionStatus && w.PermissionStatus.prototype;
     if (permProto && typeof permProto.query === 'function' && statusProto) {
-      const trackedPerms = new Set(['camera', 'microphone', 'display-capture', 'geolocation', 'speaker-selection']);
-      const stateOverride = new WeakMap();
+      const trackedPerms = newSet(['camera', 'microphone', 'display-capture', 'geolocation', 'speaker-selection']);
+      const stateOverride = newWeakMap();
       const stateDesc = Object.getOwnPropertyDescriptor(statusProto, 'state');
       if (stateDesc && typeof stateDesc.get === 'function') {
         const nativeState = stateDesc.get;
@@ -1019,7 +1019,7 @@
     // 그래서 멤버는 프로토타입에 non-enumerable 로 두고(= 자체 own 속성 0),
     // 항목 접근은 Proxy 로 위임한다. own 속성이 없어야 frozen target 의
     // ownKeys 불변식에 걸리지 않는다.
-    const RESERVED = new Set(['length', 'key', 'getItem', 'setItem', 'removeItem', 'clear']);
+    const RESERVED = newSet(['length', 'key', 'getItem', 'setItem', 'removeItem', 'clear']);
     const storageProto = Object.create(
       (typeof Storage === 'function' && Storage.prototype) ? Storage.prototype : Object.prototype
     );

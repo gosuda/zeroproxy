@@ -533,7 +533,7 @@
       const list = typeof protocols === 'string' ? [protocols] : Array.isArray(protocols) ? protocols.slice() : null;
       if (!list) throw normalizedError('SyntaxError');
       const out = [];
-      const seen = new Set();
+      const seen = newSet();
       for (const p of list) {
         const s = String(p);
         if (!s || !tokenRE.test(s) || seen.has(s)) throw normalizedError('SyntaxError');
@@ -739,7 +739,7 @@
 
   function installWebSocketStream() {
     if (!root.WebSocket || !root.ReadableStream || !root.WritableStream) return;
-    const states = new WeakMap();
+    const states = newWeakMap();
     const stateOf = receiver => {
       const state = states.get(receiver);
       if (!state) throw new TypeError('Illegal invocation');

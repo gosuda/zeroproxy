@@ -2603,6 +2603,59 @@ function createTargetServer(requests, pendingResponses) {
       <\/script></body>`);
       return;
     }
+    if (url.pathname === '/xtables') {
+      // A page that wraps the methods of Map, Set, WeakMap and WeakSet the way instrumentation does: a counter and the
+      // original are top-level variables, read inside the wrapper. Every argument, receiver and result is shown to a judge
+      // that knows what a page must never hold (a window or Location of the proxy, a string naming it).
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(`<!doctype html><title>tables</title><body><script>
+        var calls = 0, seenProxy = [], origins = {};
+        var isOtherWindow = function (v) { return v !== window && Object.prototype.toString.call(v) === '[object Window]' && String(v.location && v.location.href).indexOf('proxy.localhost') >= 0; };
+        var isRealLocation = function (v) { return Object.prototype.toString.call(v) === '[object Location]' && String(v.href).indexOf('proxy.localhost') >= 0; };
+        var show = function (tag, v) {
+          if (typeof v === 'string' && (v.indexOf('/zp/') >= 0 || v.indexOf('proxy.localhost') >= 0)) seenProxy.push(tag + ': ' + v.slice(0, 60));
+          else if (v && typeof v === 'object' && (isOtherWindow(v) || isRealLocation(v))) seenProxy.push(tag + ': a real window or location');
+        };
+        var wrap = function (proto, name, label) {
+          var orig = proto[name];
+          origins[label + '.' + name] = orig;
+          proto[name] = function () {
+            calls++;
+            show(label + '.' + name + ' this', this);
+            for (var i = 0; i < arguments.length; i++) show(label + '.' + name + ' arg' + i, arguments[i]);
+            var r = orig.apply(this, arguments);
+            show(label + '.' + name + ' result', r);
+            return r;
+          };
+        };
+        [['get', 'has', 'set', 'delete', 'clear', 'forEach'].map(function (n) { wrap(Map.prototype, n, 'Map'); }),
+         ['add', 'has', 'delete', 'clear', 'forEach'].map(function (n) { wrap(Set.prototype, n, 'Set'); }),
+         ['get', 'has', 'set', 'delete'].map(function (n) { wrap(WeakMap.prototype, n, 'WeakMap'); }),
+         ['add', 'has', 'delete'].map(function (n) { wrap(WeakSet.prototype, n, 'WeakSet'); })];
+        var seenBefore = calls;
+        (async function () {
+          var out = { survived: true };
+          var sleep = function (ms) { return new Promise(function (r) { setTimeout(r, ms); }); };
+          // the membrane at work: names, scripts of its own, frames, messages, storage, dynamic code, workers
+          var run = async function (k, fn) { try { var v = fn(); if (v && typeof v.then === 'function') v = await v; out[k] = v === undefined ? 'ok' : 'ok'; } catch (e) { out[k] = 'threw:' + e.name; } };
+          await run('names', function () { var q = 1; return [typeof q, eval('q + 1'), (0, eval)('typeof location'), new Function('return location.href')()]; });
+          await run('location', function () { location.hash = '#t'; return [location.href, location.origin, String(location)]; });
+          await run('storage', function () { localStorage.setItem('k', 'v'); sessionStorage.setItem('k', 'v'); return localStorage.getItem('k'); });
+          await run('cookie', function () { document.cookie = 'tk=1; path=/'; return document.cookie; });
+          await run('markup', function () { var d = document.createElement('div'); d.innerHTML = '<a href="/p">x</a><img src="/i.png">'; document.body.appendChild(d); return d.firstChild.href; });
+          await run('iframe', function () { return new Promise(function (r) { var f = document.createElement('iframe'); f.srcdoc = '<script>parent.postMessage("child", "*")<\\/script>'; document.body.appendChild(f); var h = function (e) { removeEventListener('message', h); r([e.data, f.contentWindow === e.source]); }; addEventListener('message', h); }); });
+          await run('frames', function () { var f = document.createElement('iframe'); document.body.appendChild(f); var d = f.contentWindow.document; d.open(); d.write('<p>x</p>'); d.close(); return [window.length, parent === window, top === window, f.contentWindow.parent === window]; });
+          await run('postMessage', function () { return new Promise(function (r) { var h = function (e) { removeEventListener('message', h); r(e.source === window); }; addEventListener('message', h); postMessage('hi', '*'); }); });
+          await run('worker', function () { return new Promise(function (r) { var w = new Worker(URL.createObjectURL(new Blob(['postMessage(1)']))); w.onmessage = function () { w.terminate(); r(1); }; setTimeout(function () { r(0); }, 3000); }); });
+          await run('fetch', function () { return fetch('/xtables-ping').then(function (r) { return r.status; }); });
+          await sleep(200);
+          out.calls = calls > seenBefore ? 'wrapped methods ran' : 'never ran';
+          out.seenProxy = seenProxy.slice(0, 20);
+          window.__xtables = out;
+        })().catch(function (e) { window.__xtables = { survived: false, error: String(e && (e.stack || e)).slice(0, 300) }; });
+      <\/script></body>`);
+      return;
+    }
     if (url.pathname === '/xwinown') {
       // A getter the page puts on its own window, as a native function: `Object.prototype.valueOf` returns its receiver.
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
@@ -7906,6 +7959,40 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     assert.equal(direct.page.strictCaller, 6);
     assert.deepEqual(proxied.page, direct.page, 'the page realm');
     assert.deepEqual(proxied.child, direct.child, 'the written frame\'s realm');
+  });
+
+  // The membrane keeps its state in Maps, Sets, WeakMaps and WeakSets — real windows and elements among the keys and
+  // values. They are built with a copy of each built-in's prototype taken before any page script, so a page that wraps
+  // `Map.prototype.get` (a tracing library, a polyfill) neither watches the tables nor loops the free-name lookup of an
+  // inline script, which reads one. Before this a wrapper that read a top-level variable recursed until the stack ended.
+  await t.test('a page that wraps Map, Set, WeakMap and WeakSet methods neither sees the membrane\'s tables nor breaks it', async () => {
+    const targetBase = `http://${targetHost}:${targetPort}`;
+    const collect = async p => {
+      try {
+        await p.waitForFunction(() => window.__xtables, { timeout: 60000, polling: 100 });
+        return await p.evaluate(() => window.__xtables);
+      } finally {
+        await p.close();
+      }
+    };
+    const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    let direct;
+    try {
+      const p = await directBrowser.newPage();
+      await p.goto(`${targetBase}/xtables`, { waitUntil: 'domcontentloaded' });
+      direct = await collect(p);
+    } finally {
+      await directBrowser.close();
+    }
+    const proxied = await collect(await openProxiedPage(`${targetBase}/xtables`));
+    fs.writeFileSync(path.join(artifacts, 'tables.json'), JSON.stringify({ direct, proxied }, null, 2));
+    assert.equal(direct.survived, true, 'the native reference ran');
+    assert.equal(proxied.survived, true, 'the page died: ' + proxied.error);
+    assert.deepEqual(proxied.seenProxy, [], 'a wrapped table method was handed something of the proxy');
+    for (const k of Object.keys(direct)) {
+      if (k === 'seenProxy' || k === 'calls') continue;
+      assert.equal(proxied[k], direct[k], k);
+    }
   });
 
   // `frameElement`, `parent`, `opener` are configurable own properties of a window, and the page's definition lands on the

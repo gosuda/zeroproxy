@@ -40,7 +40,7 @@
     // Declared here, before any function that can reach them, so no install
     // order can hit their TDZ (see callPageRewriter / timerHandler).
     const NativeSyntaxError = root.SyntaxError;
-    const parseErrors = new WeakSet();
+    const parseErrors = newWeakSet();
     function stringArgs(args) {
       const out = new Array(args.length);
       for (let i = 0; i < args.length; i++) out[i] = String(args[i]);
@@ -148,7 +148,7 @@
     function isEvalExpressionCandidate(text) {
       return !/^(?:function|class|var|let|const|if|for|while|do|switch|try|throw|return|break|continue|with|import|export|debugger)\b/.test(text.trimStart());
     }
-    const evalExpressionCache = new Map();
+    const evalExpressionCache = newMap();
     function dynamicEval(source) {
       // 네이티브 eval 은 생성자가 아니다 — `new eval()` 은 TypeError.
       if (new.target) throw new TypeError('eval is not a constructor');
@@ -210,7 +210,7 @@
       // R1: eval 의 let/const/class 는 eval 렉시컬 환경과 함께 버려진다 —
       // 공유 zpLex 가 아닌 버리는 Map 에 등록한다.
       const prevLexEnv = __zp_lex_env;
-      __zp_lex_env = new Map();
+      __zp_lex_env = newMap();
       try { return execGlobalScript(globalCode); }
       finally { __zp_lex_env = prevLexEnv; }
     }
@@ -291,7 +291,7 @@
       // path an indirect eval and an inline script take.
       if (asGlobal) {
         const prevLexEnv = __zp_lex_env;
-        __zp_lex_env = new Map();
+        __zp_lex_env = newMap();
         try { return execGlobalScript(rewritten); } finally { __zp_lex_env = prevLexEnv; }
       }
       let d = {};
@@ -307,7 +307,7 @@
       // R1: eval 의 let/const/class 는 eval 자체의 렉시컬 환경에 살고 함께
       // 버려진다 — 공유 zpLex 에 새지 않게 eval 마다 버리는 Map 을 둔다.
       const prevLexEnv = __zp_lex_env;
-      __zp_lex_env = new Map();
+      __zp_lex_env = newMap();
       try {
         // A strict eval (a strict caller, or a "use strict" source) takes the strict runner: it cannot hold a `with`, so the
         // runner holds it instead, and the caller's locals reach the code through the scope chain.
@@ -352,7 +352,7 @@
       }
     }
     define(root, '__zp_eval', zpDirectEval);
-    const dynamicConstructorWrappers = new Map([
+    const dynamicConstructorWrappers = newMap([
       [Native.FunctionCtor, dynamicFunction],
       [dynamicFunction, dynamicFunction],
       [NativeAsyncFunction, dynamicAsyncFunction],
@@ -407,7 +407,7 @@
     // to pathname/search/hash (what React Router needs) to avoid
     // breaking schema validators (zod) that compare href/origin to
     // SSR'd expected values.
-    const wrappedLocationCache = new WeakMap();
+    const wrappedLocationCache = newWeakMap();
     // Every URL component on a wrapped Location proxy must return the
     // virtual (target) value, not the proxy origin. The original Phase-2
     // set covered only `pathname / search / hash`, which left target
@@ -419,8 +419,8 @@
     // against Wikipedia anchor clicks: extending this set does NOT
     // affect anchor click navigation (the earlier suspicion was a flaky
     // test selector that hit `/wiki/Main_Page` self-link).
-    const LOC_VIRT_PROPS = new Set(['href','protocol','host','hostname','port','pathname','search','hash','origin']);
-    const LOC_ALL_URL_PROPS = new Set(['href','protocol','host','hostname','port','pathname','search','hash','origin']);
+    const LOC_VIRT_PROPS = newSet(['href','protocol','host','hostname','port','pathname','search','hash','origin']);
+    const LOC_ALL_URL_PROPS = newSet(['href','protocol','host','hostname','port','pathname','search','hash','origin']);
     // Hoist the 4 fixed Location methods outside wrappedLocationFor so each
     // call doesn't allocate a fresh closure set. They only capture
     // virtualURL/setVirtualLocation/Native (closure-scope invariants).
@@ -491,7 +491,7 @@
         } catch {}
         return null;
       }
-      const methodCache = new Map();
+      const methodCache = newMap();
       const handler = {
         get(target, prop) {
           if (typeof prop === 'string' && LOC_VIRT_PROPS.has(prop)) {
@@ -568,8 +568,8 @@
       wrappedLocationCache.set(nativeLoc, proxy);
       return proxy;
     }
-    const crossWindowTargets = new WeakMap();
-    const crossOriginLocations = new WeakMap();
+    const crossWindowTargets = newWeakMap();
+    const crossOriginLocations = newWeakMap();
     // May a script in this document navigate `win`? Itself and its descendants always; an
     // ancestor never, but for the top window with allow-top-navigation (or, during user
     // activation, allow-top-navigation-by-user-activation). Otherwise the browser's own
@@ -676,7 +676,7 @@
     // delegates back/forward/traverseTo to native (real session entries are
     // all proxy pages → contained), and wraps listener events so
     // `event.destination.url` can't leak the real URL either.
-    const navFacadeCache = new WeakMap();
+    const navFacadeCache = newWeakMap();
     function virtualNavigationFor(win) {
       if (!win) return null;
       // A prelude-booted child builds its own facade against ITS virtualURL —
@@ -694,8 +694,8 @@
       if (!native) { navFacadeCache.set(win, null); return null; }
       const NavProtoBase = (win.Navigation && win.Navigation.prototype) || null;
       const NavEntryProtoBase = (win.NavigationHistoryEntry && win.NavigationHistoryEntry.prototype) || null;
-      const entryFacades = new WeakMap();
-      const listenerWrappers = new WeakMap();
+      const entryFacades = newWeakMap();
+      const listenerWrappers = newWeakMap();
       const handlerStore = Object.create(null);
       // All props non-enumerable: IDL attributes live on the prototype, so a
       // native `Object.keys(navigation)` is empty — ours must match.
@@ -955,11 +955,11 @@
     // included; `Object.keys` is empty, `getPrototypeOf` is null, `String(w)` and
     // `JSON.stringify(w)` throw, `Object.prototype.toString` says "[object Object]".
     const CROSS_ORIGIN_WINDOW_NAMES = ['window', 'self', 'location', 'closed', 'frames', 'length', 'top', 'opener', 'parent', 'blur', 'close', 'focus', 'postMessage'];
-    const CROSS_ORIGIN_WINDOW_NAME_SET = new Set(CROSS_ORIGIN_WINDOW_NAMES);
+    const CROSS_ORIGIN_WINDOW_NAME_SET = newSet(CROSS_ORIGIN_WINDOW_NAMES);
     const CROSS_ORIGIN_SYMBOLS = [Symbol.toStringTag, Symbol.hasInstance, Symbol.isConcatSpreadable];
-    const crossOriginFacadeSet = new WeakSet();
-    const crossOriginFacades = new WeakMap();
-    const crossOriginMethods = new WeakMap();
+    const crossOriginFacadeSet = newWeakSet();
+    const crossOriginFacades = newWeakMap();
+    const crossOriginMethods = newWeakMap();
     // The origin a window reports from its OWN membrane ('' when it has none).
     function ownMembraneOrigin(win) {
       try {
@@ -1202,7 +1202,7 @@
     // Illegal invocation. Only accessors the PAGE installs later
     // (defineProperty / __defineGetter__) run with `this` = scope, so
     // `this.location` inside the getter virtualizes.
-    const bootOwnAccessors = new Map();
+    const bootOwnAccessors = newMap();
     for (const name of nativeOwnKeys(root)) {
       const d = Reflect.getOwnPropertyDescriptor(root, name);
       if (d && d.configurable && (d.get || d.set)) bootOwnAccessors.set(name, d);
@@ -1220,7 +1220,7 @@
     //   entry = { kind:'let'|'const'|'class', get, set } — set=null 이면
     //   const 의미(쓰기 시 TypeError), get=null 이면 선언만 되고 bind 가
     //   안 된 상태(초기화 throw 등) → 읽기 시 ReferenceError(TDZ parity).
-    const zpLex = new Map();
+    const zpLex = newMap();
     // 현재 렉시컬 환경 — 스크립트 실행 중엔 zpLex, eval/동적 코드 안에선
     // 그 eval 의 버려지는 환경(네이티브 eval 렉시컬 환경 의미 그대로).
     var __zp_lex_env = null;
@@ -1373,7 +1373,7 @@
     function isScopeProxy(value) { return value === scope || value === withScope; }
     // Names the rewriter marks as dangerous members. `Reflect.get/set` route
     // these through the membrane; any other name keeps native semantics.
-    const MEMBER_DANGER = new Set([
+    const MEMBER_DANGER = newSet([
       'location', 'contentWindow', 'contentDocument', 'defaultView',
       'frameElement', 'parent', 'top', 'opener', 'frames',
       'href', 'protocol', 'host', 'hostname', 'port', 'pathname',
@@ -1397,7 +1397,7 @@
     // 네이티브 게터로 확증한다. 페이지가 `Symbol.toStringTag` 로 태그를
     // 위조하면 확증 단계에서 걸러진다(그 경우에만 예외 비용을 낸다).
     const nativeObjToString = Object.prototype.toString;
-    const knownLocations = new WeakSet();
+    const knownLocations = newWeakSet();
     function isNativeLocation(value) {
       if (!value || typeof value !== 'object') return false;
       if (value === virtualLocation) return false;
@@ -2101,7 +2101,7 @@
     // through the rewriter anew (1.4 s of 15). Keyed by the source string itself — the page mostly hands over the same
     // string, whose hash V8 keeps — with the kind and URL checked on a hit. Bounded by entries and by characters;
     // re-inserted on a hit so the oldest unused leave first.
-    const rewriteCache = new Map();
+    const rewriteCache = newMap();
     let rewriteCacheChars = 0;
     const REWRITE_CACHE_ENTRIES = 512, REWRITE_CACHE_CHARS = 32 << 20, REWRITE_CACHE_ONE = 8 << 20;
     // Whitespace around the code is left out of the rewrite and put back around its output: Turnstile times
@@ -2328,7 +2328,7 @@
     //   escape 면역. BBC bbcdotcom SDK 의 retry-loop 는 hang (alternate value
     //   기대) — `.ai/trap-notebook/membrane.md` 에 known regression 기록.
     //   사용자 priority: www.naver.com 호환성 우선.
-    const constructorOverrides = new WeakMap();
+    const constructorOverrides = newWeakMap();
     for (const [ctor, wrapper] of dynamicConstructorWrappers) {
       if (ctor && ctor.prototype) try {
         // `configurable: false` 로 심으므로 같은 프로토타입에 두 번 오면 무조건

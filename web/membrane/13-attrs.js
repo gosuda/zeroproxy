@@ -99,13 +99,13 @@
   // detection signal. Membrane already isolates the iframe; we virtualize the
   // attribute so the detection sees its set value while the DOM remains clean.
   function frameSandboxAllowsEscape(raw) {
-    const tokens = new Set(String(raw || '').toLowerCase().split(/\s+/).filter(Boolean));
+    const tokens = newSet(String(raw || '').toLowerCase().split(/\s+/).filter(Boolean));
     return tokens.has('allow-scripts') && tokens.has('allow-same-origin');
   }
   // Without `allow-same-origin` the browser gives the document an opaque origin (see
   // OPAQUE_FRAME_ATTR for what that costs the proxy).
   function frameSandboxIsOpaque(raw) {
-    return !new Set(String(raw || '').toLowerCase().split(/\s+/).filter(Boolean)).has('allow-same-origin');
+    return !newSet(String(raw || '').toLowerCase().split(/\s+/).filter(Boolean)).has('allow-same-origin');
   }
   // The page's `frame.sandbox` list is a real DOMTokenList on a detached shadow frame whose
   // attribute holds the page's value (the real frame's carries one flag more).
@@ -161,8 +161,8 @@
         let text = Native.getAttribute.call(fe, litAttrName('sandbox'));
         if (text === null) text = Native.getAttribute.call(fe, 'sandbox');
         if (text !== null) {
-          const mine = new Set(String(text).toLowerCase().split(/\s+/).filter(Boolean));
-          flags = flags === null ? mine : new Set([...flags].filter(f => mine.has(f)));
+          const mine = newSet(String(text).toLowerCase().split(/\s+/).filter(Boolean));
+          flags = flags === null ? mine : newSet([...flags].filter(f => mine.has(f)));
         }
         w = winGet(w, 'parent');
       }
@@ -216,7 +216,7 @@
   // 남은 9건이 전부 여기였다 — 살아 있는 속성은 세정기가 훑지만 **속성 값 안의
   // 중첩 마크업**까지는 안 들어갔다. 값을 사후에 문자열로 씻는 대신 페이지가
   // 준 원본을 붙들어 두고 읽기 표면이 그것을 돌려주게 한다(재현성도 같이 맞다).
-  const srcdocMeta = new WeakMap();
+  const srcdocMeta = newWeakMap();
   function setInjectedSrcdoc(el, raw) {
     const s = String(raw == null ? '' : raw);
     let injected = null;
@@ -237,8 +237,8 @@
   }
   // 진짜 DOM 은 `el.attributes === el.attributes` 가 true 다. 접근마다 새
   // 프록시를 만들면 그 자체가 후킹을 드러낸다(컬렉션 메서드 동일성과 같은 이유).
-  const namedNodeMapCache = new WeakMap();
-  const namedNodeMapOwners = new WeakMap();
+  const namedNodeMapCache = newWeakMap();
+  const namedNodeMapOwners = newWeakMap();
   function filteredNamedNodeMap(raw, owner) {
     if (!raw) return raw;
     namedNodeMapOwners.set(raw, owner);
@@ -301,7 +301,7 @@
     if (typeof key !== 'string' || key.charCodeAt(0) !== 122 || key.charCodeAt(1) !== 112) return false;
     return isZPAttrName(datasetKeyToAttrName(key));
   }
-  const datasetCache = new WeakMap();
+  const datasetCache = newWeakMap();
   function filteredDataset(raw) {
     if (!raw) return raw;
     const hit = datasetCache.get(raw);
@@ -437,7 +437,7 @@
     // `get` 트랩에서 매번 새로 만들면 그 자체가 후킹을 드러낸다.
     let itemFn = null;
     let getNamedItemFn = null;
-    const boundFns = new Map();
+    const boundFns = newMap();
     const collection = new Proxy({}, {
       get(_target, prop) {
         if (prop === 'length') return length();
@@ -595,7 +595,7 @@
   //
   // 우리가 덮어쓸 때 원본을 붙들어 둔다. srcdoc 과 같은 방식이고, 마찬가지로
   // 재현성도 같이 맞는다(페이지가 쓴 값을 그대로 돌려주는 게 원래 옴다).
-  const originalTextMeta = new WeakMap();
+  const originalTextMeta = newWeakMap();
   // 서버측 htmltx 가 고친 것은 WeakMap 이 없다 — 그때는 값 안의 프록시
   // URL 만이라도 푸는다(CSS 는 URL 만 바뀌므로 사실상 원본이 된다).
   // ★되돌리기는 **보관한 값에도** 태운다. 기억해 둔 ‘원본’ 이 이미 프록시

@@ -1782,6 +1782,25 @@ rendercheck naver/wikipedia/github 3/3 OK, `npm run test:e2e` 117/117
 - **고침(ERRATA 89):** 소스 기준 캐시(종류·URL 확인), 코드 앞뒤 공백은 리라이트에서 빼고 결과 앞뒤에 그대로 붙인다(위치 불변, `trimStart` 는 복사 없음), 표현식 eval 은 리라이트된 소스당 한 번 컴파일. 1.4 → 0.4 초.
 - **규칙:** 챌린지는 **시간을 잰다** — 네이티브에서 거의 공짜인 연산(공백, 반복 eval)이 우리 쪽에서 비싸면 그것 자체가 신호다. 재는 연산 모양을 프로파일에서 찾아 상수 시간으로 만든다.
 
+## <a id="봉인된-표"></a>멤브레인의 표는 `new Map()` 이 아니라 `newMap()` 이다 (2026-10-13, ERRATA 93)
+
+**증상**: 페이지가 `Map.prototype.get` 을 감싸고 그 안에서 전역 변수(카운터, 원본 함수)를 하나만 읽어도 페이지가 스택 오버플로로
+죽었다. 감싼 함수가 보는 인자·반환값에는 멤브레인이 표에 넣어 둔 것(프록시 URL, blob, 릴레이 파이프)이 그대로 보였다.
+
+**원인**: 인라인 스크립트는 `with(__zp_lex_scope)` 안에서 돌고, 함수 안의 자유 이름은 그 Proxy 의 `has` 트랩 조회다. 트랩은 `zpLex.get` 을
+부른다 — `Map.prototype.get` 은 호출 시점에 찾으므로 페이지의 감싼 함수가 불리고, 그 안의 자유 이름이 다시 트랩으로 돌아온다.
+같은 이유로 모든 표의 키·값이 감싼 함수에 보인다(창·요소가 키인 표도).
+
+**규칙**: 멤브레인·워커 prelude·zp-core 의 표는 **팩토리**로 만든다 — `newMap`/`newSet`/`newWeakMap`/`newWeakSet`. 부팅 때 각 내장
+프로토타입의 사본(`Object.create(null, Object.getOwnPropertyDescriptors(Map.prototype))`)을 떠 두고 인스턴스의 프로토타입을 그 사본으로
+바꾼다. 사본은 클로저에서만 닿는다. 맨 `new Map()` 은 정적 가드가 막는다(`static-policy`). 생성자 인자는 **배열**만(인덱스 루프로 채운다 —
+이터레이터 프로토콜은 페이지 것이다). `instanceof Map` 으로 표를 판별하지 말 것(사본 프로토타입이라 false).
+
+**안 닿는 것**: 문자열·배열·JSON 에 거는 메서드(`indexOf`·`exec`·`push`…)는 여전히 페이지가 바꿀 수 있는 프로토타입을 지난다 — ERRATA 잔여 행.
+감시 도구: `.lean-ctx/page-spy-groups.html` + `spy-bisect.js` (그룹별로 켜서 재귀·누출을 이분).
+
+**검증**: e2e `a page that wraps Map, Set, WeakMap and WeakSet methods…` (봉인 전 빌드는 스택 오버플로), 정적 가드 둘.
+
 ## <a id="strict-eval-with-안"></a>strict 코드는 `with` 를 품을 수 없지만 `with` 안에 앉을 수는 있다 (2026-10-13, ERRATA 92)
 
 **증상**: strict 호출자(모듈·클래스·"use strict")의 `eval('s * 2')` 가 지역 `s` 에서 ReferenceError. 우리가 쓰는 런너는 호출자 지역을

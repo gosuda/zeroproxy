@@ -2,6 +2,30 @@
   'use strict';
   const root = window;
   const nativeOwnKeys = Reflect.ownKeys;
+  // The membrane's own tables. A table is a real Map/Set/WeakMap/WeakSet whose prototype is a copy of the built-in's,
+  // taken before any page script ran: `table.get(key)` finds the copy's native method, never `Map.prototype.get` as the
+  // page has since left it. A page that wraps those methods otherwise sees every key, value and result the membrane keeps
+  // there — real windows, elements, proxy URLs among them — and a wrapper that reads a global variable recursed without
+  // end (the free-name lookup of an inline script runs through a table: `with(__zp_lex_scope)`). The copies are reachable
+  // only from here: no table is ever handed to a page.
+  const sealProtoOf = proto => Object.create(null, Object.getOwnPropertyDescriptors(proto));
+  const SEALED_MAP = sealProtoOf(Map.prototype);
+  const SEALED_SET = sealProtoOf(Set.prototype);
+  const SEALED_WEAKMAP = sealProtoOf(WeakMap.prototype);
+  const SEALED_WEAKSET = sealProtoOf(WeakSet.prototype);
+  const sealedSetProto = Object.setPrototypeOf;
+  const newMap = entries => {
+    const m = sealedSetProto(new Map(), SEALED_MAP);
+    if (entries) for (let i = 0; i < entries.length; i++) m.set(entries[i][0], entries[i][1]);
+    return m;
+  };
+  const newSet = items => {
+    const s = sealedSetProto(new Set(), SEALED_SET);
+    if (items) for (let i = 0; i < items.length; i++) s.add(items[i]);
+    return s;
+  };
+  const newWeakMap = () => sealedSetProto(new WeakMap(), SEALED_WEAKMAP);
+  const newWeakSet = () => sealedSetProto(new WeakSet(), SEALED_WEAKSET);
   // A window's own accessors as the browser installed them, read before any page script. `parent`, `frameElement`,
   // `opener`, `length`… are configurable own properties of every window: a plain `w.frameElement` in the membrane runs
   // whatever getter a page put there — with the real window as `this` (a native `Object.prototype.valueOf` as the getter
@@ -145,7 +169,7 @@
     // the raw proxy URL) — they are pure fingerprint: 14 names vs 1. Rather than
     // delete membrane code late, hide them from enumeration; behaviour is
     // untouched because nothing ever reached them.
-    const LOC_PROTO_OK = new Set(['constructor']);
+    const LOC_PROTO_OK = newSet(['constructor']);
     const isLocProto = o => { try { return typeof Location === 'function' && o === Location.prototype; } catch { return false; } };
     const scrub = (list, target) => list.filter(n => {
       if (typeof n !== 'string') return true;
@@ -170,7 +194,7 @@
       nativeToStringSources.set(patched, orig);
       try { Object.defineProperty(owner, name, { value: patched, writable: true, configurable: true }); } catch {}
     };
-    const nativeToStringSources = new WeakMap();
+    const nativeToStringSources = newWeakMap();
     const origToString = Function.prototype.toString;
     try {
       Object.defineProperty(Function.prototype, 'toString', {
@@ -283,8 +307,8 @@
     return direct;
   }
 
-  const toStringMap = new WeakMap();
-  const toStringMaskedPrototypes = new WeakSet();
+  const toStringMap = newWeakMap();
+  const toStringMaskedPrototypes = newWeakSet();
   const origToString = root.Function && root.Function.prototype && root.Function.prototype.toString;
   const initialProxyURL = new URL(root.location.href);
   const proxyOrigin = resolveProxyOrigin(initialProxyURL, boot, root);
@@ -346,7 +370,7 @@
   // 워커는 부트스트랩 뒤에 소스를 읽으므로 그 사이 해제되면 읽을 게 없다
   // (CNN 의 Permutive SDK 가 정확히 이 순서, 2026-09-29). 기록만 한다 — URL 은
   // 그대로이고, 해제하면 같이 지운다(네이티브 blob 수명보다 길게 잡지 않는다).
-  const pageBlobURLs = new Map();
+  const pageBlobURLs = newMap();
   let explicitBaseURL = '';
   let activeShareVersion = 0;
   let documentCookie = String(boot.documentCookie || '');
@@ -372,29 +396,29 @@
     get documentCookie() { return documentCookie; }, set documentCookie(v) { documentCookie = v; },
   };
   initDocumentCookieRecords(documentCookie);
-  const urlMeta = new WeakMap();
+  const urlMeta = newWeakMap();
   // getAttribute 리터럴 parity — 네이티브는 작성자 원문을 그대로 돌려준다.
   // 우리가 속성을 프록시 URL 로 바꿔 쓰므로 원문은 따로 기억한다.
   // (요소 → Map(attrName → literal)). htmltx 가 심은 초기 마크업의 리터럴은
   // `data-zp-lit-*` 속성으로 전달된다 — 둘 다 getAttribute 훅이 읽는다.
-  const urlLitMeta = new WeakMap();
+  const urlLitMeta = newWeakMap();
   function litAttrName(key) { return 'data-zp-lit-' + String(key).toLowerCase(); }
-  function litSet(el, key, value) { let m = urlLitMeta.get(el); if (!m) { m = new Map(); urlLitMeta.set(el, m); } m.set(String(key).toLowerCase(), String(value)); }
+  function litSet(el, key, value) { let m = urlLitMeta.get(el); if (!m) { m = newMap(); urlLitMeta.set(el, m); } m.set(String(key).toLowerCase(), String(value)); }
   function litGet(el, key) { const m = urlLitMeta.get(el); const k = String(key).toLowerCase(); if (m && m.has(k)) return m.get(k); return undefined; }
   function litDel(el, key) { const m = urlLitMeta.get(el); if (m) m.delete(String(key).toLowerCase()); }
   // 페이지가 되읽는 값은 자기가 쓴 원본이어야 한다. `urlMeta` 는 요소당 값
   // 하나라서 못 쓴다 — img 는 `src` 와 `srcset` 을 동시에 갖는 게 정상이고,
   // 그러면 둘이 서로를 덮는다. 그래서 (요소, 속성) 단위로 따로 기억한다.
-  const srcsetMeta = new WeakMap();
-  const messageListenerWrappers = new WeakMap();
-  const frameWindowOrigins = new WeakMap();
+  const srcsetMeta = newWeakMap();
+  const messageListenerWrappers = newWeakMap();
+  const frameWindowOrigins = newWeakMap();
   // Frames whose routed document has not loaded yet: the blank page in front of
   // it must not reach the page as a `load` (routeFrameSrc / swallowPlaceholderLoad),
   // and a counter per element keeps a slow earlier route from overwriting a
   // newer navigation. Declared here, not beside the code: the install steps in
   // 06-install.js run before the later files' constants are initialized.
-  const pendingFrameRoutes = new WeakSet();
-  const frameRouteSeq = new WeakMap();
+  const pendingFrameRoutes = newWeakSet();
+  const frameRouteSeq = newWeakMap();
   // Sandbox-virt backing store. Target sites that test for `iframe.sandbox`
   // containing both `allow-scripts` and `allow-same-origin` use that as a
   // detection-signal for hostile embedding (since browsers refuse to enforce
@@ -404,9 +428,9 @@
   // accessors return the virtual value. Membrane already isolates the iframe
   // content, so the "escape" the sandbox would have prevented cannot actually
   // happen here.
-  const frameSandboxMeta = new WeakMap();
+  const frameSandboxMeta = newWeakMap();
   // frame → { shadow, list }: the `sandbox` DOMTokenList the page sees (see 18-iframes).
-  const sandboxShadows = new WeakMap();
+  const sandboxShadows = newWeakMap();
   // ── opaque-origin frames ──────────────────────────────────────────────────
   // A frame sandboxed WITHOUT `allow-same-origin` gets an opaque origin from the browser:
   // its document cannot be reached from the embedder, is not controlled by the service
@@ -498,8 +522,8 @@
       return !!d && !d.configurable;
     } catch { return true; }
   }
-  const crossWindowProxyCache = new WeakMap();
-  const postMessageWrappers = new WeakMap();
+  const crossWindowProxyCache = newWeakMap();
+  const postMessageWrappers = newWeakMap();
   // V8 incumbent realm leak — cross-realm postMessage wrap function call 시 message
   // event 의 `e.source` 가 incumbent (caller realm 의 contentWindow) 가 아닌 wrap
   // function 의 realm (parent) 으로 corrupt 됨. NAVER GFP SafeFrame SDK 의 resize
@@ -520,12 +544,12 @@
   const safeFrameShimMarker = Symbol();
   const stealthMarker = Symbol();
   const listenersKey = Symbol();
-  const windowMethodBindings = new Map();
+  const windowMethodBindings = newMap();
   const integrityBackupAttr = 'data-zp-integrity';
   const hiddenIconHref = 'data:application/x-zeroproxy-icon,1';
-  const WINDOW_BOUND_METHODS = new Set(['addEventListener','removeEventListener','dispatchEvent','setTimeout','setInterval','clearTimeout','clearInterval','requestAnimationFrame','cancelAnimationFrame','requestIdleCallback','cancelIdleCallback','matchMedia','getComputedStyle','postMessage','atob','btoa','focus','blur','close','print','alert','confirm','prompt','scroll','scrollTo','scrollBy']);
-  const canvasHookedWindows = new WeakSet();
-  const audioHookedWindows = new WeakSet();
+  const WINDOW_BOUND_METHODS = newSet(['addEventListener','removeEventListener','dispatchEvent','setTimeout','setInterval','clearTimeout','clearInterval','requestAnimationFrame','cancelAnimationFrame','requestIdleCallback','cancelIdleCallback','matchMedia','getComputedStyle','postMessage','atob','btoa','focus','blur','close','print','alert','confirm','prompt','scroll','scrollTo','scrollBy']);
+  const canvasHookedWindows = newWeakSet();
+  const audioHookedWindows = newWeakSet();
   // The per-profile secret canvas/audio farbling is keyed with (22-tail.js) — read here, before the storage facade hides the
   // real area. The key has no page's prefix, so no page's storage view or storage event ever carries it.
   const farbleSecret = (() => {
@@ -536,8 +560,8 @@
       return s;
     } catch { return Math.random().toString(36).slice(2); }
   })();
-  const serviceWorkerFacades = new WeakMap();
-  const storageMaps = new Map();
+  const serviceWorkerFacades = newWeakMap();
+  const storageMaps = newMap();
   // The page-rewriter helpers live inside `installPhase2Membrane`'s scope, but
   // `installNetworkContainment` — a sibling top-level function — needs them to
   // build the child-realm script executors. Referencing them directly from

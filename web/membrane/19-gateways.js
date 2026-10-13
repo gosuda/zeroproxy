@@ -114,7 +114,7 @@
     }
     // What the page asked for — getConfiguration() reads it back instead of
     // our TURN credentials and relay policy.
-    const requested = new WeakMap();
+    const requested = newWeakMap();
     const remember = (pc, config) => {
       const c = config == null ? {} : config;
       requested.set(pc, {
@@ -185,14 +185,14 @@
   // 여전히 맞는다 — 값이 `null`/reject 로 떨어질 뿐 이름 자체가 빠지진 않는다.
   function makeVirtualGateway(name, meta) {
     // 비동기(Promise 반환) — 실측(2026-09-14, 각 인터페이스 스펙).
-    const ASYNC_REJECT = new Set([
+    const ASYNC_REJECT = newSet([
       'createOffer', 'createAnswer', 'setLocalDescription', 'setRemoteDescription',
       'addIceCandidate', 'getStats', 'createBidirectionalStream', 'createUnidirectionalStream',
     ]);
     // 동기인데 실제 자원(트랙/채널/트랜시버/전송)을 만들어야 해서 던진다.
-    const SYNC_THROW = new Set(['createDataChannel', 'createDTMFSender', 'addTrack', 'addTransceiver', 'send']);
-    const SYNC_ARRAY = new Set(['getSenders', 'getReceivers', 'getTransceivers', 'getLocalStreams', 'getRemoteStreams']);
-    const SYNC_OBJECT = new Set(['getConfiguration']);
+    const SYNC_THROW = newSet(['createDataChannel', 'createDTMFSender', 'addTrack', 'addTransceiver', 'send']);
+    const SYNC_ARRAY = newSet(['getSenders', 'getReceivers', 'getTransceivers', 'getLocalStreams', 'getRemoteStreams']);
+    const SYNC_OBJECT = newSet(['getConfiguration']);
     // 나머지 동기 메서드(close 포함)는 no-op — 실제로 아무 상태도 없으니
     // undefined 반환이 스펙 위반이 아니다.
     const STATE_DEFAULTS = {
@@ -227,7 +227,7 @@
       ? (root.RTCPeerConnection && root.RTCPeerConnection.prototype)
       : (root[name] && root[name].prototype);
     if (sourceProto) {
-      const backing = new WeakMap();
+      const backing = newWeakMap();
       for (const propName of Object.getOwnPropertyNames(sourceProto)) {
         if (propName === 'constructor') continue;
         const d = Object.getOwnPropertyDescriptor(sourceProto, propName);
@@ -245,7 +245,7 @@
             defineMasked(VirtualGateway.prototype, propName, {
               configurable: true,
               get() { const m = backing.get(this); return (m && m.get(propName)) || null; },
-              set(v) { let m = backing.get(this); if (!m) backing.set(this, m = new Map()); m.set(propName, typeof v === 'function' ? v : null); },
+              set(v) { let m = backing.get(this); if (!m) backing.set(this, m = newMap()); m.set(propName, typeof v === 'function' ? v : null); },
             });
           } else if (d.get && d.set) {
             // 일반 settable (예: RTCDataChannel.binaryType) — 쓴 값을 그대로 반사.
@@ -253,7 +253,7 @@
             defineMasked(VirtualGateway.prototype, propName, {
               configurable: true,
               get() { const m = backing.get(this); return m && m.has(propName) ? m.get(propName) : initial; },
-              set(v) { let m = backing.get(this); if (!m) backing.set(this, m = new Map()); m.set(propName, v); },
+              set(v) { let m = backing.get(this); if (!m) backing.set(this, m = newMap()); m.set(propName, v); },
             });
           } else if (d.get) {
             const value = Object.prototype.hasOwnProperty.call(STATE_DEFAULTS, propName) ? STATE_DEFAULTS[propName] : null;
@@ -267,7 +267,7 @@
     // 있어도 **진짜** 객체여야 `for await` 리더가 매달리지 않고 끝난다.
     // 인스턴스당 동일 객체(네이티브 동일성: `wt.datagrams === wt.datagrams`).
     if (name === 'WebTransport') {
-      const readyCache = new WeakMap(), closedCache = new WeakMap(), bidiCache = new WeakMap(), uniCache = new WeakMap(), dgCache = new WeakMap();
+      const readyCache = newWeakMap(), closedCache = newWeakMap(), bidiCache = newWeakMap(), uniCache = newWeakMap(), dgCache = newWeakMap();
       const cached = (map, build) => function () { if (!map.has(this)) map.set(this, build()); return map.get(this); };
       defineMasked(VirtualGateway.prototype, 'ready', { configurable: true, get: cached(readyCache, rejected) });
       defineMasked(VirtualGateway.prototype, 'closed', { configurable: true, get: cached(closedCache, rejected) });

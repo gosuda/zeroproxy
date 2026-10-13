@@ -2,13 +2,31 @@
 (() => {
   'use strict';
   if (globalThis.ZP) return;
+  // Tables built with a copy of each built-in's prototype taken before any page script ran (the same factories as
+  // web/membrane/00-head.js): a page that wraps `Set.prototype.add` must not see the relay URLs this library dedupes.
+  const sealProtoOf = proto => Object.create(null, Object.getOwnPropertyDescriptors(proto));
+  const SEALED_MAP = sealProtoOf(Map.prototype);
+  const SEALED_SET = sealProtoOf(Set.prototype);
+  const SEALED_WEAKMAP = sealProtoOf(WeakMap.prototype);
+  const sealedSetProto = Object.setPrototypeOf;
+  const newMap = entries => {
+    const m = sealedSetProto(new Map(), SEALED_MAP);
+    if (entries) for (let i = 0; i < entries.length; i++) m.set(entries[i][0], entries[i][1]);
+    return m;
+  };
+  const newSet = items => {
+    const t = sealedSetProto(new Set(), SEALED_SET);
+    if (items) for (let i = 0; i < items.length; i++) t.add(items[i]);
+    return t;
+  };
+  const newWeakMap = () => sealedSetProto(new WeakMap(), SEALED_WEAKMAP);
   const te = new TextEncoder();
   const td = new TextDecoder('utf-8', { fatal: true });
   const SHARE_INFO_ENC = te.encode('zp-url-cbc-enc');
   const SHARE_INFO_MAC = te.encode('zp-url-cbc-mac');
   const SHARE_MAC_PREFIX = te.encode('ZP-CBC-URL-V1');
-  const HTTP_PROTOCOLS = new Set(['http:', 'https:']);
-  const WS_PROTOCOLS = new Set(['ws:', 'wss:']);
+  const HTTP_PROTOCOLS = newSet(['http:', 'https:']);
+  const WS_PROTOCOLS = newSet(['ws:', 'wss:']);
   const CONTROL_PREFIX = '/zp/';
   const ASSET_PREFIX = CONTROL_PREFIX + 'assets/';
   // Default User-Agent presented to target servers. Browsers mark User-Agent
@@ -104,7 +122,7 @@
   }
   function uaHighEntropyValues(hints, brands, platform) {
     const all = Object.assign({ brands, mobile: false, platform }, TARGET_UA_HIGH_ENTROPY);
-    const wanted = new Set(['brands', 'mobile', 'platform']);
+    const wanted = newSet(['brands', 'mobile', 'platform']);
     for (const h of (hints || [])) if (Object.prototype.hasOwnProperty.call(all, h)) wanted.add(String(h));
     const out = {};
     for (const k of Array.from(wanted).sort()) {
@@ -394,7 +412,7 @@
   function fixedCSP(servers, options) {
     const loc = globalThis.location;
     const ws = loc ? ((loc.protocol === 'https:' ? 'wss://' : 'ws://') + loc.host) : 'wss://proxy.example';
-    const connect = new Set(["'self'", ws]);
+    const connect = newSet(["'self'", ws]);
     for (const server of normalizeRelayServers(servers || [], { allowLoopbackWS: true })) {
       try { const u = new URL(server); connect.add(u.origin); } catch {}
     }
@@ -429,7 +447,7 @@
     'style-src-attr': "'self' 'unsafe-inline' blob: data:",
     'default-src': "'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' blob: data:",
   };
-  const META_CSP_RESOURCE = new Set(['img-src', 'media-src', 'font-src', 'object-src', 'manifest-src', 'prefetch-src', 'form-action', 'base-uri']);
+  const META_CSP_RESOURCE = newSet(['img-src', 'media-src', 'font-src', 'object-src', 'manifest-src', 'prefetch-src', 'form-action', 'base-uri']);
   function filterMetaCSP(content) {
     const out = [];
     for (const segment of String(content || '').split(';')) {
@@ -459,7 +477,7 @@
     if (!values) return [];
     const list = Array.isArray(values) ? values : [values];
     const out = [];
-    const seen = new Set();
+    const seen = newSet();
     let total = 0;
     for (const raw of list) {
       if (out.length >= MAX_RELAY_SERVERS) throw safeError('MALFORMED_ROUTE');
@@ -500,7 +518,7 @@
   // `onMeta(record)`, when given, sees the metadata before the response is handed
   // out — the page applies the cookies the response set (`record.cookies`).
   function createFetchResponseAdapter(ResponseCtor, HeadersCtor, installAccessor, installMethod, onMeta) {
-    const metadata = new WeakMap();
+    const metadata = newWeakMap();
     const proto = ResponseCtor.prototype;
     const nativeClone = proto.clone;
     const nativeError = ResponseCtor.error.bind(ResponseCtor);

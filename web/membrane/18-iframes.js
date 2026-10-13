@@ -5,7 +5,7 @@
       if (w[iframeHooksMarker]) return;
       Object.defineProperty(w, iframeHooksMarker, { value: true, enumerable: false, configurable: false });
     } catch {}
-    const instrumentedWindows = new WeakSet();
+    const instrumentedWindows = newWeakSet();
     // Document level, capture phase: it runs before every listener the page adds
     // and before the element's own onload. NOT the window — a `load` event fired
     // at an element never propagates to the Window (DOM: a Document's parent is

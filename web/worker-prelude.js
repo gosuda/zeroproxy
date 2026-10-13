@@ -2,6 +2,28 @@
   'use strict';
   if (self.__ZP_WORKER_PRELUDE) return;
   Object.defineProperty(self, '__ZP_WORKER_PRELUDE', { value: true, enumerable: false, configurable: false });
+  // The worker prelude's own tables: real Map/Set/WeakMap/WeakSet whose prototype is a copy of the built-in's taken before
+  // any worker script ran (see the same factories in web/membrane/00-head.js). A worker script that wraps
+  // `Map.prototype.get` neither sees what the prelude keeps there nor sends the free-name lookup of its own code into
+  // a loop (`with(__zp_lex_scope)` reads a table).
+  const sealProtoOf = proto => Object.create(null, Object.getOwnPropertyDescriptors(proto));
+  const SEALED_MAP = sealProtoOf(Map.prototype);
+  const SEALED_SET = sealProtoOf(Set.prototype);
+  const SEALED_WEAKMAP = sealProtoOf(WeakMap.prototype);
+  const SEALED_WEAKSET = sealProtoOf(WeakSet.prototype);
+  const sealedSetProto = Object.setPrototypeOf;
+  const newMap = entries => {
+    const m = sealedSetProto(new Map(), SEALED_MAP);
+    if (entries) for (let i = 0; i < entries.length; i++) m.set(entries[i][0], entries[i][1]);
+    return m;
+  };
+  const newSet = items => {
+    const t = sealedSetProto(new Set(), SEALED_SET);
+    if (items) for (let i = 0; i < items.length; i++) t.add(items[i]);
+    return t;
+  };
+  const newWeakMap = () => sealedSetProto(new WeakMap(), SEALED_WEAKMAP);
+  const newWeakSet = () => sealedSetProto(new WeakSet(), SEALED_WEAKSET);
   // ── 네이티브 스냅숏 ── 훅을 걸기 전 이 realm 의 모습. 끝의 settleNatives 가 훅마다 네이티브가 있던 **자리**와
   // 플래그, name·length·소스를 입힌다. 워커 전역 멤버 다수(fetch·setTimeout·importScripts·location·origin…)는
   // 인스턴스가 아니라 WorkerGlobalScope.prototype 에 산다. 인스턴스에 훅을 걸면 브라우저에 없는 own 이름이 생기고,
@@ -19,19 +41,19 @@
   const ZP_WITH_PROLOGUE = 'const{' + ZP_WITH_HELPERS.join(',') + '}=(function(){return this})();';
   const origFnToString = Function.prototype.toString;
   // 훅 → 그것이 대신한 네이티브의 소스. Function.prototype.toString 훅(settleNatives)이 읽는다.
-  const maskedSource = new WeakMap();
+  const maskedSource = newWeakMap();
   const nativeSnapshot = (() => {
-    const global = new Map();
+    const global = newMap();
     for (let o = self; o && o !== Object.prototype; o = Object.getPrototypeOf(o)) {
       for (const k of Object.getOwnPropertyNames(o)) {
         if (!global.has(k) && !ZP_HIDDEN_RE.test(k)) global.set(k, { owner: o, desc: Object.getOwnPropertyDescriptor(o, k) });
       }
     }
     // 생성자의 정적 멤버·프로토타입 멤버, 그리고 네임스페이스 객체(Reflect·console…)의 멤버
-    const members = new Map();
+    const members = newMap();
     const take = o => {
       if (!o || (typeof o !== 'object' && typeof o !== 'function') || members.has(o)) return;
-      const m = new Map();
+      const m = newMap();
       for (const k of Object.getOwnPropertyNames(o)) { try { m.set(k, Object.getOwnPropertyDescriptor(o, k)); } catch {} }
       members.set(o, m);
     };
@@ -164,7 +186,7 @@
     const prev = __zp_eval_desc;
     __zp_eval_desc = d;
     const prevLexEnv = __zp_lex_env;
-    __zp_lex_env = new Map();
+    __zp_lex_env = newMap();
     try {
       const strictSrc = !!callerStrict || /^\s*['"]use strict['"]/.test(src);
       const env = new Proxy(d, {
@@ -212,7 +234,7 @@
   // 환경에 산다 — 페이지 zpLex 와 동형. eval 렉시컬 환경은 버려지므로
   // 리라이터가 심은 __zp_lex_decl/__zp_lex_bind 가 accessor 클로저를
   // 여기 보존하고, scope 프록시가 식별자 해석 시 먼저 consult 한다.
-  const zpLex = new Map();
+  const zpLex = newMap();
   var __zp_lex_env = zpLex;
   const zpLexEntry = prop => (typeof prop === 'string' ? zpLex.get(prop) : undefined);
   const zpLexRead = (e, prop) => {
@@ -259,7 +281,7 @@
   const ZP_STRICT_DIRECTIVE_RE = /^(\s|\/\*[^]*?\*\/|\/\/[^\n]*)*('use strict'|"use strict")/;
   const workerExecGlobal = (code, isEval) => {
     const prevLexEnv = __zp_lex_env;
-    if (isEval) __zp_lex_env = new Map();
+    if (isEval) __zp_lex_env = newMap();
     // sourceURL — eval'd 코드의 에러 filename 이 가상 워커 URL 을 가리키게.
     const tagged = '\n//# sourceURL=' + base.href;
     try {
@@ -276,7 +298,7 @@
   // 멤브레인의 needsWindowReceiver 와 같은 규칙 — prototype 없는 네이티브
   // 함수만 진짜 전역에 묶는다(생성자는 new 가 깨지고, 워커가 얹은 자기 함수는
   // this 가 바뀌므로 건드리지 않는다). 함수별로 캐시해 `self.f === self.f`.
-  const globalMethodBindings = new WeakMap();
+  const globalMethodBindings = newWeakMap();
   // 런타임의 전역 `Function` 은 우리 래퍼다 — 네이티브 toString 을 잡아 둔다.
   const nativeFnToString = NativeFunctionCtor.prototype.toString;
   function globalReceiverValue(value) {
@@ -838,7 +860,7 @@
   // 브라우저에 있을 때만 — CookieStore 는 Window·ServiceWorker 에만 노출된다. 전용/공유 워커에 얹으면 네이티브에 없는
   // 이름이 하나 는다(e2e `/xwenv`).
   if ('cookieStore' in self) {
-    const jar = new Map();
+    const jar = newMap();
     const parseExpires = o => o && o.expires ? Number(o.expires) : null;
     const sweep = () => { const now = Date.now(); for (const [k, v] of jar) if (v.expires && v.expires <= now) jar.delete(k); };
     const fire = changes => { try { cookieStore.dispatchEvent(Object.assign(new Event('change'), { changed: changes, deleted: [] })); } catch {} };
@@ -953,7 +975,7 @@
   // `__zp:'zp-broker-reply'` 로 되돌려 준다(포트는 worker 로 transfer).
   // prelude 가 타깃 스크립트보다 먼저 실행되므로 이 리스너가 먼저 등록되고,
   // 제어 메시지는 stopImmediatePropagation 으로 타깃의 onmessage 에 숨긴다.
-  const brokerPending = new Map();
+  const brokerPending = newMap();
   let brokerSeq = 0;
   const canBroker = typeof self.postMessage === 'function'; // SharedWorker 는 port 기반 — 미지원 유지
   if (canBroker) {
@@ -984,7 +1006,7 @@
       if (protocols == null) return [];
       const list = typeof protocols === 'string' ? [protocols] : Array.isArray(protocols) ? protocols.slice() : null;
       if (!list) throw new DOMException('Invalid protocols', 'SyntaxError');
-      const out = []; const seen = new Set();
+      const out = []; const seen = newSet();
       for (const p of list) {
         const s = String(p);
         if (!s || !WS_TOKEN_RE.test(s) || seen.has(s)) throw new DOMException('Invalid protocols', 'SyntaxError');
@@ -1352,7 +1374,7 @@
   const nativeImportScripts = typeof self.importScripts === 'function' ? self.importScripts.bind(self) : null;
   // blob: URL → Blob 레지스트리. 워커의 createObjectURL 은 네이티브라
   // SW 에도 blob 본문이 없다 — importScripts(blob:) 는 이 맵으로만 풀린다.
-  const blobURLObjects = new Map();
+  const blobURLObjects = newMap();
   try {
     const NativeURL = self.URL;
     const nativeCreateObjectURL = NativeURL && NativeURL.createObjectURL;

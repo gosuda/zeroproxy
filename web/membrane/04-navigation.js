@@ -26,7 +26,7 @@
   // `location.assign('mailto:…')` must NOT die on TARGET_PROTOCOL_BLOCKED.
   // Deliberately absent: javascript:/data:/blob:/about: — those execute or
   // inline content and must keep failing closed.
-  const NAV_EXTERNAL_SCHEMES = new Set(['mailto:', 'tel:', 'sms:', 'callto:', 'skype:', 'intent:', 'market:', 'webcal:', 'geo:', 'tg:', 'whatsapp:', 'zoommtg:', 'ms-teams:', 'slack:', 'discord:']);
+  const NAV_EXTERNAL_SCHEMES = newSet(['mailto:', 'tel:', 'sms:', 'callto:', 'skype:', 'intent:', 'market:', 'webcal:', 'geo:', 'tg:', 'whatsapp:', 'zoommtg:', 'ms-teams:', 'slack:', 'discord:']);
   function delegatableExternalScheme(raw) {
     const m = /^([A-Za-z][A-Za-z0-9+.-]*:)/.exec(String(raw).trim());
     return !!m && NAV_EXTERNAL_SCHEMES.has(m[1].toLowerCase());
@@ -76,7 +76,7 @@
   // the parent still reads that frame's location and message origin. Keyed by
   // where the frame IS (its current document path), unlike the element stash,
   // which records where it was first sent.
-  const frameRouteTargets = new Map();
+  const frameRouteTargets = newMap();
   function frameRouteTarget(path) {
     return ZP.isSharePath(path) ? frameRouteTargets.get(ZP.shareRouteKey(path)) || '' : '';
   }

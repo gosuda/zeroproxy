@@ -916,6 +916,22 @@ claimed:
     global — the e2e caught it). — e2e `direct eval sees its caller's bindings, sloppy and strict, in the page and in a written
     frame (matches native)` (18 cases in each realm; 15 differ on the build without the change).
 
+93. **The membrane's own tables went through the page's `Map`/`Set`/`WeakMap`/`WeakSet` — a watch on every key and value, and a loop.**
+    The membrane keeps its state in about a hundred tables (`windowHandles`, `crossWindowTargets`, the lexical registry, the
+    URL metadata, …): real windows and elements among their keys and values. `table.get(k)` looks `get` up on
+    `Map.prototype` at the moment of the call, and a page can have replaced it. A page that wraps the methods the way a tracing
+    library does saw every key, value and result the membrane stored (measured with spies on all four built-ins: proxy URLs,
+    blob URLs of the proxy, the relay pipe, the share route). Worse, **a wrapper that reads a top-level variable recursed until
+    the stack ended and killed the page**: an inline script runs inside `with(__zp_lex_scope)`, a free name is a lookup in
+    that Proxy, and its `has` trap reads a table — the wrapper's own free names come back to the wrapper. Every table is now a real
+    Map/Set/WeakMap/WeakSet whose prototype is a copy of the built-in's taken before any page script ran (`newMap`,
+    `newSet`, `newWeakMap`, `newWeakSet`: 112 sites in the membrane, 12 in the worker prelude, 7 in `zp-core.js`); the copies are
+    reachable only from the closure, and no table is ever handed to a page. A static guard fails on a bare `new Map(` outside the
+    factories. **What this does not cover** (documented below): the membrane still calls `String`/`RegExp`/`Array`/`JSON`
+    methods on strings and arrays it builds, through the prototypes a page can patch. — e2e `a page that wraps Map, Set,
+    WeakMap and WeakSet methods neither sees the membrane's tables nor breaks it` (the unsealed build dies with a stack
+    overflow); static-policy: every table is built by a factory, and a patched built-in sees none of a sealed table's calls.
+
 ### Residuals (documented, not fixed)
 
 | Residual | Why it stays | Pin |
@@ -924,6 +940,7 @@ claimed:
 | V8 names the rewritten callee in some messages (`__zp_get(...).item is not a function`) | V8 renders the call-site AST; matching it needs per-call emission changes. Only buggy call sites surface it. | surface `framesItem` |
 | Direct `eval` inside `with(o)` does not see `o` | The eval descriptor carries lexical bindings, not with-objects. Rare (legacy templating uses `new Function`). | surface `withEvalScope` |
 | A direct `eval` in a srcless child frame sees the caller's locals (item 92) but not a caller local that is named like a dangerous global (`location`, `top`, …) when the eval code reads it bare | The page realm consults the caller's bindings inside `__zp_get` for those names (`__zp_eval_desc`); the child realm delegates the helpers to the parent, which does not know this realm's caller. A local named `location` read by name from eval code is vanishingly rare. | `web/membrane/20-containment.js` `childDirectEval` |
+| **The membrane's calls on strings, arrays and plain objects go through prototypes a page can patch** — `String.prototype.indexOf`/`startsWith`/`slice`, `RegExp.prototype.exec`/`test`, `Array.prototype.push`/`@@iterator`, `JSON.parse`/`stringify`, `Object.assign`, `Reflect.*`. A page that wraps one sees the strings the membrane handles. Measured (2026-10-13) on a page patching one built-in at a time: the proxy origin, this document's own share URL with its `#k=` key and relay pipe, the tab and entry ids, the URLs of the page's own requests, blob URLs of the proxy, the boot configuration and the install trace. **No real window or Location object was observed**, as a receiver, argument or result, by spies on about a hundred built-in methods and some forty getters on `Object.prototype`, through about thirty membrane paths (location, history, storage, cookies, markup, fetch, XHR, eval, timers, frames, `document.write`, workers, popups, error stacks). The tables that hold such objects are sealed (item 93). Not measured: paths the battery did not run (cross-site frames and popups in particular), and what the strings above are worth to a hostile page — that is a threat-model decision, not a measurement. | Closing the strings needs every method call the membrane makes on a string, array or JSON text to go through a captured native (`Reflect.apply(nativeIndexOf, s, [x])`, as Node core does with its primordials): thousands of sites, and no build-time tool that tells a string receiver from a page object. The other way is a realm of its own for the membrane, which must then be given every main-realm class its code tests with `instanceof`. A wrapper that reads a global inside `Reflect.*` can still loop the free-name lookup (the `scopeGet`/`has` traps call `Reflect.getOwnPropertyDescriptor`/`Reflect.has`): not tested; the fix is the captured-native call at those few trap sites. | `.lean-ctx/page-spy-groups.html` + `spy-bisect.js` (local), e2e `/xtables` |
 | A strict caller's `eval("this")` is the window (facade), not `undefined` | The runners are sloppy functions (a parameter named `eval` is illegal in strict code), so an `undefined` `this` is coerced to the global before the eval sees it; the rewriter turns the real global back into the facade, so nothing leaks. | `web/membrane/07-membrane.js` `zpDirectEval` |
 | A function a guarded site assigns is named after the temp in V8's own inferred names (profiles, stack frames before sanitizing); `.name` is native (`""`) | V8 infers a debug name from the nearest assignment; the stack sanitizer already turns `__zp_*` frame names into `<anonymous>`, as for the helper form before. | rewriter.test `inline-guarded members…` (`.name`) |
 | The page WASM is 527 KB (budget raised 500 → 540 KB) | The rewriter itself grew: the reserved-name scan (8.7 KB — OXC's walker is monomorphized per visitor), the `with` bindings, the guards. It runs in the page because evals are rewritten there. | static-policy `E3 크기 가드` |

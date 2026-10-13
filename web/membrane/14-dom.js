@@ -410,7 +410,7 @@
     installLinkProp(w.HTMLLinkElement && w.HTMLLinkElement.prototype);
     // Elements whose content is text, never markup, to the fragment parsing algorithm (raw text and RCDATA contexts; a
     // noscript is raw text in a document whose scripting is enabled, as this one's is).
-    const RAW_TEXT_CONTEXTS = new Set(['script', 'textarea', 'title', 'xmp', 'plaintext', 'noembed', 'noframes', 'noscript']);
+    const RAW_TEXT_CONTEXTS = newSet(['script', 'textarea', 'title', 'xmp', 'plaintext', 'noembed', 'noframes', 'noscript']);
     patchHTMLSetter(w.Element.prototype, 'innerHTML');
     patchHTMLSetter(w.Element.prototype, 'outerHTML');
     // ShadowRoot.innerHTML is a SEPARATE IDL attribute — patch it too or

@@ -110,7 +110,7 @@
       // 첫 줄에서 ReferenceError 로 죽었다(2026-09-29, 헬퍼 커버리지 가드).
       // 부모 레지스트리를 공유하면 안 된다 — 자식의 `let x` 가 부모 것과 충돌하고
       // 부모 전역 조회에 새어 들어간다. 자식 전용 Map 과 스코프를 깐다.
-      const childLexShared = new Map();
+      const childLexShared = newMap();
       let childLex = childLexShared;
       const childLexEntry = prop => (typeof prop === 'string' ? childLex.get(prop) : undefined);
       const childLexRead = (e, prop) => {
@@ -243,7 +243,7 @@
         const env = childEvalEnv(d);
         // the eval's own let/const/class live and die with it
         const prevLex = childLex;
-        childLex = new Map();
+        childLex = newMap();
         try {
           const that = this;
           if (callerStrict || directive) return runners.strict.call(that, childEval, env, rewritten);
@@ -412,7 +412,7 @@
     if (root.__ZP_SET_BASE && !define(w, '__ZP_SET_BASE', root.__ZP_SET_BASE)) throw normalizedError('SecurityError');
     if (childFunction && childFunction.prototype) try {
       // Constructor-chain compilation must use the same child-owned gate.
-      const childConstructorOverrides = new WeakMap();
+      const childConstructorOverrides = newWeakMap();
       defineMasked(childFunction.prototype, 'constructor', {
         get() { return childConstructorOverrides.get(this) || childFunctionFacade; },
         set(value) { try { childConstructorOverrides.set(this, value); } catch {} },

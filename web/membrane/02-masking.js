@@ -200,7 +200,7 @@
     // 쓰는 이름은 globalThis 하나다(리라이터 소스 확인). window/self 를 여기
     // 넣으면 페이지가 직접 쓴 `window.open(x)` 이 `open(x)` 으로 줄어
     // **원본과 다른 텍스트**가 된다 — 되돌리기의 목적에 어긋난다.
-    const ZP_SRC_GLOBALS = new Set(['globalThis']);
+    const ZP_SRC_GLOBALS = newSet(['globalThis']);
 
     // 균형 잡힌 인자 목록을 자른다. 문자열 안의 괄호는 세지 않는다.
     function zpSrcSplitArgs(s, i) {
@@ -505,7 +505,7 @@
     let base = Object.prototype;
     try { if (typeof EventTarget === 'function' && EventTarget.prototype) base = EventTarget.prototype; } catch {}
     const p = Object.create(base);
-    define(p, 'addEventListener', function(type, fn) { if (!fn) return; const key = String(type); if (!this[listenersKey]) this[listenersKey] = new Map(); const list = this[listenersKey].get(key) || []; list.push(fn); this[listenersKey].set(key, list); });
+    define(p, 'addEventListener', function(type, fn) { if (!fn) return; const key = String(type); if (!this[listenersKey]) this[listenersKey] = newMap(); const list = this[listenersKey].get(key) || []; list.push(fn); this[listenersKey].set(key, list); });
     define(p, 'removeEventListener', function(type, fn) { const list = this[listenersKey] && this[listenersKey].get(String(type)); if (!list) return; const i = list.indexOf(fn); if (i >= 0) list.splice(i, 1); });
     define(p, 'dispatchEvent', function(event) { const list = this[listenersKey] && this[listenersKey].get(event.type) || []; try { if (!event.target) Object.defineProperty(event, 'target', { value: this, configurable: true }); } catch {} const handler = this['on' + event.type]; if (typeof handler === 'function') handler.call(this, event); for (const fn of list.slice()) fn.call(this, event); return !event.defaultPrevented; });
     sharedEventTargetProto = p;

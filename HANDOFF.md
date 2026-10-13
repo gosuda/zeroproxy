@@ -5,8 +5,8 @@ Written for: the next session (agent or engineer) picking up ZeroProxy cold. Rea
 
 ## State
 
-- Branch `main`; everything up to `8e9d936` (the window-accessor escape, item 91) is on `origin/main`. The commit carrying
-  this version of the file (item 92) is local until the user says to push.
+- Branch `main`; everything up to `82332eb` (direct eval sees its caller, item 92) is on `origin/main`. The commit carrying
+  this version of the file (item 93) is local until the user says to push.
 - Commits of this arc: `8c178a7` HLS / loop cap / `innerHTML` / TLS refresh (ERRATA 58–61) · `8565ccf` five divergences found
   chasing the challenge (62–65) · `3ae6135` **Stack Overflow's Cloudflare challenge fixed** — the ClientHello lacked Chrome's
   `trust_anchors` extension — plus `Sec-Fetch-*` for frames and sub-requests (66–67) · `f8bb56a` element-load `Sec-Fetch-*`,
@@ -29,7 +29,9 @@ Written for: the next session (agent or engineer) picking up ZeroProxy cold. Rea
   script no longer throws (90) (`2fc889d`) · the latest commit: **an escape closed — the membrane read a window's own
   accessors (`frameElement`, `parent`, …) through whatever getter the page put there**: the page got the real window back,
   and a sandboxed frame that redefined its own `frameElement` navigated the top window (91) (`8e9d936`) · the latest commit:
-  **a direct `eval` sees its caller's bindings** in a frame the page writes into and in strict code (92).
+  **a direct `eval` sees its caller's bindings** in a frame the page writes into and in strict code (92) (`82332eb`) · the latest
+  commit: **the membrane's tables sealed against a page that wraps `Map`/`Set`/`WeakMap`/`WeakSet`** — it saw every key and value
+  the membrane stored, and a wrapper that read a global variable recursed until the page died (93).
 - Verification (`2fc889d`): cargo 317 / 3 ignored, go ok, test:js 165, test:wasm:ci 15, static-policy 62, test:e2e
   231; the 705 cached corpus scripts rewrite to code V8 parses. 13-site sweep: all answer; Wikipedia, GitHub, Guardian,
   MDN, Naver, Apple, npm 0 errors; NYT back to its 2 (a 404, FedCM) once item 90 landed. Known noise, unchanged: BBC's
@@ -38,12 +40,16 @@ Written for: the next session (agent or engineer) picking up ZeroProxy cold. Rea
   sweep found two of this round's bugs that every test passed (`else0`, item 88; the empty script, item 90): run it.
   Item 91 (web only): test:js 165, test:e2e 232; both new checks fail with the plain reads restored. Item 92 (web only):
   test:js 165, test:wasm:ci 15, static-policy 62, test:e2e 233; the new check differs in 15 of its 36 cases on the build
-  without the change. The 13-site error sweep was A/B-ed against the previous commit's build on CNN and Stack Overflow:
+  without the change (item 92). The 13-site error sweep was A/B-ed against the previous commit's build on CNN and Stack Overflow:
   the same errors (CNN's IMA SDK origin check, Stack Overflow's two OXC `Expected \`;\`` throws), nothing new.
-- Detail lives in [ERRATA.md](ERRATA.md) items 62–92 and its Residuals table, the trap-notebook entries
+  Item 93 (web only): test:js 167 (two new guards), test:wasm:ci 15, static-policy 64, test:e2e 234; the new e2e dies with a stack
+  overflow on the unsealed build. The 13 sites were A/B-ed against the previous commit's build again: the same errors on both
+  sides (CNN and Stack Overflow vary run to run on both), and a lookup/eval/`Function`/member/storage micro-benchmark is within
+  its run-to-run spread (free-name lookups 292–319 ms before, 297–319 ms after).
+- Detail lives in [ERRATA.md](ERRATA.md) items 62–93 and its Residuals table, the trap-notebook entries
   (`.ai/trap-notebook/rewriter.md`: `동적-코드-전역-this`, `chrome-hello-trust-anchors`, `coep-워커-부트스트랩`,
   `lol-html-원시-속성값`, `trusted-script-는-코드`, `워커-훅-자리`, `캔버스-파블링-결정적`, `prepare-stack-trace-페이지-뷰`,
-  `프렐류드-스크립트-잔존`, `referrer-한-곳에서`, `클라이언트-힌트-협상`, `전송-실패는-네트워크-오류`, `대조군은-quic`, `바쁜-렌더러는-진다`, `아이콘-링크-경주`, `교차-출처-프레임-권한`, `헬퍼-이름-응답`, `with-안의-이름`, `인라인-가드`, `같은-소스-재리라이트`, `부모-파사드로-부팅한-자식`, `창-자기-접근자`, `strict-eval-with-안`), and the verification table in [PHASE2_STATUS.md](PHASE2_STATUS.md). No gate
+  `프렐류드-스크립트-잔존`, `referrer-한-곳에서`, `클라이언트-힌트-협상`, `전송-실패는-네트워크-오류`, `대조군은-quic`, `바쁜-렌더러는-진다`, `아이콘-링크-경주`, `교차-출처-프레임-권한`, `헬퍼-이름-응답`, `with-안의-이름`, `인라인-가드`, `같은-소스-재리라이트`, `부모-파사드로-부팅한-자식`, `창-자기-접근자`, `strict-eval-with-안`, `봉인된-표`), and the verification table in [PHASE2_STATUS.md](PHASE2_STATUS.md). No gate
   in PHASE2_STATUS is open.
 - **A product decision was made without asking — flag it to the user:** the canvas/audio masking (ERRATA Q6, "intentional")
   stayed, but became deterministic per profile and origin (item 73). Removing it outright would be the other choice; the
@@ -68,11 +74,18 @@ Written for: the next session (agent or engineer) picking up ZeroProxy cold. Rea
    remapping; the only reader it serves is a script that tells environments apart by the text of its own eval stacks (bot
    scoring), so it stays a residual. Persona drift was checked 2026-10-13 (`npm run check:chrome-hello`: Chrome 154.0.8037.98,
    17 extensions, `trust_anchors` 186 bytes — matches).
-5. Reddit (when it serves reCAPTCHA): a worker running `recaptcha__ko.js` throws `Cannot read properties of undefined
+5. **A decision for the owner: the strings the membrane handles are visible to a page that patches `String`/`RegExp`/`Array`/`JSON`
+   methods** (ERRATA Residuals, first row; measured 2026-10-13 with `.lean-ctx/spy-bisect.js`). A page can read the proxy origin,
+   its own share URL with the `#k=` key, the relay pipe, tab/entry ids and the URLs of its own requests. No real window or Location
+   object was seen; the tables that hold them are sealed (item 93). Closing it means a captured native at every method call on
+   a string/array/JSON text (primordials, thousands of sites) or a realm of its own for the membrane; neither is started. Whether
+   the strings matter is a threat-model call. Unmeasured: cross-site frames and popups under the spies, and `Reflect.*` wrapped by
+   a function that reads a global (the free-name lookup's traps call `Reflect.getOwnPropertyDescriptor`/`Reflect.has`).
+6. Reddit (when it serves reCAPTCHA): a worker running `recaptcha__ko.js` throws `Cannot read properties of undefined
    (reading 'body')` (line 246 of the rewritten worker script). Present before the worker-realm work too (A/B on the
    previous `web/`, 2026-10-12); not traced. Compare with a native reCAPTCHA worker (the e2e `/xwenv` pattern).
 
-Done this round and closed: items 71–92 (see State); before that the meta-CSP lone `'` (69), the inline-script stack (70),
+Done this round and closed: items 71–93 (see State); before that the meta-CSP lone `'` (69), the inline-script stack (70),
 Reddit (parity re-checked with a fresh unautomated Chrome — same wall natively).
 
 ## How to run things

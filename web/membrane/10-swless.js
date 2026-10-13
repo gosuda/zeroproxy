@@ -131,7 +131,7 @@
   // `__ZP_LOAD_EXTERNAL_SCRIPT` 가 자식 스크립트에 쓰는 것과 같은 수법이고,
   // 나가는 요청은 여전히 부모의 SW 한 곳만 지난다 — 출구는 하나로 유지된다.
   // (`img-src 'self' blob:` 이라 CSP 도 그대로 통과한다.)
-  const swLessDocs = new WeakMap();
+  const swLessDocs = newWeakMap();
   function documentIsSWLess(doc) {
     if (!doc || doc === document) return false;
     let cached = swLessDocs.get(doc);
@@ -157,7 +157,7 @@
     if (value) installSWLessObserver(doc);
     return value;
   }
-  const swLessBlobs = new Map();
+  const swLessBlobs = newMap();
   // kind='style' 은 CSS 리라이트가 **반드시** 걸려야 한다. 부모가 대신 받는
   // 이 fetch 는 destination 이 'empty' 라 SW 의 `req.destination === 'style'`
   // 판정을 못 탄다 — 그대로 두면 `url(../../res/x.png)` 가 상대경로로 남고,
@@ -201,10 +201,10 @@
   }
   // 한 요소가 src 와 srcset 을 동시에 갖는 게 정상이므로 요소 단위가 아니라
   // (요소, 속성) 단위로 기억한다.
-  const swLessUpgraded = new WeakMap();
+  const swLessUpgraded = newWeakMap();
   function markSWLessUpgraded(el, key) {
     let keys = swLessUpgraded.get(el);
-    if (!keys) { keys = new Set(); swLessUpgraded.set(el, keys); }
+    if (!keys) { keys = newSet(); swLessUpgraded.set(el, keys); }
     if (keys.has(key)) return false;
     keys.add(key);
     return true;

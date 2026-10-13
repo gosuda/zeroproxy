@@ -25,7 +25,11 @@ function slice(start, end) {
 
 function load(code, exports, deps) {
   // The membrane reads a window's own accessors through the getters captured at boot; a fake window is a plain object.
-  deps = Object.assign({ winGet: (w, n) => w[n], winSet: (w, n, v) => { w[n] = v; } }, deps);
+  // plus the membrane's table factories (here plain built-ins: the harness has no page to patch them)
+  deps = Object.assign({
+    winGet: (w, n) => w[n], winSet: (w, n, v) => { w[n] = v; },
+    newMap: e => new Map(e), newSet: e => new Set(e), newWeakMap: () => new WeakMap(), newWeakSet: () => new WeakSet(),
+  }, deps);
   const names = Object.keys(deps);
   // eslint-disable-next-line no-new-func
   const factory = new Function(...names, `${code}\nreturn { ${exports.join(', ')} };`);
@@ -243,7 +247,7 @@ const SCHEME_BLOCK = slice(
 );
 
 const NAV_BLOCK = slice(
-  '  const NAV_EXTERNAL_SCHEMES = new Set(',
+  '  const NAV_EXTERNAL_SCHEMES = newSet(',
   '  function setVirtualLocation'
 );
 

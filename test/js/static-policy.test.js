@@ -3,6 +3,13 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const { preludeSource } = require('./_prelude.cjs');
 
+// The membrane's tables are built by closure factories of the prelude (newMap …). Tests that cut a function out of the
+// prelude and run it with `new Function` run it in global scope, where plain built-ins stand in for them: no page here
+// patches the prototypes.
+Object.assign(globalThis, {
+  newMap: e => new Map(e), newSet: e => new Set(e), newWeakMap: () => new WeakMap(), newWeakSet: () => new WeakSet(),
+});
+
 const { classifyTape } = require('../browser/hole-matrix/classify.cjs');
 const CASE_ID = url => { const m = /\/img\/([a-z0-9-]+)__(same|cross)\./.exec(url); return m && m[1]; };
 const DIRECT = 'http://127.0.0.1:18098/img/x1-case__cross.png';
@@ -1045,7 +1052,7 @@ test('필터 컬렉션은 이름 기반 접근에서도 필터를 유지한다',
 
   // 진짜 DOM 은 `el.attributes === el.attributes` 다. 접근마다 새 프록시를
   // 만들면 그 자체가 후킹을 드러낸다(메서드 동일성과 같은 이유).
-  const nnmStart = rt.indexOf('  const namedNodeMapCache = new WeakMap();');
+  const nnmStart = rt.indexOf('  const namedNodeMapCache = newWeakMap();');
   assert.ok(nnmStart > 0, 'attributes 캐시가 없다');
   const nnmEnd = rt.indexOf('\n  function ', rt.indexOf('  function filteredNamedNodeMap(', nnmStart) + 1);
   const wrap = new Function('isZPAttrName',
@@ -2022,5 +2029,65 @@ test('the runtime helper list is the same in the rewriter, the page prelude and 
     for (const m of text.matchAll(/'with\((__zp_[a-z_]+)\)\{(?:\\n)?'( \+ ([A-Z_]+))?/g)) {
       assert.equal(m[3], 'ZP_WITH_PROLOGUE', where + ': with(' + m[1] + ') does not start with the helper bindings');
     }
+  }
+});
+
+// The membrane's tables are sealed (newMap / newSet / newWeakMap / newWeakSet): a page that wraps `Map.prototype.get`
+// must not watch what the membrane keeps there, and its wrapper must not loop the free-name lookup (e2e `a page that wraps
+// Map, Set, WeakMap and WeakSet methods…`). A bare `new Map()` added later would quietly undo that for its table.
+test('every table of the membrane, the worker prelude and the shared core is built by a sealing factory', () => {
+  const files = [
+    ...require('node:fs').readdirSync('web/membrane').filter(f => f.endsWith('.js')).map(f => 'web/membrane/' + f),
+    'web/worker-prelude.js', 'web/zp-core.js',
+  ];
+  const offenders = [];
+  for (const f of files) {
+    const lines = fs.readFileSync(f, 'utf8').split('\n');
+    lines.forEach((line, i) => {
+      const code = line.replace(/\/\/.*$/, '');
+      if (!/\bnew (Map|Set|WeakMap|WeakSet)\(/.test(code)) return;
+      // the factories themselves: `const newMap = entries => { const m = sealedSetProto(new Map(), SEALED_MAP);`
+      if (/sealedSetProto\(new (Map|Set|WeakMap|WeakSet)\(\), SEALED_/.test(code)) return;
+      offenders.push(f + ':' + (i + 1) + ': ' + line.trim().slice(0, 90));
+    });
+  }
+  assert.deepEqual(offenders, [], 'a table built with the page-patchable built-in:\n  ' + offenders.join('\n  '));
+});
+
+test('the sealed tables are what they claim: methods that survive a patched built-in prototype', () => {
+  const src = require('node:fs').readFileSync('web/membrane/00-head.js', 'utf8').replace(/\r\n/g, '\n');
+  const a = src.indexOf('  const sealProtoOf = ');
+  const b = src.indexOf('const newWeakSet = ');
+  const end = src.indexOf('\n', b);
+  assert.ok(a > 0 && b > a, 'the factories moved');
+  const { newMap, newSet, newWeakMap, newWeakSet } = new Function(src.slice(a, end) + '\nreturn { newMap, newSet, newWeakMap, newWeakSet };')();
+  const seen = [];
+  const saved = [];
+  for (const [proto, names] of [[Map.prototype, ['get', 'set', 'has', 'delete']], [Set.prototype, ['add', 'has', 'delete']], [WeakMap.prototype, ['get', 'set', 'has', 'delete']], [WeakSet.prototype, ['add', 'has', 'delete']]]) {
+    for (const n of names) {
+      const orig = proto[n];
+      saved.push([proto, n, orig]);
+      proto[n] = function (...args) { seen.push(n); return orig.apply(this, args); };
+    }
+  }
+  try {
+    const key = {};
+    const m = newMap([['a', 1]]); m.set(key, 2);
+    const s = newSet(['x']); s.add(key);
+    const wm = newWeakMap(); wm.set(key, 3);
+    const ws = newWeakSet(); ws.add(key);
+    assert.equal(m.get('a'), 1); assert.equal(m.get(key), 2); assert.equal(m.has(key), true); assert.equal(m.size, 2);
+    assert.equal(s.has('x'), true); assert.equal(s.has(key), true); assert.equal(s.size, 2);
+    assert.equal(wm.get(key), 3); assert.equal(wm.has(key), true);
+    assert.equal(ws.has(key), true);
+    m.delete(key); s.delete(key); wm.delete(key); ws.delete(key);
+    assert.equal(m.has(key), false); assert.equal(ws.has(key), false);
+    assert.deepEqual([...m], [['a', 1]], 'iteration');
+    assert.deepEqual(seen, [], 'a patched built-in saw the membrane\'s tables: ' + seen.join(','));
+    // and the control: a plain Map does reach the patched method
+    new Map().set(1, 2);
+    assert.ok(seen.length > 0, 'the patch does not take, so this test proves nothing');
+  } finally {
+    for (const [proto, n, orig] of saved) proto[n] = orig;
   }
 });

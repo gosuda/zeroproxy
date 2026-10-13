@@ -13,7 +13,7 @@
   //    새로 깨진다(6건 → 9건). 나머지 축(진짜 유출 0)은 유지.
   // 즉 TDZ 가 **이중 계측 버그를 가려 주고 있다**. 순서를 고치려면 계측
   // 멱등성부터 고쳐야 한다 — 그건 별건이다.
-  const observedDocuments = new WeakSet();
+  const observedDocuments = newWeakSet();
   function installBaseObserver(doc) {
     doc = doc || document;
     try { if (observedDocuments.has(doc)) return; } catch { return; }
@@ -42,7 +42,7 @@
         // non-HTTP (saves the 1300 ns new URL throw cost). For HTTP URLs
         // the ~120 ns is overhead but dwarfed by the main loop's parse.
         // Keep this cache scoped to one mutation batch; DOM bases may change later.
-        tickURLCache = new Map();
+        tickURLCache = newMap();
         try {
           if (rt) {
             const HTTP = rt.UrlClass.HTTP, WS = rt.UrlClass.WS;

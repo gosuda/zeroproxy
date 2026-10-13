@@ -6,6 +6,7 @@
 
 | Date | Category | Summary | Detail |
 |---|---|---|---|
+| 2026-10-13 | membrane / 탈출 | 표를 맨 new Map() 으로 만들면 페이지가 Map.prototype 을 감싸 키·값을 보고, 전역을 읽는 감싼 함수는 재귀로 죽인다. 팩토리로 봉인. | rewriter.md#봉인된-표 |
 | 2026-10-13 | rewriter / eval | strict direct eval 은 with 를 품을 수 없다 → with 블록 안의 strict 화살표 + 블록 const eval. env.has 는 있는 이름만. | rewriter.md#strict-eval-with-안 |
 | 2026-10-13 | membrane / 탈출 | 창의 frameElement·parent… 는 페이지가 재정의하는 자기 속성. 멤브레인은 winGet(부팅 게터)으로만 읽는다. | rewriter.md#창-자기-접근자 |
 | 2026-10-13 | rewriter / 탈출 | 진짜 전역을 넘기는 헬퍼 이름을 페이지가 대답: 지역 바인딩·window 쓰기·with 객체. 거부·쓰기 차단·블록 바인딩. | rewriter.md#헬퍼-이름-응답 |

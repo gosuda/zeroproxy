@@ -259,8 +259,8 @@
   // 로 두면 TDZ ReferenceError 가 나고 그게 멤브레인 설치를 통째로 중단시킨다
   // (오늘 이 파일에서만 두 번 밟았다).
   var styleHookState = 'not-run';
-  const styleDeclProxies = new WeakMap();
-  const styleDeclMethods = new WeakMap();
+  const styleDeclProxies = newWeakMap();
+  const styleDeclMethods = newWeakMap();
   function containStyleDeclaration(decl) {
     if (!decl || typeof decl !== 'object') return decl;
     const cached = styleDeclProxies.get(decl);
@@ -281,7 +281,7 @@
           // 매번 새 함수를 주면 `a.style.setProperty === a.style.setProperty`
           // 가 false 가 되어 라이브러리의 기능 탐지가 깨진다.
           let per = styleDeclMethods.get(t);
-          if (!per) { per = new Map(); styleDeclMethods.set(t, per); }
+          if (!per) { per = newMap(); styleDeclMethods.set(t, per); }
           let bound = per.get(k);
           if (!bound) {
             bound = k === 'setProperty'
@@ -774,7 +774,7 @@
   // HTML 파서는 `<image>` 를 `img` 로 만들고, HTML `<script href>` /
   // `<use href>` 같은 속성은 존재하지 않는다. 반대로 네임스페이스를 보려면
   // 판정마다 그 필드를 읽어야 하는데 이 함수는 속성 쓰기마다 불린다.
-  const URL_SURFACES = new Set(__ZP_URL_SURFACES__);
+  const URL_SURFACES = newSet(__ZP_URL_SURFACES__);
   function isURLBearing(el, key, _localKey, _tag) {
     const tag = _tag != null ? _tag : (el && el.localName);
     if (!tag) return false;
@@ -857,7 +857,7 @@
   }
   function rememberSrcset(el, key, raw) {
     let m = srcsetMeta.get(el);
-    if (!m) { m = new Map(); srcsetMeta.set(el, m); }
+    if (!m) { m = newMap(); srcsetMeta.set(el, m); }
     m.set(String(key).toLowerCase(), String(raw));
   }
   function recalledSrcset(el, key) {
@@ -1059,7 +1059,7 @@
     // `href="http://t/x"` through getAttribute, outerHTML, getHTML and
     // XMLSerializer (compat differential, Chrome 152 keeps "/x"). Snapshot
     // first; after the walk, stash only what it actually changed.
-    const literals = new Map();
+    const literals = newMap();
     if (Native.getAttributeNames) {
       for (const node of nodes) {
         let m = null;
@@ -1067,7 +1067,7 @@
           if (isZPAttrName(name)) continue;
           const lk = attrLocalName(name);
           if (lk === 'style' || lk === 'srcset' || lk === 'imagesrcset' || isURLBearing(node, name, lk, node.localName)) {
-            (m || (m = new Map())).set(name, Native.getAttribute.call(node, name));
+            (m || (m = newMap())).set(name, Native.getAttribute.call(node, name));
           }
         }
         if (m) literals.set(node, m);

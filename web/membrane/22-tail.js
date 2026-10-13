@@ -4,7 +4,7 @@
   // the user from site to site. (This used to paint a random pixel INTO the page's canvas on every toDataURL and nudge a
   // sample by a random amount on every getChannelData: two reads of one drawing differed and the page's canvas changed
   // under it. No browser does either, and reading twice is the first thing a bot check does.)
-  const farbleSeeds = new Map();
+  const farbleSeeds = newMap();
   function farbleSeed() {
     const origin = securityOrigin();
     let h = farbleSeeds.get(origin);
@@ -67,7 +67,7 @@
     const nativeAttributes = ctxProto.getContextAttributes;
     // The 2d context of each canvas, noted as it is handed out — asking the canvas for one would make one where there was
     // none (and a later getContext('webgl') would then fail).
-    const contexts = new WeakMap();
+    const contexts = newWeakMap();
     replaceNativeMethod(canvasProto, 'getContext', orig => ({ getContext(...args) {
       const ctx = Reflect.apply(orig, this, args);
       if (ctx instanceof Ctx2D) contexts.set(this, ctx);
@@ -111,7 +111,7 @@
     audioHookedWindows.add(w);
     // A channel is farbled once, the first time it is handed out: getChannelData returns the same array every time, so
     // every later read — and copyFromChannel — sees the same samples.
-    const farbled = new WeakSet();
+    const farbled = newWeakSet();
     replaceNativeMethod(w.AudioBuffer.prototype, 'getChannelData', orig => ({ getChannelData(...args) {
       const f32 = Reflect.apply(orig, this, args);
       if (f32 && !farbled.has(f32)) {
