@@ -516,7 +516,8 @@ test('불투명 오리진 프레임에서도 proxyOrigin 이 "null" 이 되지 �
   const start = rt.indexOf('function resolveProxyOrigin(');
   assert.ok(start > 0, 'resolveProxyOrigin 이 없다');
   const end = rt.indexOf('\n  const toStringMap', start);
-  const fn = new Function(rt.slice(start, end) + '; return resolveProxyOrigin;')();
+  // the window getters captured at boot (`winGet`) read a fake window's plain properties here
+  const fn = new Function('winGet', rt.slice(start, end) + '; return resolveProxyOrigin;')((w, n) => w[n]);
 
   const opaque = new URL('about:srcdoc');
   const real = new URL('http://proxy.localhost:18080/zp/p/tok');

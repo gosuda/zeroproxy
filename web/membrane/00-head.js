@@ -2,6 +2,25 @@
   'use strict';
   const root = window;
   const nativeOwnKeys = Reflect.ownKeys;
+  // A window's own accessors as the browser installed them, read before any page script. `parent`, `frameElement`,
+  // `opener`, `length`… are configurable own properties of every window: a plain `w.frameElement` in the membrane runs
+  // whatever getter a page put there — with the real window as `this` (a native `Object.prototype.valueOf` as the getter
+  // handed it back to the page) and with the page's answer (a sandboxed frame calling itself unsandboxed). The membrane
+  // reads windows only through these; they check the receiver's brand, not its realm, so they read any window.
+  const nativeApply = Reflect.apply;
+  const WINDOW_ACCESSORS = Object.create(null);
+  for (const name of ['parent', 'top', 'opener', 'frameElement', 'self', 'frames', 'name', 'length', 'closed', 'history', 'navigation']) {
+    const d = Reflect.getOwnPropertyDescriptor(root, name);
+    if (d && (d.get || d.set)) WINDOW_ACCESSORS[name] = d;
+  }
+  function winGet(w, name) {
+    const d = WINDOW_ACCESSORS[name];
+    return d && d.get ? nativeApply(d.get, w, []) : w[name];
+  }
+  function winSet(w, name, value) {
+    const d = WINDOW_ACCESSORS[name];
+    if (d && d.set) nativeApply(d.set, w, [value]); else w[name] = value;
+  }
   // Description-less Symbol so getOwnPropertySymbols(window) leaks no
   // "zeroproxy.*" tells. `Symbol.for` re-keys cross-realm, but each
   // realm gets its own prelude run anyway, so dropping the registry
@@ -255,8 +274,8 @@
     // 돌려준다. 그래서 앞의 두 경로가 전부 실패했을 때만 쓴다.
     try {
       let f = w;
-      for (let i = 0; i < 32 && f && f.parent && f.parent !== f; i++) {
-        f = f.parent;
+      for (let i = 0; i < 32 && f && winGet(f, 'parent') && winGet(f, 'parent') !== f; i++) {
+        f = winGet(f, 'parent');
         const o = f.location && f.location.origin;
         if (o && o !== 'null') return String(o);
       }
@@ -407,9 +426,9 @@
     // A popup of an opaque document: the worker, which opened its route, says so.
     try { if (boot.opaque === true) return true; } catch {}
     try {
-      const fe = root.frameElement;
+      const fe = winGet(root, 'frameElement');
       if (!fe) return false;
-      const ask = root.parent.__zp_frame_opaque;
+      const ask = winGet(root, 'parent').__zp_frame_opaque;
       return typeof ask === 'function' && ask(fe) === true;
     } catch { return false; }
   })();
@@ -428,7 +447,7 @@
     try {
       let w = root;
       for (let depth = 0; depth < 32; depth++) {
-        const p = w.parent;
+        const p = winGet(w, 'parent');
         if (!p || p === w) break;
         let o = '';
         try { o = typeof p.__zp_origin === 'function' ? p.__zp_origin() : ''; } catch {}
@@ -445,7 +464,7 @@
   function virtualReferrer() {
     if (typeof boot.referrer === 'string') return boot.referrer;
     try {
-      const p = root.parent;
+      const p = winGet(root, 'parent');
       if (!p || p === root) return '';
       const parentURL = typeof p.__zp_url === 'function' ? p.__zp_url() : '';
       if (!parentURL) return '';

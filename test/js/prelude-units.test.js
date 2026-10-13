@@ -24,6 +24,8 @@ function slice(start, end) {
 }
 
 function load(code, exports, deps) {
+  // The membrane reads a window's own accessors through the getters captured at boot; a fake window is a plain object.
+  deps = Object.assign({ winGet: (w, n) => w[n], winSet: (w, n, v) => { w[n] = v; } }, deps);
   const names = Object.keys(deps);
   // eslint-disable-next-line no-new-func
   const factory = new Function(...names, `${code}\nreturn { ${exports.join(', ')} };`);

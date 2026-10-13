@@ -37,7 +37,7 @@
   function replaceVisibleProxyURL() {
     const next = proxyHistoryURL();
     if (visibleProxyURL() !== next) {
-      try { Native.historyReplace(root.history.state, '', proxyAbsoluteURL(next)); } catch {}
+      try { Native.historyReplace(winGet(root, 'history').state, '', proxyAbsoluteURL(next)); } catch {}
     }
   }
   function refreshVisibleShareRoute(entryId, target, base) {

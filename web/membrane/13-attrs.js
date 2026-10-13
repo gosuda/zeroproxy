@@ -155,8 +155,8 @@
     let flags = null;
     try {
       let w = root;
-      for (let i = 0; i < 32 && w !== w.parent; i++) {
-        const fe = w.frameElement;
+      for (let i = 0; i < 32 && w !== winGet(w, 'parent'); i++) {
+        const fe = winGet(w, 'frameElement');
         if (!fe) break;
         let text = Native.getAttribute.call(fe, litAttrName('sandbox'));
         if (text === null) text = Native.getAttribute.call(fe, 'sandbox');
@@ -164,7 +164,7 @@
           const mine = new Set(String(text).toLowerCase().split(/\s+/).filter(Boolean));
           flags = flags === null ? mine : new Set([...flags].filter(f => mine.has(f)));
         }
-        w = w.parent;
+        w = winGet(w, 'parent');
       }
     } catch {}
     sandboxFlagsCache = flags;

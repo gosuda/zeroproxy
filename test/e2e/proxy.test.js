@@ -2564,6 +2564,23 @@ function createTargetServer(requests, pendingResponses) {
       </script></body>`);
       return;
     }
+    if (url.pathname === '/xwinown') {
+      // A getter the page puts on its own window, as a native function: `Object.prototype.valueOf` returns its receiver.
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(`<!doctype html><title>own window</title><script>
+        var out = {};
+        var isOtherWindow = function (v) { return v !== window && Object.prototype.toString.call(v) === '[object Window]'; };
+        Object.defineProperty(window, 'frameElement', { get: Object.prototype.valueOf, configurable: true });
+        out.frameElement = isOtherWindow(window.frameElement) ? 'another window' : 'ok';
+        out.bareFrameElement = isOtherWindow(frameElement) ? 'another window' : 'ok';
+        Object.defineProperty(window, 'parent', { get: Object.prototype.valueOf, configurable: true });
+        out.parent = isOtherWindow(window.parent) ? 'another window' : 'ok';
+        Object.defineProperty(window, 'opener', { get: Object.prototype.valueOf, configurable: true });
+        out.opener = isOtherWindow(window.opener) ? 'another window' : 'ok';
+        window.__xwinown = out;
+      </script>`);
+      return;
+    }
     if (url.pathname === '/xempty.js') {
       res.writeHead(200, { 'Content-Type': 'text/javascript', 'Cache-Control': 'no-store' });
       res.end('');
@@ -3510,6 +3527,12 @@ function createTargetServer(requests, pendingResponses) {
       // page for every way of making the frame; ?egress=1 also tries the network.
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(`<!doctype html><title>sandbox child</title><body><script>
+        // ?tamper=1: the frame first redefines its own window's \`frameElement\` — natively that changes nothing of the
+        // sandbox. The membrane walked \`frameElement\` to find its sandbox flags and read the page's answer: no embedder,
+        // no sandbox, and the top window navigated.
+        if (location.search.indexOf('tamper=1') >= 0) {
+          Object.defineProperty(window, 'frameElement', { get: function () { return null; }, configurable: true });
+        }
         var R = {}, jobs = [];
         var show = function (v) { return v === null ? 'null' : v === undefined ? 'undefined' : (typeof v === 'object' || typeof v === 'function') ? typeof v : String(v).slice(0, 60); };
         var op = function (k, fn, into) {
@@ -3676,8 +3699,8 @@ function createTargetServer(requests, pendingResponses) {
           out['sibling.first'] = reportOf(s1);
           out['sibling.second'] = reportOf(s2);
           // Navigating the top window or the embedder is the sandbox's to refuse.
-          var run = async function (flags) {
-            var nf = document.createElement('iframe'); nf.setAttribute('sandbox', flags); nf.src = CHILD; document.body.appendChild(nf);
+          var run = async function (flags, query) {
+            var nf = document.createElement('iframe'); nf.setAttribute('sandbox', flags); nf.src = CHILD + (query || ''); document.body.appendChild(nf);
             await wait(nf, 15000);
             var navGot = null;
             var onNav = function (e) { if (typeof e.data === 'string' && e.data.indexOf('sbnav:') === 0 && e.source === nf.contentWindow) navGot = e.data.slice(6); };
@@ -3689,6 +3712,7 @@ function createTargetServer(requests, pendingResponses) {
           };
           out['nav.scripts'] = await run('allow-scripts');
           out['nav.userActivation'] = await run('allow-scripts allow-top-navigation-by-user-activation');
+          out['nav.tampered'] = await run('allow-scripts', '?tamper=1');
           out['nav.pathAfter'] = location.pathname;
           window.__xsandbox = out;
         })().catch(function (e) { window.__xsandbox = { __fatal: String(e && (e.stack || e)) }; });
@@ -7815,6 +7839,35 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     for (const k of ['withRead', 'click', 'message', 'after']) assert.deepEqual(proxied[k], direct[k], k);
   });
 
+  // `frameElement`, `parent`, `opener` are configurable own properties of a window, and the page's definition lands on the
+  // real one. The membrane read them there to answer for the page (and to find its embedder, its sandbox): a native
+  // function as the getter — `Object.prototype.valueOf` returns its receiver — handed the page the real window. It reads
+  // them through the getters the browser installed, captured before any page script.
+  await t.test('a getter the page puts on its own window never hands it the real window (escape)', async () => {
+    const targetBase = `http://${targetHost}:${targetPort}`;
+    const collect = async p => {
+      try {
+        await p.waitForFunction(() => window.__xwinown, { timeout: 30000, polling: 100 });
+        return await p.evaluate(() => window.__xwinown);
+      } finally {
+        await p.close();
+      }
+    };
+    const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    let direct;
+    try {
+      const p = await directBrowser.newPage();
+      await p.goto(`${targetBase}/xwinown`, { waitUntil: 'domcontentloaded' });
+      direct = await collect(p);
+    } finally {
+      await directBrowser.close();
+    }
+    const proxied = await collect(await openProxiedPage(`${targetBase}/xwinown`));
+    const ok = { frameElement: 'ok', bareFrameElement: 'ok', parent: 'ok', opener: 'ok' };
+    assert.deepEqual(direct, ok);
+    assert.deepEqual(proxied, ok, 'the page was handed a window that is not its own');
+  });
+
   // An empty script body rewrites to an empty script; the SW read that as a failed rewrite and served its policy stub,
   // which throws (NYT: two uncaught NotSupportedErrors from an ad partner's empty user-sync script).
   await t.test('an empty external script runs as nothing (matches native)', async () => {
@@ -8195,6 +8248,7 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     assert.equal(direct['attr.sandbox'], 'allow-scripts|allow-scripts|1|false|true', 'the page\'s own sandbox value');
     assert.equal(direct['attr.contentWindow.document'], 'threw:SecurityError');
     assert.match(direct['nav.scripts'], /top\.location\.href==threw:SecurityError/);
+    assert.match(direct['nav.tampered'], /top\.location\.href==threw:SecurityError/);
     assert.equal(direct['nav.pathAfter'], '/xsandbox', 'the sandbox refused to navigate the top window');
     // Every route a script has, tried from inside the sandbox, reached the upstream the way the page's own
     // requests do — by the proxy, as the target's user agent — and nothing went anywhere else (the

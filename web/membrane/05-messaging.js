@@ -198,10 +198,10 @@
   function postMessageTargetRole(target) {
     try {
       if (target === root) return 'self';
-      if (target === root.parent) return 'parent';
-      if (target === root.top) return 'top';
-      if (target === root.opener) return 'opener';
-      for (let i = 0; i < root.length; i++) if (root[i] === target) return 'child' + i;
+      if (target === winGet(root, 'parent')) return 'parent';
+      if (target === winGet(root, 'top')) return 'top';
+      if (target === winGet(root, 'opener')) return 'opener';
+      for (let i = 0, n = winGet(root, 'length'); i < n; i++) if (root[i] === target) return 'child' + i;
     } catch {}
     return 'other';
   }

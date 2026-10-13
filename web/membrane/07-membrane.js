@@ -551,8 +551,8 @@
       let text;
       try {
         if (win === root) return null;
-        for (let w = win, i = 0; i < 32 && w && w !== w.parent; i++) { w = w.parent; if (w === root) return null; }
-        const isTop = win === root.top;
+        for (let w = win, i = 0; i < 32 && w && w !== winGet(w, 'parent'); i++) { w = winGet(w, 'parent'); if (w === root) return null; }
+        const isTop = win === winGet(root, 'top');
         if (isTop && (flags.has('allow-top-navigation')
             || (flags.has('allow-top-navigation-by-user-activation') && root.navigator.userActivation && root.navigator.userActivation.isActive))) return null;
         text = isTop
@@ -661,7 +661,7 @@
       }
       let cached = navFacadeCache.get(win);
       if (cached !== undefined) return cached;
-      const native = win.navigation;
+      const native = winGet(win, 'navigation');
       if (!native) { navFacadeCache.set(win, null); return null; }
       const NavProtoBase = (win.Navigation && win.Navigation.prototype) || null;
       const NavEntryProtoBase = (win.NavigationHistoryEntry && win.NavigationHistoryEntry.prototype) || null;
@@ -956,7 +956,7 @@
       // Contained by us (a blank, srcdoc or document.write'd page): it inherits ours.
       try { if (win.__zp_get === get) return securityOrigin(); } catch {}
       // No membrane of its own and not ours: a frame that is opaque is, whatever it shows.
-      try { const fe = win.frameElement; if (fe && Native.hasAttribute.call(fe, OPAQUE_FRAME_ATTR)) return OPAQUE_PENDING_ORIGIN; } catch {}
+      try { const fe = winGet(win, 'frameElement'); if (fe && Native.hasAttribute.call(fe, OPAQUE_FRAME_ATTR)) return OPAQUE_PENDING_ORIGIN; } catch {}
       // ...else the route we opened it with, if any.
       try { const routed = frameRouteTarget(win.location.pathname); if (routed) return new URL(routed).origin; } catch {}
       return '';
@@ -978,12 +978,12 @@
       try {
         let w = root;
         for (let i = 0; i < 32; i++) {
-          const p = w.parent;
+          const p = winGet(w, 'parent');
           if (!p || p === w) break;
           if (p === win) return true;
           w = p;
         }
-        const o = root.opener;
+        const o = winGet(root, 'opener');
         if (o && o === win) return true;
       } catch {}
       return false;
@@ -1028,15 +1028,15 @@
     function crossOriginWindow(win) {
       let facade = crossOriginFacades.get(win);
       if (facade) return facade;
-      const childCount = () => { try { return win.length >>> 0; } catch { return 0; } };
+      const childCount = () => { try { return winGet(win, 'length') >>> 0; } catch { return 0; } };
       const isIndex = p => typeof p === 'string' && /^(?:0|[1-9]\d*)$/.test(p) && Number(p) < childCount();
       const read = name => {
         switch (name) {
           case 'window': case 'self': case 'frames': return facade;
           case 'location': return crossWindowLocation(win);
-          case 'closed': return win.closed;
-          case 'length': return win.length;
-          case 'top': case 'parent': case 'opener': { const h = win[name]; return h ? windowHandleFor(h, 'ancestor') : h; }
+          case 'closed': return winGet(win, 'closed');
+          case 'length': return winGet(win, 'length');
+          case 'top': case 'parent': case 'opener': { const h = winGet(win, name); return h ? windowHandleFor(h, 'ancestor') : h; }
           case 'postMessage': return postMessageWrapperFor(win);
           default: return crossOriginMethod(win, name);
         }
@@ -1108,10 +1108,10 @@
     // as a bare `frameElement` (through `scopeGet`).
     function virtualFrameElement(w) {
       let el = null;
-      try { el = w.frameElement; } catch {}
+      try { el = winGet(w, 'frameElement'); } catch {}
       if (!el) return el;
       try {
-        const up = w.parent;
+        const up = winGet(w, 'parent');
         if (up && up !== w) {
           const mine = virtualOriginOfWindow(w);
           const theirs = virtualOriginOfWindow(up);
@@ -1123,7 +1123,7 @@
     function virtualWindowProperty(target, prop) {
       if (prop === 'top' || prop === 'parent' || prop === 'opener') {
         try {
-          const child = target[prop];
+          const child = winGet(target, prop);
           if (prop === 'opener' && !isWindowLike(child)) return child;
           if (child && child !== target) return windowHandleFor(child, 'ancestor');
         } catch {}

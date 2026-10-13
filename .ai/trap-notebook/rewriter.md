@@ -1782,6 +1782,23 @@ rendercheck naver/wikipedia/github 3/3 OK, `npm run test:e2e` 117/117
 - **고침(ERRATA 89):** 소스 기준 캐시(종류·URL 확인), 코드 앞뒤 공백은 리라이트에서 빼고 결과 앞뒤에 그대로 붙인다(위치 불변, `trimStart` 는 복사 없음), 표현식 eval 은 리라이트된 소스당 한 번 컴파일. 1.4 → 0.4 초.
 - **규칙:** 챌린지는 **시간을 잰다** — 네이티브에서 거의 공짜인 연산(공백, 반복 eval)이 우리 쪽에서 비싸면 그것 자체가 신호다. 재는 연산 모양을 프로파일에서 찾아 상수 시간으로 만든다.
 
+## <a id="창-자기-접근자"></a>창의 자기 접근자는 페이지 것이다 (2026-10-13, ERRATA 91)
+
+**증상**: 페이지가 `Object.defineProperty(window, 'frameElement', { get: Object.prototype.valueOf })` 를 하면
+`window.frameElement` 가 진짜 window 를 돌려줬다. 샌드박스(`allow-same-origin` 없음) 프레임이 자기 `frameElement` 를
+null 로 바꾸면 멤브레인의 샌드박스 판정이 "샌드박스 아님" 이 되어 top 을 내비게이트했다.
+
+**원인**: `frameElement`/`parent`/`opener`/`length`/`name`/`history`/`navigation` 은 모든 창의 configurable **자기**
+속성이고, 파사드의 defineProperty 는 진짜 창에 쓴다. 멤브레인이 `w.frameElement` 같은 평범한 읽기로 그 값을 썼다 —
+페이지 게터가 진짜 창을 `this` 로 받아 돌고, 그 답을 멤브레인이 믿었다.
+
+**규칙**: 멤브레인 안에서 창의 이 속성들은 **`winGet(w, name)` / `winSet`** (00-head, 부팅 때 잡은 브라우저 게터)으로만
+읽는다. 새 코드에서 `w.parent`, `root.frameElement` 를 쓰지 말 것. 게터는 리시버의 브랜드만 보므로 다른 realm 의 창도
+읽는다. 단위 테스트 하네스는 가짜 창(평범한 객체)용 `winGet` 을 주입한다(prelude-units `load`).
+
+**검증**: e2e `a getter the page puts on its own window…`, `sandboxed frames are opaque…` 의 `nav.tampered` — 둘 다
+평범한 읽기로 되돌리면 빨개진다.
+
 ## <a id="부모-파사드로-부팅한-자식"></a>`about:blank` 창을 재사용한 자식은 부모의 `Function` 파사드를 "네이티브"로 잡는다 (2026-10-13)
 
 - **증상:** srcdoc 자식의 동적 스크립트가 로드되지 않음(e2e `scripts in a srcdoc frame run in order`의 `dyn2`). 예외: `SyntaxError: Unexpected identifier '__zp_env'`.

@@ -75,11 +75,11 @@
     if (lower === '_blank') return { open: '_blank' };
     if (lower === '_top' || lower === '_parent') {
       let w = null;
-      try { w = lower === '_top' ? root.top : root.parent; } catch {}
+      try { w = winGet(root, lower === '_top' ? 'top' : 'parent'); } catch {}
       return !w || w === root ? { self: true } : { win: w };
     }
     let own = null;
-    try { own = root.name; } catch {}
+    try { own = winGet(root, 'name'); } catch {}
     if (own === t) return { self: true };
     let hit = frameNamed(document, t, 0);
     if (!hit) {

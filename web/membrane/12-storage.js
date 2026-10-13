@@ -66,7 +66,7 @@
       // 새지 않는다. 대신 초기 가상값을 실명으로 시드하고 쓰기도 실명에
       // 반영해, 타깃이 `window.name` 을 바꾸면 명명 조회도 따라가게 한다.
       const isTopFrame = (() => { try { return w.top === w; } catch { return true; } })();
-      if (isTopFrame) { try { w.name = ''; } catch {} }
+      if (isTopFrame) { try { winSet(w, 'name', ''); } catch {} }
       else {
         // A frame's name belongs to ITS browsing context, not to its origin: the real
         // `name` already behaves as natively — it is the iframe's `name`, survives the
@@ -75,8 +75,8 @@
         // behind it a same-site frame read its parent's name (and, naming itself, wrote
         // over it).
         rootWindowNameStore = {
-          get() { try { return String(w.name || ''); } catch { return ''; } },
-          set(v) { try { w.name = String(v); } catch {} },
+          get() { try { return String(winGet(w, 'name') || ''); } catch { return ''; } },
+          set(v) { try { winSet(w, 'name', String(v)); } catch {} },
         };
       }
     }
@@ -657,7 +657,7 @@
     // origin, or delegates it with `allow`; allowlists name virtual origins.
     const crossOriginFrame = (() => {
       try {
-        const p = root.parent;
+        const p = winGet(root, 'parent');
         if (!p || p === root || opaqueDocument) return false;
         const o = typeof p.__zp_origin === 'function' ? p.__zp_origin() : '';
         return typeof o === 'string' && o !== '' && o !== securityOrigin();
@@ -720,8 +720,8 @@
         if (own.kind === 'document') {
           if (own.node !== w.document || !crossOriginFrame) return true;
           let parentDoc = null;
-          try { parentDoc = root.parent.document; } catch {}
-          return embedderGrants(parentDoc, root.frameElement, feature, ownOrigin());
+          try { parentDoc = winGet(root, 'parent').document; } catch {}
+          return embedderGrants(parentDoc, winGet(root, 'frameElement'), feature, ownOrigin());
         }
         // an iframe's container policy: computed for the origin of its (virtual) src
         let src = '';

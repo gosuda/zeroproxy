@@ -358,7 +358,7 @@
   // Opaque: the frame was sandboxed without allow-same-origin, or it is inside a document that is.
   function frameIsOpaque(frame) { return opaqueDocument || frameHasOpaqueMark(frame); }
   function windowIsOpaque(win) {
-    try { const fe = win.frameElement; if (fe) return frameIsOpaque(fe); } catch {}
+    try { const fe = winGet(win, 'frameElement'); if (fe) return frameIsOpaque(fe); } catch {}
     return opaqueDocument;
   }
 
