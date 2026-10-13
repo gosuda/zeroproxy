@@ -2564,6 +2564,45 @@ function createTargetServer(requests, pendingResponses) {
       </script></body>`);
       return;
     }
+    if (url.pathname === '/xdeval') {
+      // Direct eval of a function's own bindings, in the page and in a frame the page writes into (a document of its own
+      // without a prelude of its own), in sloppy and in strict code. The same cases run in both realms.
+      const cases = `
+        var out = {};
+        var t = function (k, fn) { try { var v = fn(); out[k] = v; } catch (e) { out[k] = 'threw:' + e.name; } };
+        t('read', function () { return (function (a) { var x = 10; let y = 20; return eval('a + x + y'); })(1); });
+        t('write', function () { return (function () { var n = 1; eval('n = n + 41'); return n; })(); });
+        t('declares', function () { return (function () { eval('var made = 7'); return typeof made; })(); });
+        t('closure', function () { return (function () { var c = 5; return eval('(function () { return c * 2; })')(); })(); });
+        t('args', function () { return (function () { return eval('arguments.length'); })(1, 2, 3); });
+        t('this', function () { return (function () { return eval('this') === window; })(); });
+        t('globalVar', function () { return (function () { return eval('typeof out'); })(); });
+        t('rebound', function () { return (function () { var eval = function (s) { return 'mine:' + s; }; return eval('a'); })(); });
+        t('deleteLocal', function () { return (function () { var d = 1; return [eval('delete d'), d]; })(); });
+        t('sameLetTwice', function () { return (function () { eval('let q = 1'); eval('let q = 2'); return 'ok'; })(); });
+        t('topLevelTwice', function () { eval('let z = 1; z'); return eval('let z = 2; z'); });
+        t('strictCaller', function () { return (function () { 'use strict'; var s = 3; return eval('var u = s * 2; u'); })(); });
+        t('strictSource', function () { return (function () { var s = 3; return eval('"use strict"; var u = s * 2; u'); })(); });
+        t('strictWrite', function () { return (function () { 'use strict'; var w = 1; eval('w = w + 1'); return w; })(); });
+        t('strictOwnVars', function () { return (function () { 'use strict'; eval('var leaked = 1'); return typeof leaked; })(); });
+        t('strictArgs', function () { return (function () { 'use strict'; return eval('arguments.length'); })(1, 2); });
+        t('strictRebound', function () { return (function () { 'use strict'; var f = function (s) { return 'f:' + s; }; var g = f; return g('x'); })(); });
+        t('strictThrows', function () { return (function () { 'use strict'; var m = 1; try { eval('undeclaredName = m'); } catch (e) { return e.name; } return 'no throw'; })(); });
+      `;
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(`<!doctype html><title>direct eval</title><body><script>
+        ${cases}
+        window.__xdeval = { page: out };
+        var f = document.createElement('iframe');
+        document.body.appendChild(f);
+        var d = f.contentWindow.document;
+        d.open();
+        d.write('<!doctype html><body><scr' + 'ipt>' + ${JSON.stringify(cases)}.split('<\\/').join('<\\/') + ' parent.postMessage({ childOut: out }, "*");<\/scr' + 'ipt>');
+        d.close();
+        addEventListener('message', function (e) { if (e.data && e.data.childOut) window.__xdeval.child = e.data.childOut; });
+      <\/script></body>`);
+      return;
+    }
     if (url.pathname === '/xwinown') {
       // A getter the page puts on its own window, as a native function: `Object.prototype.valueOf` returns its receiver.
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
@@ -7837,6 +7876,36 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     assert.deepEqual([direct.functionParam, direct.evalBinding], ['compiled', 'ran']);
     assert.deepEqual([proxied.functionParam, proxied.evalBinding], ['SyntaxError', 'SyntaxError'], 'dynamic code bound a runtime name');
     for (const k of ['withRead', 'click', 'message', 'after']) assert.deepEqual(proxied[k], direct[k], k);
+  });
+
+  // A direct `eval(x)` sees the bindings of the function it is called in. Inside the membrane that holds in the page's own
+  // realm for sloppy code and, since this test, for strict code; a frame the page writes into has a realm without a prelude
+  // of its own, where every direct eval used to run as global code and fail on the first local it read.
+  await t.test('direct eval sees its caller\'s bindings, sloppy and strict, in the page and in a written frame (matches native)', async () => {
+    const targetBase = `http://${targetHost}:${targetPort}`;
+    const collect = async p => {
+      try {
+        await p.waitForFunction(() => window.__xdeval && window.__xdeval.child, { timeout: 60000, polling: 100 });
+        return await p.evaluate(() => window.__xdeval);
+      } finally {
+        await p.close();
+      }
+    };
+    const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    let direct;
+    try {
+      const p = await directBrowser.newPage();
+      await p.goto(`${targetBase}/xdeval`, { waitUntil: 'domcontentloaded' });
+      direct = await collect(p);
+    } finally {
+      await directBrowser.close();
+    }
+    const proxied = await collect(await openProxiedPage(`${targetBase}/xdeval`));
+    fs.writeFileSync(path.join(artifacts, 'direct-eval.json'), JSON.stringify({ direct, proxied }, null, 2));
+    assert.equal(direct.page.read, 31, 'the reference: a direct eval reads the function\'s own bindings');
+    assert.equal(direct.page.strictCaller, 6);
+    assert.deepEqual(proxied.page, direct.page, 'the page realm');
+    assert.deepEqual(proxied.child, direct.child, 'the written frame\'s realm');
   });
 
   // `frameElement`, `parent`, `opener` are configurable own properties of a window, and the page's definition lands on the

@@ -1782,6 +1782,21 @@ rendercheck naver/wikipedia/github 3/3 OK, `npm run test:e2e` 117/117
 - **고침(ERRATA 89):** 소스 기준 캐시(종류·URL 확인), 코드 앞뒤 공백은 리라이트에서 빼고 결과 앞뒤에 그대로 붙인다(위치 불변, `trimStart` 는 복사 없음), 표현식 eval 은 리라이트된 소스당 한 번 컴파일. 1.4 → 0.4 초.
 - **규칙:** 챌린지는 **시간을 잰다** — 네이티브에서 거의 공짜인 연산(공백, 반복 eval)이 우리 쪽에서 비싸면 그것 자체가 신호다. 재는 연산 모양을 프로파일에서 찾아 상수 시간으로 만든다.
 
+## <a id="strict-eval-with-안"></a>strict 코드는 `with` 를 품을 수 없지만 `with` 안에 앉을 수는 있다 (2026-10-13, ERRATA 92)
+
+**증상**: strict 호출자(모듈·클래스·"use strict")의 `eval('s * 2')` 가 지역 `s` 에서 ReferenceError. 우리가 쓰는 런너는 호출자 지역을
+`with(env)` 로 보여 주는데 strict 소스 안에는 `with` 를 쓸 수 없어서, strict 경로는 지역을 아예 못 봤다.
+
+**원리**: 금지되는 것은 strict 코드 **안의** `with` 문이다. strict 함수가 `with` 블록 **안에** 놓이는 것은 합법이고, 그 안의
+direct eval 은 스코프 체인에서 with 객체를 본다. 런너 = sloppy 함수 `with(env){ const eval = <intrinsic>; …; return (()=>{"use strict"; return eval(src)})() }`.
+- `const eval` 이 블록 안에 있어야 한다 — env 가 모든 이름에 true 라 바깥 `eval` 파라미터는 with 객체에 가려진다. 블록 const 가 with 객체보다 가깝다.
+- 화살표여야 한다 — 일반 함수는 자기 `arguments` 가 호출자 것을 가린다.
+- env 의 `has` 는 strict 에서 **있는 이름에만** true: 전부 true 면 선언 안 된 이름 대입이 전역을 만든다(네이티브 strict 는 ReferenceError).
+- 런너 자신의 이름(`__zp_self`/`__zp_src`/`__zp_env`)은 `has` 가 false — with 안에서 읽히는 파라미터다.
+- **런너는 처음 쓸 때 만들고 던져도 되게 한다.** 원본 about:blank 창을 재사용한 자식의 `Function` 은 부모 파사드라 런너 본문을 리라이트한다 — 매개변수 이름이 예약 이름이면(처음엔 `__zp_ev`) 거부되어 prelude 설치가 던졌고, srcdoc 프레임 스크립트가 통째로 안 돌았다(e2e `scripts in a srcdoc frame run in order…`). 래퍼 매개변수는 면제 이름(`self`·`env`·`src`·`scope`·`args`)만 쓴다. 만들 수 없는 realm 은 예전 경로로 돌아간다.
+
+**검증**: e2e `direct eval sees its caller's bindings…` 의 strict 6 케이스(`strictThrows` 가 처음 버전을 잡았다).
+
 ## <a id="창-자기-접근자"></a>창의 자기 접근자는 페이지 것이다 (2026-10-13, ERRATA 91)
 
 **증상**: 페이지가 `Object.defineProperty(window, 'frameElement', { get: Object.prototype.valueOf })` 를 하면

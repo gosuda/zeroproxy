@@ -110,7 +110,8 @@
       // 첫 줄에서 ReferenceError 로 죽었다(2026-09-29, 헬퍼 커버리지 가드).
       // 부모 레지스트리를 공유하면 안 된다 — 자식의 `let x` 가 부모 것과 충돌하고
       // 부모 전역 조회에 새어 들어간다. 자식 전용 Map 과 스코프를 깐다.
-      const childLex = new Map();
+      const childLexShared = new Map();
+      let childLex = childLexShared;
       const childLexEntry = prop => (typeof prop === 'string' ? childLex.get(prop) : undefined);
       const childLexRead = (e, prop) => {
         if (!e.get) throw new ReferenceError(`Cannot access '${prop}' before initialization`);
@@ -177,14 +178,79 @@
       maskNativeFunction(childDynamicEval, 'eval');
       maskNativeFunction(childFunctionFacade, 'Function');
       if (!define(w, 'eval', childDynamicEval) || !define(w, 'Function', childFunctionFacade)) throw normalizedError('SecurityError');
-      // A direct `eval(x)` is rewritten to `__zp_eval.call(this, <eval>, [x], …)`. It was never defined here, so every
-      // direct eval in this realm threw ReferenceError. It runs as this realm's global code — the caller's locals are not
-      // in view (ERRATA residual); a rebound `eval` is called like any function, as natively.
-      const childDirectEval = function (callee, args) {
+      // A direct `eval(x)` is rewritten to `__zp_eval.call(this, <eval>, [x], <caller's bindings>, <strict>, <global site>)`.
+      // It runs as the parent realm's does (zpDirectEval): a helper made by THIS realm's Function constructor, with a
+      // parameter named `eval` that holds the intrinsic, so `eval(src)` inside it is a direct eval — and `src` is wrapped
+      // in `with(env)`, where `env` answers the caller's locals (accessors the call site built) and then the lexical
+      // bindings the realm's scripts share. At the top level of a script it is the realm's global code, as before.
+      // Strict code cannot hold a `with`, but it can sit inside one: the strict runner puts a strict arrow function in a
+      // `with` block, so a strict eval finds the caller's locals in its scope chain too (an arrow has no `arguments` of its
+      // own, so the caller's reach the code through the object as well).
+      // Made on first use: in a frame that reuses its initial window this realm's `Function` at install time is the
+      // parent's facade, which rewrites what it compiles and may refuse — such a realm keeps running a direct eval as
+      // global code, as before.
+      let childRunSloppy;
+      let childRunStrict;
+      const childRunners = () => {
+        if (childRunSloppy === undefined) {
+          try {
+            childRunSloppy = new childFunction('eval', '__zp_env', '__zp_src', 'return eval(__zp_src)');
+            childRunStrict = new childFunction('__zp_self', '__zp_env', '__zp_src',
+              'with(__zp_env){const eval=__zp_self;' + ZP_WITH_PROLOGUE + 'return (()=>{"use strict";return eval(__zp_src)})()}');
+          } catch { childRunSloppy = null; childRunStrict = null; }
+        }
+        return childRunSloppy ? { sloppy: childRunSloppy, strict: childRunStrict } : null;
+      };
+      // What the eval's `with` answers: the caller's locals (`d`), then the lexical bindings the realm's scripts share.
+      const childEvalEnv = d => {
+        const own = k => typeof k === 'string' && Object.prototype.hasOwnProperty.call(d, k);
+        const shared = k => typeof k === 'string' && childLexShared.has(k);
+        return new Proxy(d, {
+          has(_t, k) { return own(k) || shared(k); },
+          get(_t, k) {
+            if (own(k)) return d[k];
+            const e = shared(k) ? childLexShared.get(k) : undefined;
+            return e ? childLexRead(e, k) : undefined;
+          },
+          set(_t, k, v) {
+            if (own(k)) { d[k] = v; return true; }
+            const e = shared(k) ? childLexShared.get(k) : undefined;
+            if (!e) return false;
+            if (!e.set) throw new TypeError('Assignment to constant variable.');
+            e.set(v);
+            return true;
+          },
+        });
+      };
+      const childDirectEval = function (callee, args, desc, callerStrict, globalSite) {
         if (new.target) throw new TypeError('eval is not a constructor');
         const list = Array.isArray(args) ? args : [];
         if (callee !== childDynamicEval && callee !== root.eval) return Reflect.apply(callee, undefined, list);
-        return childDynamicEval(list[0]);
+        const src = list[0];
+        if (typeof src !== 'string') return childDynamicEval(src);
+        const directive = childStrictRE.test(src);
+        if (!childEval || (globalSite === 1 && !callerStrict && !directive)) return childDynamicEval(src);
+        const runners = childRunners();
+        if (!runners) return childDynamicEval(src);
+        const rewritten = pageRewriteHooks.rewrite(src, 'classic-local');
+        let d = {};
+        if (desc && typeof desc === 'object') {
+          // `delete x` must not remove a caller's binding: the accessors are non-configurable, as natively.
+          const dd = Object.getOwnPropertyDescriptors(desc);
+          for (const k of Object.keys(dd)) { dd[k].configurable = false; dd[k].enumerable = true; }
+          d = Object.defineProperties({}, dd);
+        }
+        const env = childEvalEnv(d);
+        // the eval's own let/const/class live and die with it
+        const prevLex = childLex;
+        childLex = new Map();
+        try {
+          const that = this;
+          if (callerStrict || directive) return runners.strict.call(that, childEval, env, rewritten);
+          return runners.sloppy.call(that, childEval, env, 'with(__zp_env){' + ZP_WITH_PROLOGUE + rewritten + '\n}');
+        } finally {
+          childLex = prevLex;
+        }
       };
       if (!define(w, '__zp_eval', childDirectEval)) throw normalizedError('SecurityError');
       // Ordered script pipeline for this child realm.

@@ -6,6 +6,7 @@
 
 | Date | Category | Summary | Detail |
 |---|---|---|---|
+| 2026-10-13 | rewriter / eval | strict direct eval 은 with 를 품을 수 없다 → with 블록 안의 strict 화살표 + 블록 const eval. env.has 는 있는 이름만. | rewriter.md#strict-eval-with-안 |
 | 2026-10-13 | membrane / 탈출 | 창의 frameElement·parent… 는 페이지가 재정의하는 자기 속성. 멤브레인은 winGet(부팅 게터)으로만 읽는다. | rewriter.md#창-자기-접근자 |
 | 2026-10-13 | rewriter / 탈출 | 진짜 전역을 넘기는 헬퍼 이름을 페이지가 대답: 지역 바인딩·window 쓰기·with 객체. 거부·쓰기 차단·블록 바인딩. | rewriter.md#헬퍼-이름-응답 |
 | 2026-10-13 | rewriter / 성능 | with 안의 자유 이름은 매번 Proxy 트랩 조회(위젯 5 초). 헬퍼는 with 안쪽 블록 상수로 묶는다. | rewriter.md#with-안의-이름 |

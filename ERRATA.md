@@ -900,6 +900,22 @@ claimed:
     window never hands it the real window (escape)`, `sandboxed frames are opaque…` (`nav.tampered`); both fail with
     the plain reads restored.
 
+92. **A direct `eval` did not see its caller's bindings in two places.** (1) **A frame the page writes into** (`about:blank`,
+    `document.write`; no prelude of its own) ran every direct eval as that realm's global code: the first caller local it
+    read was a ReferenceError (item 86 had only given the realm a `__zp_eval` at all). It now runs as the page realm's does:
+    a helper made by that realm's own `Function`, a parameter named `eval` holding the intrinsic, the code wrapped in
+    `with(env)` where `env` answers the caller's locals and then the lexical bindings the realm's scripts share; the eval's
+    own `let`/`const`/`class` go in a registry thrown away with it (a second `eval('let q')` is not a redeclaration).
+    (2) **Strict code in the page realm** — a strict caller (any module, class body, "use strict" file) or a "use strict"
+    source — saw none of the caller's locals either: `eval('s * 2')` was a ReferenceError for a local `s`. Strict code cannot
+    hold a `with`, but it can sit inside one: the strict runner puts a strict arrow function in a `with(env)` block (with
+    `const eval = <intrinsic>` bound nearer than the object, which would otherwise answer for `eval`), so the eval finds
+    the caller's locals in its scope chain; an arrow has no `arguments` of its own, so the caller's come through the
+    object. In strict mode the object answers only names that exist (the caller's, the scripts' lexicals, the window's):
+    an assignment to an undeclared name still throws ReferenceError (the first version answered every name and made a
+    global — the e2e caught it). — e2e `direct eval sees its caller's bindings, sloppy and strict, in the page and in a written
+    frame (matches native)` (18 cases in each realm; 15 differ on the build without the change).
+
 ### Residuals (documented, not fixed)
 
 | Residual | Why it stays | Pin |
@@ -907,7 +923,8 @@ claimed:
 | A srcdoc child reports the parent's virtual URL, not `about:srcdoc` | Needs the document URL split from the origin identity that drives storage, cookies and `postMessage` (100+ uses of `virtualURL`). | surface `framesByName`, iframe `srcdocLocation` |
 | V8 names the rewritten callee in some messages (`__zp_get(...).item is not a function`) | V8 renders the call-site AST; matching it needs per-call emission changes. Only buggy call sites surface it. | surface `framesItem` |
 | Direct `eval` inside `with(o)` does not see `o` | The eval descriptor carries lexical bindings, not with-objects. Rare (legacy templating uses `new Function`). | surface `withEvalScope` |
-| A direct `eval` in a srcless child frame (a written or `about:blank` frame, no prelude of its own) runs as that frame's global code: the caller's locals are not in view | Item 86 gave such frames a `__zp_eval` at all (every direct eval there threw ReferenceError); the caller-scope machinery lives in the parent realm's runtime. Rare: ad frames run written scripts, not direct evals of locals. | `web/membrane/20-containment.js` `childDirectEval` |
+| A direct `eval` in a srcless child frame sees the caller's locals (item 92) but not a caller local that is named like a dangerous global (`location`, `top`, …) when the eval code reads it bare | The page realm consults the caller's bindings inside `__zp_get` for those names (`__zp_eval_desc`); the child realm delegates the helpers to the parent, which does not know this realm's caller. A local named `location` read by name from eval code is vanishingly rare. | `web/membrane/20-containment.js` `childDirectEval` |
+| A strict caller's `eval("this")` is the window (facade), not `undefined` | The runners are sloppy functions (a parameter named `eval` is illegal in strict code), so an `undefined` `this` is coerced to the global before the eval sees it; the rewriter turns the real global back into the facade, so nothing leaks. | `web/membrane/07-membrane.js` `zpDirectEval` |
 | A function a guarded site assigns is named after the temp in V8's own inferred names (profiles, stack frames before sanitizing); `.name` is native (`""`) | V8 infers a debug name from the nearest assignment; the stack sanitizer already turns `__zp_*` frame names into `<anonymous>`, as for the helper form before. | rewriter.test `inline-guarded members…` (`.name`) |
 | The page WASM is 527 KB (budget raised 500 → 540 KB) | The rewriter itself grew: the reserved-name scan (8.7 KB — OXC's walker is monomorphized per visitor), the `with` bindings, the guards. It runs in the page because evals are rewritten there. | static-policy `E3 크기 가드` |
 | A `var` from a script rejected for redeclaration survives as `undefined` | Eval declaration instantiation runs before the emitted conflict check; splitting the check trades this for registrations surviving a syntax error. | surface `ownKeysLeak` |

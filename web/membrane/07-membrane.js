@@ -248,6 +248,25 @@
     const zpDirectEvalRunner = Native.FunctionCtor(
       'eval', '__zp_env', '__zp_src',
       'return eval(__zp_src)');
+    // Strict code cannot hold a `with`, but it can sit inside one. A strict eval — a strict caller, or a "use strict"
+    // source — runs in a strict arrow function placed in a `with(env)` block, so the caller's locals are in its scope chain
+    // (it used to see none: every strict direct eval of a local was a ReferenceError). The block binds `eval` to the
+    // intrinsic, nearer than the object, which would otherwise answer for it with the facade's; the arrow has no
+    // `arguments` of its own, so the caller's come through the object.
+    // Made on first use, and tolerating a constructor that refuses: in a frame that reuses its initial window the
+    // "native" Function is the parent's facade, which rewrites what it compiles (the parameter names are the ones the
+    // rewriter lets a runtime wrapper bind). Such a realm keeps the old strict path.
+    let zpDirectEvalStrictRunner;
+    const strictRunnerOrNull = () => {
+      if (zpDirectEvalStrictRunner === undefined) {
+        try {
+          zpDirectEvalStrictRunner = Native.FunctionCtor(
+            '__zp_self', '__zp_env', '__zp_src',
+            'with(__zp_env){const eval=__zp_self;' + ZP_WITH_PROLOGUE + 'return (()=>{"use strict";return eval(__zp_src)})()}');
+        } catch { zpDirectEvalStrictRunner = null; }
+      }
+      return zpDirectEvalStrictRunner;
+    };
     function zpDirectEval(callee, args, desc, callerStrict, globalSite) {
       // 네이티브 eval 은 생성자가 아니다.
       if (new.target) throw new TypeError('eval is not a constructor');
@@ -290,18 +309,22 @@
       const prevLexEnv = __zp_lex_env;
       __zp_lex_env = new Map();
       try {
-        // strict 는 소스 지시어로 전달한다 — sloppy 헬퍼의 direct eval 에
-        // `'use strict';` 프롤로그가 있으면 strict eval 이 된다 (strict
-        // 헬퍼는 `eval` 파라미터명이 불법이라 별도 헬퍼를 못 만든다).
-        // strict eval 소스는 `with` 를 못 쓰므로 raw 경로: plain 식별자는
-        // 어휘 사슬(→전역)로, dangerous 이름은 __zp_get 의 desc consult 로
-        // 호출자를 본다.
+        // A strict eval (a strict caller, or a "use strict" source) takes the strict runner: it cannot hold a `with`, so the
+        // runner holds it instead, and the caller's locals reach the code through the scope chain.
         const strictSrc = !!callerStrict || /^\s*['"]use strict['"]/.test(src);
         // 단일 합성 with: 스코프 프록시의 has 가 모든 이름에 true 라
         // `with(__zp_desc)` 같은 이중 래핑은 파라미터명까지 삼켜버린다.
         // desc 우선 → withScope 폴백을 한 프록시로 합성한다.
         const env = new Proxy(d, {
-          has(_t, p) { return p !== Symbol.unscopables; },
+          // The strict runner's own names are read from inside the `with`: they are its parameters, not the page's.
+          // Sloppy code answers for every name, so an unresolved one cannot fall through to the real global scope (and an
+          // assignment to it makes a global, as a sloppy one does). Strict code must throw for an undeclared name, so it is
+          // answered only what exists: the caller's locals, the scripts' lexical bindings, the window's own names.
+          has(_t, p) {
+            if (p === Symbol.unscopables || p === '__zp_self' || p === '__zp_src' || p === '__zp_env') return false;
+            if (!strictSrc) return true;
+            return typeof p !== 'string' || Object.prototype.hasOwnProperty.call(d, p) || zpLexGetEntry(p) !== undefined || Reflect.has(root, p);
+          },
           get(_t, p) {
             if (typeof p === 'string' && Object.prototype.hasOwnProperty.call(d, p)) return d[p];
             return Reflect.get(withScope, p);
@@ -314,9 +337,15 @@
         // sourceURL — eval 소스의 에러 filename 이 호출자 스크립트(가상
         // 문서 URL)를 가리키게 — 네이티브는 eval 소스 에러도 호출 스크립트
         // URL 을 reporting 한다.
-        const body = strictSrc ? '"use strict";' + rewritten : 'with(__zp_env){' + ZP_WITH_PROLOGUE + rewritten + '\n}';
+        const tag = '\n//# sourceURL=' + virtualURL.href;
         // The caller's `this`, with the real global object (what a sloppy function called plainly gets) shown as the facade.
-        return zpDirectEvalRunner.call(this === root ? scope : this, Native.globalEval, env, body + '\n//# sourceURL=' + virtualURL.href);
+        const that = this === root ? scope : this;
+        if (strictSrc) {
+          const strictRunner = strictRunnerOrNull();
+          if (strictRunner) return strictRunner.call(that, Native.globalEval, env, rewritten + tag);
+          return zpDirectEvalRunner.call(that, Native.globalEval, env, '"use strict";' + rewritten + tag);
+        }
+        return zpDirectEvalRunner.call(that, Native.globalEval, env, 'with(__zp_env){' + ZP_WITH_PROLOGUE + rewritten + '\n}' + tag);
       } finally {
         __zp_eval_desc = prev;
         __zp_lex_env = prevLexEnv;
