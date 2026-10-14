@@ -15,7 +15,7 @@ strings below are closed as *not doing*.
 ## State
 
 - Branch `main`; everything up to `a0c81d5` (the scope rule and the isolation audit, items 93) is on `origin/main`. The commit carrying this
-  version of the file (items 94–95) is local until the user says to push.
+  version of the file (items 94–96) is local until the user says to push.
 - Commits of this arc: `8c178a7` HLS / loop cap / `innerHTML` / TLS refresh (ERRATA 58–61) · `8565ccf` five divergences found
   chasing the challenge (62–65) · `3ae6135` **Stack Overflow's Cloudflare challenge fixed** — the ClientHello lacked Chrome's
   `trust_anchors` extension — plus `Sec-Fetch-*` for frames and sub-requests (66–67) · `f8bb56a` element-load `Sec-Fetch-*`,
@@ -57,7 +57,7 @@ strings below are closed as *not doing*.
   overflow on the unsealed build. The 13 sites were A/B-ed against the previous commit's build again: the same errors on both
   sides (CNN and Stack Overflow vary run to run on both), and a lookup/eval/`Function`/member/storage micro-benchmark is within
   its run-to-run spread (free-name lookups 292–319 ms before, 297–319 ms after).
-- Detail lives in [ERRATA.md](ERRATA.md) items 62–95 and its Residuals table, the trap-notebook entries
+- Detail lives in [ERRATA.md](ERRATA.md) items 62–96 and its Residuals table, the trap-notebook entries
   (`.ai/trap-notebook/rewriter.md`: `동적-코드-전역-this`, `chrome-hello-trust-anchors`, `coep-워커-부트스트랩`,
   `lol-html-원시-속성값`, `trusted-script-는-코드`, `워커-훅-자리`, `캔버스-파블링-결정적`, `prepare-stack-trace-페이지-뷰`,
   `프렐류드-스크립트-잔존`, `referrer-한-곳에서`, `클라이언트-힌트-협상`, `전송-실패는-네트워크-오류`, `대조군은-quic`, `바쁜-렌더러는-진다`, `아이콘-링크-경주`, `교차-출처-프레임-권한`, `헬퍼-이름-응답`, `with-안의-이름`, `인라인-가드`, `같은-소스-재리라이트`, `부모-파사드로-부팅한-자식`, `창-자기-접근자`, `strict-eval-with-안`, `봉인된-표`, `워커-전역-이름`, `교차-출처-창-자식-이름`), and the verification table in [PHASE2_STATUS.md](PHASE2_STATUS.md). No gate
@@ -75,11 +75,16 @@ strings below are closed as *not doing*.
    (`web/zp-core.js` — the major and the build, `TARGET_CHROME_FULL_VERSION`, read off the installed Chrome's
    `navigator.userAgentData.getHighEntropyValues(['uaFullVersion'])` — `web/worker-prelude.js`, the spec, the constant) together;
    `crates/zp-kernel-bundle/tests/client_hello.rs` pins the result.
-3. **Glassdoor — not pursued further (2026-10-13).** Its Cloudflare challenge still does not finish through the proxy
-   (ERRATA Residuals). Speed no longer explains it (items 85–89 brought the proxied renderer within what a slowed native
-   Chrome passes with); what remains is making the proxied environment match what the challenge inspects, which is
-   bot-detection evasion, not a compatibility fix. The comparison that ended there found the escape of item 91. Containment
-   bugs found on the way are in scope; challenge-passing work is not.
+3. **Glassdoor — open, reopened 2026-10-14 at the user's report** (a person ticks the box, sees "verifying", is asked again). It is a
+   compatibility failure — a check a person passes natively that the proxy fails — so it is in scope; spoofing is not, and nothing
+   here spoofs. Measured with a person's steps (`.lean-ctx/gd-phase.js`) and recorded in the ERRATA Residuals row: the challenge's
+   script takes its retry branch after the click (it never builds the form natively posts; `cf_clearance` is issued and sent, the next
+   `GET /` is 403). Ruled out by measurement: speed, latency, cookies, forms, input events, canvas/audio masking, the Trusted Types
+   and `pushState` probes (matched; ERRATA 96), Resource Timing initiator types. Left: HTTP/3 (a default Chrome gets a challenge that
+   passes by itself; with QUIC off native gets the checkbox the proxy gets) or further measurements of what the widget reads, one
+   hypothesis per run (harness: `gd-phase.js native|proxied`, `CPU=`/`LAT=` to slow native; each run is ~1 minute; space them).
+   Measured Resource Timing gaps worth fixing on their own (an XHR is `fetch`, a `<link>` load is `img`, a cross-origin frame's
+   entry shows `h2`/sizes) are in the same row.
 4. **Not doing:** a page's own `eval` / `new Function` code prints as a script frame, not V8's eval-origin text (ERRATA
    Residuals). Matching that text exactly needs a unique sourceURL per eval, the caller's position at compile time and column
    remapping; the only reader it serves is a script that tells environments apart by the text of its own eval stacks (bot
@@ -100,7 +105,7 @@ strings below are closed as *not doing*.
    interstitial; passing it is not ours to do (scope). Five loads after the fixes: the worker runs, no exception in any target.
    Lab tool: `.lean-ctx/reddit-targets.js` (lists targets, exceptions with stack and source around the position).
 
-Done this round and closed: items 71–95 (see State); before that the meta-CSP lone `'` (69), the inline-script stack (70),
+Done this round and closed: items 71–96 (see State); before that the meta-CSP lone `'` (69), the inline-script stack (70),
 Reddit (parity re-checked with a fresh unautomated Chrome — same wall natively).
 
 ## How to run things

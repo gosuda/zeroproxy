@@ -1,5 +1,5 @@
   function commitVirtualHistory(state, title, url, replace = false) {
-    const next = url != null ? sameOriginHistoryURL(url) : new URL(virtualURL.href);
+    const next = url != null ? sameOriginHistoryURL(url, replace ? 'replaceState' : 'pushState') : new URL(virtualURL.href);
     virtualURL = next;
     if (!explicitBaseURL) baseURL = virtualURL.href;
     const entryId = replace && activeEntryId ? activeEntryId : 'e' + ZP.randomId();

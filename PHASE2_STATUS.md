@@ -29,7 +29,7 @@ gate is closed.
 | Rust 워크스페이스 (리라이터 매트릭스 3,360 조합 포함) | `cargo test --workspace` | 317 통과, 3 무시 |
 | Go | `go test ./...` | 전부 ok |
 | wasm CI | `npm run test:wasm:ci` | 15 통과 |
-| 브라우저 e2e (네이티브 대조 차분 포함) | `npm run test:e2e` | 235 통과 |
+| 브라우저 e2e (네이티브 대조 차분 포함) | `npm run test:e2e` | 236 통과 |
 | ClientHello 가 설치된 Chrome 과 같은가 (확장 집합 + `trust_anchors` 본문) | `npm run check:chrome-hello` | Chrome 154.0.8037.98 과 일치 (Chrome 이 있어야 돈다; 어긋나면 exit 1) |
 | 리라이트 출력 유효성 (실사이트 스크립트 → V8) | `node --experimental-vm-modules scripts/rewrite-corpus-check.cjs <taskweaver 테이프>` | 13개 사이트 768개 중 732개 검사, 0건 실패 (51.6 MB; 나머지는 스크립트 아님/리라이터가 거부). 2026-10-13 인라인 가드 뒤 캐시된 705개 재검사 0건 실패(가드 자리 19.5만) — 파싱만 본다: 의미 버그 둘(`0,` 이 인자가 됨, `else0`)은 실사이트·e2e 가 잡았다 |
 | 실사이트 | taskweaver `zp`, 아래 13곳 | 전부 응답 — Stack Overflow 포함(2026-10-07 부터 열린다); Wikipedia·GitHub·Guardian·MDN·Apple·npm·Naver 오류 0 (2026-10-13, 인라인 가드 뒤 다시 잼) |

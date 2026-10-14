@@ -2609,6 +2609,33 @@ function createTargetServer(requests, pendingResponses) {
       <\/script></body>`);
       return;
     }
+    if (url.pathname === '/xhist') {
+      // history.pushState / replaceState and the URLs they refuse. A document may be rewritten to a URL that differs from its
+      // own only in path, query and fragment; any other scheme, user info, host or port is a SecurityError with the browser's
+      // sentence. Cloudflare's widget pushes a foreign URL to see that it is refused.
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(`<!doctype html><title>history</title><body><script>
+        var out = {};
+        var t = function (k, fn) { try { var v = fn(); out[k] = 'ok:' + String(v).slice(0, 50); } catch (e) { out[k] = e.name + ': ' + String(e.message).replace(/https?:[^ '"]*/g, 'URL').replace(/origin 'URL'/g, "origin 'ORIGIN'").slice(0, 160); } };
+        t('push other origin', function () { history.pushState({ a: 1 }, '', 'https://example.org/'); return location.pathname; });
+        t('replace other origin', function () { history.replaceState({ a: 1 }, '', 'https://example.org/x'); return location.pathname; });
+        t('push other host', function () { history.pushState(null, '', 'http://example.net:81/p'); return location.pathname; });
+        t('push other scheme', function () { history.pushState(null, '', 'ftp://example.com/'); return location.pathname; });
+        t('push data url', function () { history.pushState(null, '', 'data:text/html,x'); return location.pathname; });
+        t('push javascript url', function () { history.pushState(null, '', 'javascript:void 0'); return location.pathname; });
+        t('push about:blank', function () { history.pushState(null, '', 'about:blank'); return location.pathname; });
+        t('push relative', function () { history.pushState(null, '', '/rel/path?q=1#h'); return location.pathname + location.search + location.hash; });
+        t('push same origin absolute', function () { history.pushState(null, '', location.origin + '/abs'); return location.pathname; });
+        t('push query only', function () { history.pushState(null, '', '?only=1'); return location.pathname + location.search; });
+        t('push hash only', function () { history.pushState(null, '', '#only'); return location.hash; });
+        t('push user info', function () { history.pushState(null, '', 'http://user:pw@' + location.host + '/u'); return location.pathname; });
+        t('push other port', function () { history.pushState(null, '', location.protocol + '//' + location.hostname + ':65000/p'); return location.pathname; });
+        t('push blob url', function () { history.pushState(null, '', 'blob:' + location.origin + '/xyz'); return location.pathname; });
+        t('push state not cloneable', function () { history.pushState(function () {}, '', '/f'); return 'x'; });
+        window.__xhist = out;
+      <\/script></body>`);
+      return;
+    }
     if (url.pathname === '/xnf' || url.pathname === '/xnf-anchor' || url.pathname === '/xnf-challenge') {
       // The shape of reCAPTCHA: a page holds two frames of another site, named; the second reads the first through its
       // parent — `parent['anchor']` — and the page reads a frame inside the first through its window. The parent is
@@ -8022,6 +8049,36 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     assert.equal(direct.page.strictCaller, 6);
     assert.deepEqual(proxied.page, direct.page, 'the page realm');
     assert.deepEqual(proxied.child, direct.child, 'the written frame\'s realm');
+  });
+
+  // pushState and replaceState refuse every URL that is not the document's own up to path, query and fragment — with the
+  // browser's SecurityError and its sentence. Ours threw "Blocked by ZeroProxy policy", or the transport's own Error
+  // (TARGET_PROTOCOL_BLOCKED) for a scheme it does not carry, and took user info.
+  await t.test('history.pushState refuses a foreign URL with the browser\'s own SecurityError (matches native)', async () => {
+    const targetBase = `http://${targetHost}:${targetPort}`;
+    const collect = async p => {
+      try {
+        await p.waitForFunction(() => window.__xhist, { timeout: 60000, polling: 100 });
+        return await p.evaluate(() => window.__xhist);
+      } finally {
+        await p.close();
+      }
+    };
+    const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    let direct;
+    try {
+      const p = await directBrowser.newPage();
+      await p.goto(`${targetBase}/xhist`, { waitUntil: 'domcontentloaded' });
+      direct = await collect(p);
+    } finally {
+      await directBrowser.close();
+    }
+    const proxied = await collect(await openProxiedPage(`${targetBase}/xhist`));
+    fs.writeFileSync(path.join(artifacts, 'history-urls.json'), JSON.stringify({ direct, proxied }, null, 2));
+    assert.match(direct['push other origin'], /^SecurityError: Failed to execute 'pushState' on 'History': A history state object with URL 'URL' cannot be created in a document with origin 'ORIGIN' and URL 'URL'/);
+    assert.match(direct['push user info'], /^SecurityError/, 'natively user info is a different URL');
+    assert.match(direct['push relative'], /^ok:/);
+    assert.deepEqual(proxied, direct);
   });
 
   // A cross-origin window answers for the names of its child frames: `parent['anchor']` is the sibling frame, not a

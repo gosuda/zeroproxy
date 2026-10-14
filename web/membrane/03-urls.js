@@ -276,4 +276,19 @@
     return ZP.canonicalWebSocketURL(g === null ? virtualURL.href.replace(/^http/, 'ws') : g, base.replace(/^http/, 'ws')).href;
   }
   function shareNavURL(raw, base = baseURL) { return ZP.makeShareURL(targetURL(raw, base), proxyOrigin, activeServers); }
-  function sameOriginHistoryURL(url) { const next = new URL(targetURL(url)); if (next.origin !== virtualURL.origin) throw normalizedError('SecurityError'); return next; }
+  // The URL `pushState`/`replaceState` may rewrite the document to: parsed against the base URL, it may differ from the
+  // document's own URL only in path, query and fragment — same scheme, user info, host and port. Anything else (another
+  // origin, another scheme such as data: or ftp:, user info, a string that does not parse) is the browser's SecurityError
+  // with its own sentence; this used to be a bare "Blocked by ZeroProxy policy", or the transport's TARGET_PROTOCOL_BLOCKED
+  // Error for a scheme it does not carry. A page (Cloudflare's widget) tries a foreign URL to see that it is refused.
+  function sameOriginHistoryURL(url, verb) {
+    let parsed = null;
+    try { parsed = new URL(String(url), baseURL); } catch {}
+    const doc = virtualURL;
+    if (!parsed || parsed.protocol !== doc.protocol || parsed.username !== doc.username || parsed.password !== doc.password || parsed.host !== doc.host) {
+      const shown = parsed ? parsed.href : String(url);
+      throw new Native.DOMException("Failed to execute '" + (verb || 'pushState') + "' on 'History': A history state object with URL '" + shown
+        + "' cannot be created in a document with origin '" + displayOrigin(securityOrigin()) + "' and URL '" + doc.href + "'.", 'SecurityError');
+    }
+    return new URL(targetURL(parsed.href));
+  }
