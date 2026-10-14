@@ -3,10 +3,18 @@
 Written for: the next session (agent or engineer) picking up ZeroProxy cold. Read [CLAUDE.md](CLAUDE.md) and
 `head -40 .ai/trap-notebook/INDEX.md` first; this file only adds what is not already there.
 
+## Scope (decided 2026-10-14 — read before choosing work)
+
+The project guards **containment** (no native networking for target code; no real window/Location/clean realm; no reach into
+another target or the control surface; nothing unrewritten runs) and **compatibility** (sites that open natively open here).
+Hiding the proxy from the page's own JavaScript is **not a goal**; the masking already in place stays, nothing new is started
+on it. The rule is in [CLAUDE.md](CLAUDE.md) ("범위") and the ERRATA header. Before taking a task, ask which containment rule it
+protects or which site it opens; if neither, leave it. This is why Glassdoor's challenge, eval stack text and the readable
+strings below are closed as *not doing*.
+
 ## State
 
-- Branch `main`; everything up to `82332eb` (direct eval sees its caller, item 92) is on `origin/main`. The commit carrying
-  this version of the file (item 93) is local until the user says to push.
+- Branch `main`; everything up to `a9edf11` (the sealed tables, item 93) and the scope commit after it is on `origin/main`.
 - Commits of this arc: `8c178a7` HLS / loop cap / `innerHTML` / TLS refresh (ERRATA 58–61) · `8565ccf` five divergences found
   chasing the challenge (62–65) · `3ae6135` **Stack Overflow's Cloudflare challenge fixed** — the ClientHello lacked Chrome's
   `trust_anchors` extension — plus `Sec-Fetch-*` for frames and sub-requests (66–67) · `f8bb56a` element-load `Sec-Fetch-*`,
@@ -74,13 +82,13 @@ Written for: the next session (agent or engineer) picking up ZeroProxy cold. Rea
    remapping; the only reader it serves is a script that tells environments apart by the text of its own eval stacks (bot
    scoring), so it stays a residual. Persona drift was checked 2026-10-13 (`npm run check:chrome-hello`: Chrome 154.0.8037.98,
    17 extensions, `trust_anchors` 186 bytes — matches).
-5. **A decision for the owner: the strings the membrane handles are visible to a page that patches `String`/`RegExp`/`Array`/`JSON`
-   methods** (ERRATA Residuals, first row; measured 2026-10-13 with `.lean-ctx/spy-bisect.js`). A page can read the proxy origin,
-   its own share URL with the `#k=` key, the relay pipe, tab/entry ids and the URLs of its own requests. No real window or Location
-   object was seen; the tables that hold them are sealed (item 93). Closing it means a captured native at every method call on
-   a string/array/JSON text (primordials, thousands of sites) or a realm of its own for the membrane; neither is started. Whether
-   the strings matter is a threat-model call. Unmeasured: cross-site frames and popups under the spies, and `Reflect.*` wrapped by
-   a function that reads a global (the free-name lookup's traps call `Reflect.getOwnPropertyDescriptor`/`Reflect.has`).
+5. **Accepted, not doing:** the strings the membrane handles are visible to a page that patches `String`/`RegExp`/`Array`/`JSON`
+   methods (ERRATA Residuals, first row; measured 2026-10-13 with `.lean-ctx/spy-bisect.js`): the proxy origin, the page's own
+   share URL with its `#k=` key, the relay pipe, tab/entry ids, its own request URLs. No real window or Location object was seen;
+   the tables that hold them are sealed (item 93). Closing it would take a captured native at every string/array/JSON call
+   (thousands of sites) or a realm of its own for the membrane, for something that is concealment. Decided 2026-10-14: not closed.
+   Still worth a look, because they touch containment/robustness: cross-site frames and popups under the spies, and `Reflect.*`
+   wrapped by a function that reads a global (the free-name lookup's traps call `Reflect.getOwnPropertyDescriptor`/`Reflect.has`).
 6. Reddit (when it serves reCAPTCHA): a worker running `recaptcha__ko.js` throws `Cannot read properties of undefined
    (reading 'body')` (line 246 of the rewritten worker script). Present before the worker-realm work too (A/B on the
    previous `web/`, 2026-10-12); not traced. Compare with a native reCAPTCHA worker (the e2e `/xwenv` pattern).
