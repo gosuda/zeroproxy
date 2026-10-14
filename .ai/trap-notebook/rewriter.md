@@ -1898,3 +1898,14 @@ Cloudflare 챌린지 요청 본문은 압축·난독화돼 있고, 페이지에 
 CDP 브레이크포인트(`Debugger.setBreakpointOnFunctionCall`)를 걸고 멈출 때 호출 프레임의 스코프에서 JSON 직렬화되는 객체를 읽는다(`.lean-ctx/gd-pause.js`, 페이지에 코드 없음). 같은 도구로 네이티브와
 프록시를 떠서 `gd-table-diff.js`(속성 이름 표), `gd-fields.js`(필드·프로브별 시간 범위)로 비교한다. 이 방법으로 ERRATA 100·101 의 원인을 찾았다. 표가 네이티브와 같아진 뒤에도 판정은 그대로였다 — 남은 것은
 타이밍(VM 구간 2–4× 느림)과 서버 쪽 요인이다. 스택 줄·열 위치는 아니다(네이티브에서 스크립트를 30줄·500열 밀어도 통과).
+
+## <a id="멤브레인-경로-비용"></a>"느리다" 는 평균이 아니라 연산별로 잰다 — 인라인 script 의 with 와 세 경로가 네이티브의 20–680배였다 (2026-10-14, ERRATA 103)
+
+**증상**: 챌린지 위젯의 VM 구간이 네이티브보다 3–4배 느리다(프로브 구간 합 1.3 s → 5.1–6.0 s). 균일한 CPU 스로틀(10×)은 네이티브도 통과하므로 절대 속도가 아니라 **연산 종류별 비율**이 다를 수 있다고 봤다.
+**측정**: 같은 페이지를 네이티브와 프록시로 열어 연산 하나씩 루프를 돌렸다(`page-bench.html`, `page-globals.html`, `page-tostr.html`, `ab-page.js`). 평범한 산술은 같았고 이런 것들이 달랐다 —
+인라인 script 안의 `Math.floor` 132배(같은 루프를 외부 script 로 하면 0.9배: `with(__zp_lex_scope)` 가 인라인 코드의 모든 자유 식별자를 Proxy 트랩 한 번씩 거치게 한다),
+페이지 함수의 `Function.prototype.toString` 65배(호출마다 리라이트 되돌리기 문자 스캔), `document` 60배/`window.document` 680배(긴 `get` 사슬), `location.href` 20배(호출마다 예외를 던지고 잡음).
+**고침**: toString 은 함수별로 결과를 보관, `document` 는 즉시 응답, 래핑된 Location 은 네이티브 판정에서 먼저 제외. 인라인 script 를 진짜 script 요소로 돌리면(`with` 제거) 루프가 1.3배가 되지만 e2e 13개가 깨진다
+(srcdoc 스크립트 순서, 스택의 부트스트랩 프레임, MutationObserver, currentScript) — 되돌렸고 ERRATA 잔여 행에 있다.
+**결과**: 위젯의 구간 합은 그대로(5.8–6.0 s)이고 판정도 그대로다 — 이 셋은 위젯이 뜨겁게 쓰는 경로가 아니었다. **재발 방지**: 멤브레인 경로를 건드릴 때 `page-globals.html` 류의 연산별 A/B 를 돌려 네이티브 대비 배수를 본다.
+`get`/`set`/`call` 에 검사를 더하면 모든 재작성 코드가 그 비용을 낸다. 위젯 프로파일은 `gd-profile.js`(CPU), `gd-evalstats.js`(eval 계측) 로 본다.

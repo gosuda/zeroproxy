@@ -1478,7 +1478,7 @@ test('리라이트 흔적 되돌리기는 뜻을 바꾸지 않는다', () => {
   assert.doesNotThrow(() => new Function('return ' + out), '되돌린 소스가 파싱되지 않는다');
 
   // toString 마스킹이 실제로 이걸 지나야 한다.
-  assert.ok(rt.includes('return unrewriteSourceText(orig.call(this));'),
+  assert.ok(rt.includes('out = unrewriteSourceText(text);'),
     'toString 이 되돌리기를 안 지난다 — 함수가 있어도 아무 데도 안 걸린다');
 });
 

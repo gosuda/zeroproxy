@@ -471,10 +471,35 @@
     if (!proto || toStringMaskedPrototypes.has(proto)) return;
     const orig = w === root ? origToString : proto.toString;
     if (typeof orig !== 'function') return;
+    // Putting a page function's text back is a character scan with regexes (µs for a few lines, ms for a big function), and a
+    // challenge asks for the text of the same functions over and over (is it still a function of the page? does it say
+    // native code?): natively that is ~90 ns. A function's text never changes, so each answer is kept — by the function,
+    // then by the text (closures made from one source share it).
+    const unrewrittenByFn = newWeakMap();
+    const unrewrittenByText = newMap();
+    let unrewrittenChars = 0;
     const maskedToString = function toString() {
-      if (typeof this === 'function' && toStringMap.has(this)) return toStringMap.get(this);
+      const isFn = typeof this === 'function';
+      if (isFn) {
+        const mapped = toStringMap.get(this);
+        if (mapped !== undefined) return mapped;
+        const kept = unrewrittenByFn.get(this);
+        if (kept !== undefined) return kept;
+      }
       // 우리가 가린 훅이 아니면 페이지 자신의 코드다 — 리라이트 흔적을 되돌린다.
-      return unrewriteSourceText(orig.call(this));
+      const text = nativeApply(orig, this, []);
+      if (typeof text !== 'string' || (text.indexOf('__zp_') < 0 && text.indexOf('__ZP_EXEC_EVENT') < 0)) return text;
+      let out = unrewrittenByText.get(text);
+      if (out === undefined) {
+        out = unrewriteSourceText(text);
+        if (text.length <= 262144) {
+          if (unrewrittenChars + text.length > 8388608) { unrewrittenByText.clear(); unrewrittenChars = 0; }
+          unrewrittenByText.set(text, out);
+          unrewrittenChars += text.length;
+        }
+      }
+      if (isFn) unrewrittenByFn.set(this, out);
+      return out;
     };
     toStringMap.set(maskedToString, 'function toString() { [native code] }');
     nameLike(maskedToString, 'toString');

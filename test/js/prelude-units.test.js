@@ -465,6 +465,7 @@ test('isNativeLocation: tag pre-filter + native-getter brand check', () => {
   const real = new WeakSet([realLoc]);
   const { isNativeLocation } = load(LOC_BLOCK, ['isNativeLocation'], {
     virtualLocation: { __vloc: true },
+    wrappedLocationProxies: new WeakSet(),
     Native: {
       locationHref: { get: { call(v) { if (!real.has(v)) throw new TypeError('brand check'); return 'https://p/'; } } },
     },

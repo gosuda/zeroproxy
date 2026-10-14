@@ -413,6 +413,9 @@
     // breaking schema validators (zod) that compare href/origin to
     // SSR'd expected values.
     const wrappedLocationCache = newWeakMap();
+    // The facades themselves: they answer `[object Location]` and are not Locations, so asking the browser's getter whether
+    // one is real throws — once per `location.href` read (8 µs, 20× the native read).
+    const wrappedLocationProxies = newWeakSet();
     // Every URL component on a wrapped Location proxy must return the
     // virtual (target) value, not the proxy origin. The original Phase-2
     // set covered only `pathname / search / hash`, which left target
@@ -571,6 +574,7 @@
         defineMasked(locTarget, prop, { get: pair.get, set: !nd || nd.set ? pair.set : undefined, enumerable: nd ? nd.enumerable : true, configurable: false });
       }
       wrappedLocationCache.set(nativeLoc, proxy);
+      wrappedLocationProxies.add(proxy);
       return proxy;
     }
     const crossWindowTargets = newWeakMap();
@@ -1311,7 +1315,8 @@
     }
     function scopeGet(prop, hide) {
       if (prop === Symbol.unscopables) return undefined;
-      if (hide && typeof prop === 'string' && ZP_HIDDEN_RE.test(prop)) return undefined;
+      if (prop === 'document') return document;
+      if (hide && typeof prop === 'string' && (prop.charCodeAt(0) === 95 || prop.charCodeAt(0) === 90) && ZP_HIDDEN_RE.test(prop)) return undefined;
       if (typeof prop === 'string' && PAGE_DEFINABLE.has(prop)) { const v = pageDefinedMember(prop); if (v !== NO_PAGE_DEFINITION) return v; }
       if (prop === 'window' || prop === 'self' || prop === 'globalThis' || prop === 'frames') return scope;
       if (prop === 'top' || prop === 'parent' || prop === 'opener') return virtualWindowProperty(root, prop);
@@ -1476,6 +1481,7 @@
       if (!value || typeof value !== 'object') return false;
       if (value === virtualLocation) return false;
       if (knownLocations.has(value)) return true;
+      if (wrappedLocationProxies.has(value)) return false;
       let tag;
       try { tag = nativeObjToString.call(value); } catch { return false; }
       if (tag !== '[object Location]') return false;
@@ -1539,6 +1545,10 @@
     }
     function get(base, prop) {
       if (base != null && fastDataKey(prop) && fastDataBase(base)) return base[prop];
+      // `document` is the window's unforgeable attribute: no lexical binding, no page definition can stand in front of it, so
+      // the long path below always ended at the real document (240 ns a read, native 4). Only a direct eval's caller scope
+      // (a local named `document`) can come first.
+      if (prop === 'document' && __zp_eval_desc === null && (base === root || base === scope || base === withScope)) return document;
       if (base == null) return nullishFail('get', base, prop);
       if (typeof prop !== 'symbol') prop = String(prop);
       if (isStackHook(base, prop)) return pageStackHook.value;

@@ -359,6 +359,34 @@ function builtinShapeProbe() {
   t('frameElement getter name', function () { return Object.getOwnPropertyDescriptor(window, 'frameElement').get.name; });
   window.__xshape = out;
 }
+// The text of a page's own functions: what it wrote, on the first read and on every later one (the membrane keeps its answer
+// per function), for the shapes the rewriter changes and the text can be put back from (computed reads, window names, calls) and for
+// the browser's. A guarded read in an arrow (`(a, b) => a[b] || x`), a compound assignment on a member and `delete o[k]` still show
+// the rewrite — not tried here.
+function functionTextProbe() {
+  var out = {};
+  var fns = {
+    computed: function (o, k) { return o[k] + 1; },
+    names: function () { return [window.document === document, document.title, location.href, self === window, top === window]; },
+    call: function (a) { return a.concat([1]).map(function (x) { return x * 2; }); },
+    arrow: (a, b) => a + b,
+    klass: class K { m(o) { return o['k' + 1]; } static s() { return window; } },
+    asyncFn: async function (p) { return (await p)['x']; },
+    plain: function () { return 1; }
+  };
+  fns.evaled = (0, eval)('(function (a) { return a["b"] + document.title; })');
+  fns.made = new Function('a', 'return a["c"] + location.href');
+  var read = function (k, f) {
+    var a = String(f), b = Function.prototype.toString.call(f), c = f.toString(), d = String(f);
+    out[k] = [a, b === a, c === a, d === a];
+  };
+  Object.keys(fns).forEach(function (k) { read(k, fns[k]); });
+  read('native', Math.floor);
+  read('native bound', function () {}.bind(null));
+  read('toString itself', Function.prototype.toString);
+  out['times'] = [1, 2, 3].map(function () { return String(fns.computed); }).join('|');
+  window.__xtext = out;
+}
 
 function createTargetServer(requests, pendingResponses) {
   // tag → the names of the cookies the request that carried it had (see /xck-echo)
@@ -2780,6 +2808,12 @@ function createTargetServer(requests, pendingResponses) {
       // Constants, statics, names and lengths of the stand-ins (builtinShapeProbe).
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end('<!doctype html><title>shape</title><body><script>(' + builtinShapeProbe.toString() + ')()<\/script></body>');
+      return;
+    }
+    if (url.pathname === '/xtext') {
+      // The text of a page's own functions (functionTextProbe).
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end('<!doctype html><title>text</title><body><script>(' + functionTextProbe.toString() + ')()<\/script></body>');
       return;
     }
     if (url.pathname === '/xredef') {
@@ -8349,6 +8383,33 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     fs.writeFileSync(path.join(artifacts, 'builtin-shape.json'), JSON.stringify({ direct, proxied }, null, 2));
     assert.equal(direct['EventSource.CONNECTING/OPEN/CLOSED'], '0,1,2');
     assert.equal(direct['globalThis.Proxy.revocable'], '1');
+    assert.deepEqual(proxied, direct);
+  });
+
+  // The text of a page's own functions is what the page wrote — on the first read and on every later one (the membrane keeps its
+  // answer per function; it used to put the text back from the rewrite on each call, 65× the native read).
+  await t.test('a page function\'s text is what the page wrote, on every read (matches native)', async () => {
+    const targetBase = `http://${targetHost}:${targetPort}`;
+    const collect = async p => {
+      try {
+        await p.waitForFunction(() => window.__xtext, { timeout: 60000, polling: 100 });
+        return await p.evaluate(() => window.__xtext);
+      } finally {
+        await p.close();
+      }
+    };
+    const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    let direct;
+    try {
+      const p = await directBrowser.newPage();
+      await p.goto(`${targetBase}/xtext`, { waitUntil: 'domcontentloaded' });
+      direct = await collect(p);
+    } finally {
+      await directBrowser.close();
+    }
+    const proxied = await collect(await openProxiedPage(`${targetBase}/xtext`));
+    fs.writeFileSync(path.join(artifacts, 'function-text.json'), JSON.stringify({ direct, proxied }, null, 2));
+    assert.ok(direct.computed[0].includes('o[k] + 1'), 'the probe did not read its own text');
     assert.deepEqual(proxied, direct);
   });
 

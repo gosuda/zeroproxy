@@ -6,6 +6,7 @@
 
 | Date | Category | Summary | Detail |
 |---|---|---|---|
+| 2026-10-14 | membrane / 성능 | 느림은 연산별로 잰다: 인라인 script 의 with 가 자유 식별자 132배, toString·document·location.href 20–680배였다. 고쳐도 챌린지는 그대로. | rewriter.md#멤브레인-경로-비용 |
 | 2026-10-14 | membrane / 프레임 | 프레임은 자기 realm 을 갖는다(eval/Function·함수 프로토타입·클래스). 내부 DOM 스캔은 부팅 때 잡은 네이티브로 — 페이지 메서드를 타지 않는다. | rewriter.md#프레임-realm-과-내부-호출 |
 | 2026-10-14 | 실사이트 / 방법 | 챌린지가 보내는 값은 XHR.send 브레이크포인트로 읽는다(페이지에 계측하면 차단). 표·필드 비교 도구. 스택 위치는 원인이 아니다. | rewriter.md#챌린지-페이로드-읽기 |
 | 2026-10-14 | membrane / 호환성 | define 은 함수 이름을 바꾼다 — 별칭·보관에 쓰면 네이티브 생성자 이름이 샌다. 대체 클래스는 정적 상수를, bind 는 own 멤버를 잃는다. | rewriter.md#대체-클래스-모양 |
