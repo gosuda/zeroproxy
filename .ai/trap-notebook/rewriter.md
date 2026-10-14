@@ -1907,5 +1907,6 @@ CDP 브레이크포인트(`Debugger.setBreakpointOnFunctionCall`)를 걸고 멈�
 페이지 함수의 `Function.prototype.toString` 65배(호출마다 리라이트 되돌리기 문자 스캔), `document` 60배/`window.document` 680배(긴 `get` 사슬), `location.href` 20배(호출마다 예외를 던지고 잡음).
 **고침**: toString 은 함수별로 결과를 보관, `document` 는 즉시 응답, 래핑된 Location 은 네이티브 판정에서 먼저 제외. 인라인 script 를 진짜 script 요소로 돌리면(`with` 제거) 루프가 1.3배가 되지만 e2e 13개가 깨진다
 (srcdoc 스크립트 순서, 스택의 부트스트랩 프레임, MutationObserver, currentScript) — 되돌렸고 ERRATA 잔여 행에 있다.
-**결과**: 위젯의 구간 합은 그대로(5.8–6.0 s)이고 판정도 그대로다 — 이 셋은 위젯이 뜨겁게 쓰는 경로가 아니었다. **재발 방지**: 멤브레인 경로를 건드릴 때 `page-globals.html` 류의 연산별 A/B 를 돌려 네이티브 대비 배수를 본다.
+plain 객체(리터럴·`Reflect`·VM 디스패치 표)의 멤버 읽기/쓰기/호출도 긴 길을 탔다 — 위젯 22 s 에 멤브레인 호출 1130만 번을 세어 보고 프로토타입이 `Object.prototype`/null 이면 빠른 길로 보냈다(610만 번, 멤브레인 시간 2.4 s → 1.6 s).
+**결과**: 위젯의 구간 합은 그대로(5.2–6.0 s)이고 판정도 그대로다 — 이 넷은 위젯 시간의 주된 몫이 아니었다. **재발 방지**: 멤브레인 경로를 건드릴 때 `page-globals.html` 류의 연산별 A/B 를 돌려 네이티브 대비 배수를 본다.
 `get`/`set`/`call` 에 검사를 더하면 모든 재작성 코드가 그 비용을 낸다. 위젯 프로파일은 `gd-profile.js`(CPU), `gd-evalstats.js`(eval 계측) 로 본다.

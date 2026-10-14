@@ -1530,13 +1530,25 @@
     // page's Proxy. (A renderer this busy fails Cloudflare's interactive check natively too: ERRATA 85.)
     // Taken now: the page can replace `Array.isArray`, and one answering true would send every base down this path.
     const nativeIsArray = Array.isArray, nativeIsView = ArrayBuffer.isView;
-    function fastDataBase(base) {
-      return typeof base === 'string' || typeof base === 'function' || nativeIsArray(base) || nativeIsView(base);
+    // A plain object — a literal, `Object.create(null)`, a built-in namespace such as `Reflect` or `Math`: a VM's dispatch
+    // tables and the code that reads `Reflect.apply` are all of these (the widget made 11 M membrane calls in 22 s, 1.5 M of them
+    // `Reflect.apply`, most of the rest member calls on such tables, none of them fast). Its [[Prototype]] is this realm's
+    // Object.prototype or null; the facades that stand for another window are Proxies over `{}` and are told apart by the
+    // table they are in. A window, a document, a Location, an element has a prototype of its own.
+    const BOOT_OBJECT_PROTO = Object.prototype, nativeGetPrototypeOf = Object.getPrototypeOf;
+    function isPlainData(base) {
+      if (typeof base !== 'object' || base === null) return false;
+      let proto;
+      try { proto = nativeGetPrototypeOf(base); } catch { return false; }
+      return (proto === BOOT_OBJECT_PROTO || proto === null) && !crossWindowTargets.has(base);
     }
-    // Writes: into a VM's own arrays only (a string is immutable and a function's own data is the page's: both keep the
-    // full path).
+    function fastDataBase(base) {
+      return typeof base === 'string' || typeof base === 'function' || nativeIsArray(base) || nativeIsView(base) || isPlainData(base);
+    }
+    // Writes: into a VM's own arrays, typed arrays and plain objects (a string is immutable and a function's own data is the
+    // page's: both keep the full path).
     function fastSet(base, prop) {
-      return base != null && (nativeIsArray(base) || nativeIsView(base))
+      return base != null && (nativeIsArray(base) || nativeIsView(base) || isPlainData(base))
         && (typeof prop === 'number' || (typeof prop === 'string' && prop !== 'location' && prop !== 'name'));
     }
     function fastDataKey(prop) {

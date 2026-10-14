@@ -85,7 +85,7 @@ strings below are closed as *not doing*.
    its widget read about themselves (`.lean-ctx/gd-survey.js`, then `gd-survey-diff.js`), and ERRATA 100–101 from the payload itself, read with a debugger
    breakpoint on `XMLHttpRequest.send` (`gd-pause.js`; `gd-table-diff.js`, `gd-fields.js`). With those fixed the VM's property table matches native in every group and the
    outcome is unchanged; stack positions are not part of the verdict (`gd-shift.js`). What is left: the time profile (the VM's phases run 3–4× slower; the membrane's
-   self time is more than the challenge script's — per-operation loops found three paths 20–680× native and the inline-script `with` at 132×, ERRATA 103 and
+   self time is more than the challenge script's — per-operation loops found four paths 20–680× native (toString, `document`, `location.href`, plain-object members) and the inline-script `with` at 132×, ERRATA 103 and
    its residual rows; fixing the three left the spans and the outcome unchanged) and what the server sees that the page cannot — HTTP/3 is the other open road. Left: HTTP/3 (a default Chrome gets a challenge that
    passes by itself; with QUIC off native gets the checkbox the proxy gets) or further measurements of what the widget reads, one
    hypothesis per run (harness: `gd-phase.js native|proxied`, `CPU=`/`LAT=` to slow native; each run is ~1 minute; space them).

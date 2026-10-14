@@ -1214,3 +1214,40 @@ test('cookie writes: only the newest unacknowledged writes ride a request, in or
   assert.equal(carried[0], 'c68=68', 'the oldest of the newest 32');
   assert.equal(carried[31], 'c99=99', 'the write just made is always carried');
 });
+
+// ---------------------------------------------------------------------------
+// fastDataBase / fastSet — what `get`/`set` answer without the long path.
+// ---------------------------------------------------------------------------
+
+test('fastDataBase: plain data objects are fast; windows, facades, instances and Dates are not', () => {
+  const crossWindowTargets = new WeakMap();
+  const { fastDataBase, fastSet, fastDataKey } = load(slice(
+    '    const nativeIsArray = Array.isArray, nativeIsView = ArrayBuffer.isView;',
+    '    function get(base, prop) {'
+  ), ['fastDataBase', 'fastSet', 'fastDataKey'], { crossWindowTargets });
+  // a literal, a dictionary, a namespace, an array, a typed array, a string, a function
+  for (const v of [{}, { a: 1 }, Object.create(null), Reflect, Math, JSON, [], new Uint8Array(2), 'abc', () => 1]) {
+    assert.equal(fastDataBase(v), true, String(Object.prototype.toString.call(v)));
+  }
+  // not plain: a class instance, a Date, a Map, an element-like prototype chain, null and undefined
+  class Widget {}
+  for (const v of [new Widget(), new Date(), new Map(), Object.create({ inherited: 1 }), null, undefined, 5, true]) {
+    assert.equal(fastDataBase(v), false, String(Object.prototype.toString.call(v)));
+  }
+  // an object the membrane keeps as the stand-in for another window (a Proxy over `{}`) keeps the long path
+  const facade = new Proxy({}, {});
+  crossWindowTargets.set(facade, {});
+  assert.equal(fastDataBase(facade), false);
+  // a Proxy whose prototype trap throws is not asked twice: the long path decides
+  assert.equal(fastDataBase(new Proxy({}, { getPrototypeOf() { throw new Error('trap'); } })), false);
+  // writes: the same objects, never the names the long path answers for
+  assert.equal(fastSet({}, 'x'), true);
+  assert.equal(fastSet({}, 'location'), false);
+  assert.equal(fastSet({}, 'name'), false);
+  assert.equal(fastSet(new Date(), 'x'), false);
+  assert.equal(fastSet(facade, 'x'), false);
+  assert.equal(fastSet(null, 'x'), false);
+  // the names `get` answers for any base keep the long path
+  for (const k of ['constructor', 'prepareStackTrace', 'postMessage', 'location']) assert.equal(fastDataKey(k), false, k);
+  assert.equal(fastDataKey('document'), true);
+});
