@@ -12,6 +12,14 @@
   }
   // A function masked as `function key() { [native code] }` is called `key` — the minifier leaves "", "n", "value", and a
   // `bind` says "bound key". An accessor is `get key` / `set key`. (A symbol key keeps its name.)
+  // A query the membrane makes for itself runs the browser's own method, never `node.querySelectorAll`: that is the page's to
+  // wrap, and a wrapper saw every selector the membrane scans with ("iframe,frame", "script", "style", the URL attributes) — a canary
+  // for DOM scans recorded them; a page that returns an empty list from it hides frames and scripts from the membrane's sweep.
+  function qsaOf(node, selector) {
+    const t = node && node.nodeType;
+    const f = t === 9 ? Native.querySelectorAll : t === 11 ? Native.fragmentQuerySelectorAll : t === 1 ? Native.elementQuerySelectorAll : null;
+    return typeof f === 'function' ? Reflect.apply(f, node, [selector]) : [];
+  }
   function nameLike(fn, name) {
     if (typeof fn !== 'function' || fn.name === name) return;
     try { Object.defineProperty(fn, 'name', { value: name, configurable: true }); } catch {}
@@ -70,11 +78,35 @@
       return !!(d && d.enumerable);
     } catch { return false; }
   }
+  // A replacement made here and put into another realm's object — a contained child frame's window or prototype — is a function of
+  // THIS realm: its [[Prototype]] is our Function.prototype, so the frame's `fetch instanceof Function` reads false, and a probe of
+  // the frame's clean realm (make an iframe, ask which of its functions are its own) finds the membrane's: some hundred of them
+  // were "foreign" where natively every one is the frame's. It takes the prototype of the native it replaces — the frame's own
+  // Function.prototype. A function that is ALSO ours (the page window's own property, shared with the frame) stays as it is.
+  // While a frame is being contained its Function.prototype is known; otherwise the replaced native's is the realm's.
+  let realmInstallFP = null;
+  function sameRealmAs(value, replaced, key) {
+    try {
+      if (Object.getPrototypeOf(value) !== Function.prototype) return;
+      const own = Object.getOwnPropertyDescriptor(root, key);
+      if (own && own.value === value) return;
+      let wanted = Object.getPrototypeOf(replaced);
+      // an interface constructor's [[Prototype]] is its parent interface's (XMLHttpRequest → XMLHttpRequestEventTarget): the
+      // replaced native's own answers — unless that is already ours, then the frame's Function.prototype stands
+      if ((!wanted || wanted === Function.prototype) && realmInstallFP) wanted = realmInstallFP;
+      if (!wanted || wanted === Function.prototype) return;
+      Object.setPrototypeOf(value, wanted);
+    } catch {}
+  }
   function define(obj, key, value) {
     try {
       const prev = typeof value === 'function' ? Object.getOwnPropertyDescriptor(obj, key) : null;
+      // what the property was before: its own native, or the one it inherits and is about to shadow (navigator.sendBeacon)
+      let inherited = null;
+      if (typeof value === 'function' && !prev) { try { inherited = Reflect.get(obj, key); } catch {} }
       Object.defineProperty(obj, key, { value, enumerable: nativeEnumerability(obj, key), configurable: false, writable: true });
-      if (prev && typeof prev.value === 'function') lengthLike(value, prev.value);
+      if (prev && typeof prev.value === 'function') { lengthLike(value, prev.value); sameRealmAs(value, prev.value, key); }
+      else if (typeof inherited === 'function' && inherited !== value) { lengthLike(value, inherited); sameRealmAs(value, inherited, key); }
       // A native method's `.name` equals its property key. Ours came out of the
       // minifier as "" or a one-letter token, so `setTimeout.name`,
       // `window.addEventListener.name` and `navigator.serviceWorker.register

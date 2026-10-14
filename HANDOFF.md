@@ -15,7 +15,7 @@ strings below are closed as *not doing*.
 ## State
 
 - Branch `main`; everything up to `a0c81d5` (the scope rule and the isolation audit, items 93) is on `origin/main`. The commit carrying this
-  version of the file (items 94–99) is local until the user says to push.
+  version of the file (items 94–102) is local until the user says to push.
 - Commits of this arc: `8c178a7` HLS / loop cap / `innerHTML` / TLS refresh (ERRATA 58–61) · `8565ccf` five divergences found
   chasing the challenge (62–65) · `3ae6135` **Stack Overflow's Cloudflare challenge fixed** — the ClientHello lacked Chrome's
   `trust_anchors` extension — plus `Sec-Fetch-*` for frames and sub-requests (66–67) · `f8bb56a` element-load `Sec-Fetch-*`,
@@ -57,7 +57,7 @@ strings below are closed as *not doing*.
   overflow on the unsealed build. The 13 sites were A/B-ed against the previous commit's build again: the same errors on both
   sides (CNN and Stack Overflow vary run to run on both), and a lookup/eval/`Function`/member/storage micro-benchmark is within
   its run-to-run spread (free-name lookups 292–319 ms before, 297–319 ms after).
-- Detail lives in [ERRATA.md](ERRATA.md) items 62–99 and its Residuals table, the trap-notebook entries
+- Detail lives in [ERRATA.md](ERRATA.md) items 62–102 and its Residuals table, the trap-notebook entries
   (`.ai/trap-notebook/rewriter.md`: `동적-코드-전역-this`, `chrome-hello-trust-anchors`, `coep-워커-부트스트랩`,
   `lol-html-원시-속성값`, `trusted-script-는-코드`, `워커-훅-자리`, `캔버스-파블링-결정적`, `prepare-stack-trace-페이지-뷰`,
   `프렐류드-스크립트-잔존`, `referrer-한-곳에서`, `클라이언트-힌트-협상`, `전송-실패는-네트워크-오류`, `대조군은-quic`, `바쁜-렌더러는-진다`, `아이콘-링크-경주`, `교차-출처-프레임-권한`, `헬퍼-이름-응답`, `with-안의-이름`, `인라인-가드`, `같은-소스-재리라이트`, `부모-파사드로-부팅한-자식`, `창-자기-접근자`, `strict-eval-with-안`, `봉인된-표`, `워커-전역-이름`, `교차-출처-창-자식-이름`), and the verification table in [PHASE2_STATUS.md](PHASE2_STATUS.md). No gate
@@ -82,7 +82,10 @@ strings below are closed as *not doing*.
    `GET /` is 403). Ruled out by measurement: speed, latency, cookies, forms, input events, canvas/audio masking, the Trusted Types
    and `pushState` probes (matched; ERRATA 96), Resource Timing initiator types, the window attributes the challenge redefines (97), the
    cross-origin refusal sentences (98) and the shape of the built-ins (99) — the last three from a 273-key survey of what the challenge page and
-   its widget read about themselves (`.lean-ctx/gd-survey.js`, then `gd-survey-diff.js`). Left: HTTP/3 (a default Chrome gets a challenge that
+   its widget read about themselves (`.lean-ctx/gd-survey.js`, then `gd-survey-diff.js`), and ERRATA 100–101 from the payload itself, read with a debugger
+   breakpoint on `XMLHttpRequest.send` (`gd-pause.js`; `gd-table-diff.js`, `gd-fields.js`). With those fixed the VM's property table matches native in every group and the
+   outcome is unchanged; stack positions are not part of the verdict (`gd-shift.js`). What is left: the time profile (the VM's phases run 2–4× slower; the membrane's
+   self time is more than the challenge script's) and what the server sees that the page cannot — HTTP/3 is the other open road. Left: HTTP/3 (a default Chrome gets a challenge that
    passes by itself; with QUIC off native gets the checkbox the proxy gets) or further measurements of what the widget reads, one
    hypothesis per run (harness: `gd-phase.js native|proxied`, `CPU=`/`LAT=` to slow native; each run is ~1 minute; space them).
    Measured Resource Timing gaps worth fixing on their own (an XHR is `fetch`, a `<link>` load is `img`, a cross-origin frame's
@@ -107,7 +110,7 @@ strings below are closed as *not doing*.
    interstitial; passing it is not ours to do (scope). Five loads after the fixes: the worker runs, no exception in any target.
    Lab tool: `.lean-ctx/reddit-targets.js` (lists targets, exceptions with stack and source around the position).
 
-Done this round and closed: items 71–99 (see State); before that the meta-CSP lone `'` (69), the inline-script stack (70),
+Done this round and closed: items 71–102 (see State); before that the meta-CSP lone `'` (69), the inline-script stack (70),
 Reddit (parity re-checked with a fresh unautomated Chrome — same wall natively).
 
 ## How to run things

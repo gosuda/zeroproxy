@@ -479,7 +479,7 @@
           if (routed) return new URL(routed);
         } catch {}
         try {
-          const frames = document.querySelectorAll('iframe,frame');
+          const frames = qsaOf(document, 'iframe,frame');
           for (const el of frames) {
             try {
               const cw = nativeFrameWindow(el);
@@ -827,7 +827,10 @@
     // 사슬 한 칸 위로. 못 읽거나 자기 자신이면 제자리에 머문다(끝에 도달한 것).
     function climbCrossWindow(targetWindow, prop, fallback) {
       try {
-        const next = targetWindow[prop];
+        // the browser's own answer (the real ancestor), never the child's hooked accessor: a child with a membrane of its own
+        // answers with ITS stand-in for its parent, and wrapping that again handed the page a window that is not its own —
+        // `iframe.contentWindow.parent === window` and `.top === window` read false.
+        const next = winGet(targetWindow, prop);
         if (next && next !== targetWindow) return windowHandleFor(next, 'ancestor');
       } catch {}
       return fallback;
@@ -1611,7 +1614,17 @@
         if (prop === 'name') return virtualWindowNameFor(crossWindowTargets.get(base) || (isScopeProxy(base) ? root : base));
         if (prop === 'frameElement') return virtualFrameElement(crossWindowTargets.get(base) || (isScopeProxy(base) ? root : base));
         const dynamic = dynamicGlobal(prop);
-        if (dynamic) return dynamic;
+        if (dynamic) {
+          // Another realm's `eval` and `Function` compile in THAT realm. Code a child frame runs — `(0, eval)("Object")`,
+          // `Function("return this")()` inside it — asked here for `eval` and was handed OURS: it ran in the parent's realm
+          // (natively `(0, eval)("Object") === Object` in the frame; here it was the parent's Object, and `Function("return
+          // this")()` the parent's window). The child's own facades (made when it was contained) answer for it.
+          if ((prop === 'eval' || prop === 'Function') && typeof prop === 'string') {
+            const owner = crossWindowTargets.get(base) || (isScopeProxy(base) ? root : base);
+            if (owner !== root) { try { const own = Reflect.get(owner, prop); if (typeof own === 'function') return own; } catch {} }
+          }
+          return dynamic;
+        }
       }
       if (base === document && prop === 'defaultView') return scope;
       if (prop === 'postMessage') {

@@ -24,7 +24,7 @@
   // 읽어서 둘 다 풀리지만, 출력이 다르면 **같은 리소스에 캐시 키가 둘** 생기고
   // `alreadyMapped` 단축이 어긋난다. 그래서 남는 다섯 글자를 마저 인코딩한다.
   function encodeURLParam(s) {
-    return encodeURIComponent(String(s)).replace(/[!'()*]/g, c => '%' + c.charCodeAt(0).toString(16).toUpperCase());
+    return nativeEncodeURIComponent(String(s)).replace(/[!'()*]/g, c => '%' + c.charCodeAt(0).toString(16).toUpperCase());
   }
   function subresourceProxyPath(absolute) {
     const s = String(absolute || '');
@@ -60,13 +60,13 @@
     const s = String(absolute || '');
     if (!/^https?:/i.test(s)) return '';
     let u = proxyOrigin + ZP.apiPath('sync-fetch')
-      + '?rid=' + encodeURIComponent('sr' + ZP.randomId())
-      + '&u=' + encodeURIComponent(s)
+      + '?rid=' + nativeEncodeURIComponent('sr' + ZP.randomId())
+      + '&u=' + nativeEncodeURIComponent(s)
       + '&m=GET'
-      + '&tab=' + encodeURIComponent((boot && boot.tabId) || '')
-      + '&entry=' + encodeURIComponent(activeEntryId || '');
-    if (kind) u += '&kind=' + encodeURIComponent(kind);
-    if (cors) u += '&cors=' + encodeURIComponent(cors);
+      + '&tab=' + nativeEncodeURIComponent((boot && boot.tabId) || '')
+      + '&entry=' + nativeEncodeURIComponent(activeEntryId || '');
+    if (kind) u += '&kind=' + nativeEncodeURIComponent(kind);
+    if (cors) u += '&cors=' + nativeEncodeURIComponent(cors);
     return u;
   }
   // 릴레이 URL 이 요청하는 타깃 ('' = 우리 릴레이 URL 이 아니다). 릴레이 URL 은 만들 때마다 요청 id 가
@@ -271,7 +271,7 @@
   // 스윕이 같은 오리진 자식 문서까지 훑는 것이 이들을 만나는 유일한 지점이다.
   function sweepSWLessFrames(w) {
     let frames = null;
-    try { frames = (w || window).document.querySelectorAll('iframe,frame'); } catch { return; }
+    try { frames = qsaOf((w || window).document, 'iframe,frame'); } catch { return; }
     if (!frames) return;
     for (const f of frames) {
       let d = null;
@@ -282,7 +282,7 @@
   }
   function sweepSWLessDoc(doc) {
     let els = null;
-    try { els = doc.querySelectorAll('img[src],img[srcset],source[src],source[srcset],video[poster],input[src],embed[src],link[rel~="stylesheet"][href],meta[http-equiv]'); } catch { return; }
+    try { els = qsaOf(doc, 'img[src],img[srcset],source[src],source[srcset],video[poster],input[src],embed[src],link[rel~="stylesheet"][href],meta[http-equiv]'); } catch { return; }
     for (const el of els) {
       // Meta refresh inside a SW-less frame must re-arm on the via-URL too —
       // a raw target URL here is a same-origin refresh request the server 403s.
@@ -370,7 +370,7 @@
     if (/^(?:javascript|mailto|data|blob|about|vbscript):/i.test(s)) return s;
     if (!/^https?:/i.test(s)) return s;
     const prefix = (typeof ZP !== 'undefined' && ZP && ZP.CONTROL_PREFIX) || '/zp/';
-    return proxyOrigin + prefix + '?via=' + encodeURIComponent(s);
+    return proxyOrigin + prefix + '?via=' + nativeEncodeURIComponent(s);
   }
   // 2026-06-06 backstop: NAVER / GitHub / other SPA sites use code paths
   // outside `installURLProp` setter + `setAttribute` wrap to put raw target
@@ -477,7 +477,7 @@
   function scanNavigationBackstop(root) {
     if (!root || !root.querySelectorAll) return;
     try {
-      root.querySelectorAll(
+      qsaOf(root,
         'a[href], area[href], form[action], input[formaction], button[formaction]'
       ).forEach(applyNavigationBackstop);
     } catch {}
@@ -500,7 +500,7 @@
     //     (조용한 폴백) — 큰 시트 하나가 통째로 원본으로 남을 수 있다.
     // 실제로 naver 장바구니의 GNB 시트(39 KB, 원본 URL 25개)가 이 상태로
     // 남아 스프라이트가 `img-src 'self'` 에 걸렸다.
-    try { root.querySelectorAll('style').forEach(enforceStyleElementCSS); } catch {}
+    try { qsaOf(root, 'style').forEach(enforceStyleElementCSS); } catch {}
   }
   function installNavigationBackstop(w, docEl) {
     if (!w || !docEl) return;
@@ -543,7 +543,7 @@
       } catch {}
     };
     const sweepStyles = () => {
-      try { docEl.querySelectorAll('style').forEach(enforceStyleElementCSS); } catch {}
+      try { qsaOf(docEl, 'style').forEach(enforceStyleElementCSS); } catch {}
       sweepSWLessFrames(w);
       sweepPendingFrames();
       // meta 는 파싱 도중에 늦게 나타날 수 있다 — 같은 청소 주기에 얹는다.

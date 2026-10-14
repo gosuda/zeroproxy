@@ -63,6 +63,7 @@
       navigatorSendBeacon: navGet(() => w.navigator && w.navigator.sendBeacon && w.navigator.sendBeacon.bind(w.navigator)),
       serviceWorker: navGet(() => w.navigator && w.navigator.serviceWorker),
       createElement: d.createElement.bind(d),
+      documentCreateElement: w.Document.prototype.createElement,
       createElementNS: d.createElementNS && d.createElementNS.bind(d),
       appendChild: w.Node.prototype.appendChild,
       insertBefore: w.Node.prototype.insertBefore,

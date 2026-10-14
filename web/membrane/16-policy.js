@@ -181,8 +181,8 @@
     if (node.nodeType === 3 && node.parentNode) enforceStyleElementCSS(node.parentNode);
     if (node.nodeType === 1) enforceElementPolicy(node);
     if (node.querySelectorAll) {
-      node.querySelectorAll('script,link,iframe,frame,a,area,form,input,button,img,source,audio,video,track,object,embed,svg a,svg image,svg use').forEach(enforceElementPolicy);
-      node.querySelectorAll('style').forEach(enforceStyleElementCSS);
+      qsaOf(node, 'script,link,iframe,frame,a,area,form,input,button,img,source,audio,video,track,object,embed,svg a,svg image,svg use').forEach(enforceElementPolicy);
+      qsaOf(node, 'style').forEach(enforceStyleElementCSS);
     }
   }
   function enforceElementPolicy(el) {

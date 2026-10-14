@@ -323,7 +323,7 @@
       if (!dest.self) {
         // The body rides the same pending submission; only the window that
         // loads `?zp_submit=` differs, and this document stays.
-        const sent = proxyAbsoluteURL(ZP.makeSharePath(share.encrypted) + '?zp_submit=' + encodeURIComponent(reply.submitId) + shareFragmentForKey(share.key));
+        const sent = proxyAbsoluteURL(ZP.makeSharePath(share.encrypted) + '?zp_submit=' + nativeEncodeURIComponent(reply.submitId) + shareFragmentForKey(share.key));
         if (dest.open) { openNavigation(sent, dest.open); return; }
         rememberFrameRoute(share.encrypted, target.href);
         const w = dest.frame ? nativeFrameWindow(dest.frame) : dest.win;
@@ -336,7 +336,7 @@
       activeProxyFragment = shareFragmentForKey(share.key);
       // 같은 이유로 절대 URL 이어야 한다 — `<base href>` 가 있으면 폼 제출이
       // 프록시 밖으로 나간다.
-      const submittedPath = proxyAbsoluteURL(activeProxyPath + '?zp_submit=' + encodeURIComponent(reply.submitId) + activeProxyFragment);
+      const submittedPath = proxyAbsoluteURL(activeProxyPath + '?zp_submit=' + nativeEncodeURIComponent(reply.submitId) + activeProxyFragment);
       if (Native.locationAssign) Native.locationAssign(submittedPath);
       else location.href = submittedPath;
     }

@@ -60,9 +60,9 @@
     // Inside a srcdoc frame the worker cannot tell whose request it is (the frame cannot bind itself): say so — for
     // the markup walked for one, and for what a script in one creates later (only a srcdoc realm's boot config
     // carries `proxyOrigin`).
-    const whose = (srcdocMarkupDepth || (boot && boot.proxyOrigin)) ? '&tab=' + encodeURIComponent(boot.tabId || '') + '&entry=' + encodeURIComponent(activeEntryId || '') : '';
-    if (kind === 'module') return proxyOrigin + ZP.apiPath('script') + '?u=' + encodeURIComponent(target) + '&kind=module' + whose;
-    return proxyOrigin + ZP.apiPath('script') + '?kind=' + encodeURIComponent(kind) + '&u=' + encodeURIComponent(target) + '&ref=' + encodeURIComponent(virtualURL.href) + whose;
+    const whose = (srcdocMarkupDepth || (boot && boot.proxyOrigin)) ? '&tab=' + nativeEncodeURIComponent(boot.tabId || '') + '&entry=' + nativeEncodeURIComponent(activeEntryId || '') : '';
+    if (kind === 'module') return proxyOrigin + ZP.apiPath('script') + '?u=' + nativeEncodeURIComponent(target) + '&kind=module' + whose;
+    return proxyOrigin + ZP.apiPath('script') + '?kind=' + nativeEncodeURIComponent(kind) + '&u=' + nativeEncodeURIComponent(target) + '&ref=' + nativeEncodeURIComponent(virtualURL.href) + whose;
   }
   // 프록시 script URL 의 kind 를 요소의 **지금** `type` 에 맞춘다.
   //
@@ -969,11 +969,11 @@
   function appendWrittenHTML(doc, html) {
     const target = doc.body || doc.documentElement;
     if (!target) return;
-    const template = doc.createElement('template');
+    const template = Reflect.apply(Native.documentCreateElement, doc, ['template']);
     if (Native.elementInnerHTML && Native.elementInnerHTML.set) Native.elementInnerHTML.set.call(template, html);
     else template.innerHTML = html;
     const frag = template.content || template;
-    const scripts = frag.querySelectorAll ? Array.prototype.slice.call(frag.querySelectorAll('script')) : [];
+    const scripts = Array.prototype.slice.call(qsaOf(frag, 'script'));
     target.appendChild(frag);
     for (const stale of scripts) {
       // Ordering across these is preserved by the pipeline itself: each body is
@@ -1045,12 +1045,12 @@
       walkRoot = parserDoc;
     } else {
       parserDoc = Native.createHTMLDocument ? Native.createHTMLDocument('') : document.implementation.createHTMLDocument('');
-      container = parserDoc.createElement('template');
+      container = Reflect.apply(Native.documentCreateElement, parserDoc, ['template']);
       if (Native.elementInnerHTML && Native.elementInnerHTML.set) Native.elementInnerHTML.set.call(container, html);
       else container.innerHTML = html;
       walkRoot = container.content || container;
     }
-    const walker = parserDoc.createTreeWalker(walkRoot, NodeFilter.SHOW_ELEMENT);
+    const walker = Reflect.apply(Native.createTreeWalker, parserDoc, [walkRoot, NodeFilter.SHOW_ELEMENT]);
     const nodes = [];
     for (let node = walker.nextNode(); node; node = walker.nextNode()) nodes.push(node);
     // R6 literal parity for page-side HTML ingestion. The server htmltx stashes
@@ -1276,5 +1276,5 @@
   function syncBaseElement(node) {
     if (!node) return;
     if (node.localName === 'base' && Native.getAttribute.call(node, 'href')) updateVirtualBase(Native.getAttribute.call(node, 'href'));
-    if (node.querySelectorAll) node.querySelectorAll('base[href]').forEach(el => updateVirtualBase(Native.getAttribute.call(el, 'href')));
+    if (node.querySelectorAll) qsaOf(node, 'base[href]').forEach(el => updateVirtualBase(Native.getAttribute.call(el, 'href')));
   }

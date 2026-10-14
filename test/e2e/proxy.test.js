@@ -286,6 +286,80 @@ function crossOriginDenialProbe(src) {
   document.body.appendChild(f);
 }
 
+// What a page's canary on the DOM query methods sees while the page does ordinary DOM work. The membrane's own scans (iframes, scripts,
+// styles, the URL attributes) must not run through the page's wrapper: natively only the page's own calls arrive.
+function domScanProbe() {
+  var seen = {}, busy = false;
+  var rec = function (key, args) {
+    if (busy) return; busy = true;
+    try { var k = key + '(' + (typeof args[0] === 'string' ? JSON.stringify(args[0].slice(0, 70)) : typeof args[0]) + ')'; seen[k] = (seen[k] || 0) + 1; } finally { busy = false; }
+  };
+  var wrap = function (proto, name, label) {
+    var f = proto[name];
+    if (typeof f !== 'function') return;
+    proto[name] = function () { rec(label + '.' + name, arguments); return Reflect.apply(f, this, arguments); };
+  };
+  ['querySelectorAll', 'querySelector', 'getElementsByTagName'].forEach(function (n) { wrap(Element.prototype, n, 'Element'); wrap(Document.prototype, n, 'Document'); wrap(DocumentFragment.prototype, n, 'Fragment'); });
+  wrap(Document.prototype, 'createTreeWalker', 'Document');
+  var realEncode = window.encodeURIComponent;
+  window.encodeURIComponent = function (s) { rec('window.encodeURIComponent', [typeof s === 'string' && s.indexOf('http') === 0 ? 'URL' : 'x']); return realEncode.apply(this, arguments); };
+  var root = document.getElementById('root');
+  root.innerHTML = '<a href="/x">a</a><form action="/f"><input formaction="/g"><button formaction="/h">b</button></form><style>a{color:red}</style><img src="/i.png" srcset="/i2.png 2x">';
+  var f = document.createElement('iframe'); f.src = '/xdomscan-child'; root.appendChild(f);
+  var s = document.createElement('script'); s.textContent = 'window.__ranInline = 1'; root.appendChild(s);
+  var l = document.createElement('link'); l.rel = 'stylesheet'; l.href = '/xdomscan.css'; document.head.appendChild(l);
+  document.body.insertAdjacentHTML('beforeend', '<span data-x="1"></span>');
+  root.querySelectorAll('a'); // the page's own call
+  setTimeout(function () { window.__xdomscan = { calls: seen }; }, 1500);
+}
+// The realm of a frame the page makes: its own built-ins, answered to code running inside it, and nothing of ours in its reflection.
+function childRealmProbe() {
+  var out = {};
+  var t = function (k, fn) { try { out[k] = String(fn()); } catch (e) { out[k] = '!' + e.name; } };
+  var ifr = document.createElement('iframe'); document.body.appendChild(ifr);
+  var W = ifr.contentWindow;
+  ['Object', 'alert', 'Number', 'parseInt', 'setTimeout', 'Array'].forEach(function (n) {
+    t('eval(' + n + ') === frame.' + n, function () { return (0, W.eval)(n) === W[n]; });
+    t('eval(' + n + ') === own ' + n, function () { return (0, W.eval)(n) === window[n]; });
+    t('frame.' + n + ' === own ' + n, function () { return W[n] === window[n]; });
+  });
+  t('frame.Function("return this")() === frame', function () { return W.Function('return this')() === W; });
+  t('eval(globalThis) === frame', function () { return (0, W.eval)('globalThis') === W; });
+  ['fetch', 'addEventListener', 'getComputedStyle', 'postMessage', 'XMLHttpRequest', 'WebSocket', 'EventSource', 'Function', 'eval'].forEach(function (n) {
+    t(n + ' is the frame\'s function', function () { var f = W[n]; return (f instanceof W.Function) + '/' + (Object.getPrototypeOf(f) === W.Function.prototype) + '/' + (f !== window[n]); });
+  });
+  t('navigator.sendBeacon is the frame\'s', function () { return W.navigator.sendBeacon instanceof W.Function; });
+  t('instances of the frame\'s XMLHttpRequest', function () { var x = new W.XMLHttpRequest(); return (x instanceof W.XMLHttpRequest) + '/' + typeof x.open + '/' + W.XMLHttpRequest.UNSENT + W.XMLHttpRequest.DONE; });
+  t('reflection of the frame\'s window shows no helper', function () {
+    return [W.Object.getOwnPropertyNames(W), W.Reflect.ownKeys(W), Object.keys(W.Object.getOwnPropertyDescriptors(W))].map(function (a) { return a.filter(function (k) { return /zp|ZP/.test(String(k)); }).length; }).join(',');
+  });
+  window.__xrealm = out;
+}
+// Built-ins as a page can read them: constants and statics of the classes the membrane replaces, names and lengths of its stand-ins.
+function builtinShapeProbe() {
+  var out = {};
+  var t = function (k, fn) { try { var v = fn(); out[k] = typeof v === 'function' ? 'fn' : String(v); } catch (e) { out[k] = '!' + e.name; } };
+  t('EventSource.CONNECTING/OPEN/CLOSED', function () { return [EventSource.CONNECTING, EventSource.OPEN, EventSource.CLOSED].join(','); });
+  t('RTCPeerConnection.generateCertificate', function () { return typeof RTCPeerConnection.generateCertificate; });
+  t('globalThis.Proxy.revocable', function () { var r = globalThis.Proxy.revocable({ a: 1 }, {}); var v = r.proxy.a; r.revoke(); return v; });
+  t('BroadcastChannel.prototype.constructor.name', function () { return BroadcastChannel.prototype.constructor.name; });
+  t('RTCPeerConnection.name', function () { return RTCPeerConnection.name; });
+  t('webkitRTCPeerConnection === RTCPeerConnection', function () { return window.webkitRTCPeerConnection === RTCPeerConnection; });
+  t('webkitURL.name', function () { return webkitURL.name; });
+  t('Function.prototype.toString.name', function () { return Function.prototype.toString.name; });
+  t('__defineGetter__.name', function () { return Object.prototype.__defineGetter__.name; });
+  t('URL.canParse.length', function () { return URL.canParse.length; });
+  t('WebSocket.prototype.close.length', function () { return WebSocket.prototype.close.length; });
+  t('fetch.length', function () { return fetch.length; });
+  t('history.pushState.length', function () { return history.pushState.length; });
+  t('addEventListener.length', function () { return addEventListener.length; });
+  t('setTimeout.name', function () { return setTimeout.name; });
+  t('Document.cookie getter name', function () { return Object.getOwnPropertyDescriptor(Document.prototype, 'cookie').get.name; });
+  t('HTMLIFrameElement.contentWindow getter name', function () { return Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, 'contentWindow').get.name; });
+  t('frameElement getter name', function () { return Object.getOwnPropertyDescriptor(window, 'frameElement').get.name; });
+  window.__xshape = out;
+}
+
 function createTargetServer(requests, pendingResponses) {
   // tag → the names of the cookies the request that carried it had (see /xck-echo)
   const xckSeen = new Map();
@@ -2686,6 +2760,26 @@ function createTargetServer(requests, pendingResponses) {
         d.close();
         addEventListener('message', function (e) { if (e.data && e.data.childOut) window.__xdeval.child = e.data.childOut; });
       <\/script></body>`);
+      return;
+    }
+    if (url.pathname === '/xdomscan' || url.pathname === '/xdomscan-child' || url.pathname === '/xdomscan.css') {
+      // A page wraps the DOM query methods, then does ordinary DOM work (domScanProbe).
+      if (url.pathname === '/xdomscan.css') { res.writeHead(200, { 'Content-Type': 'text/css', 'Cache-Control': 'no-store' }); res.end('a{color:blue}'); return; }
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      if (url.pathname === '/xdomscan-child') { res.end('<!doctype html><title>child</title><body>child</body>'); return; }
+      res.end('<!doctype html><title>domscan</title><body><div id="root"></div><script>(' + domScanProbe.toString() + ')()<\/script></body>');
+      return;
+    }
+    if (url.pathname === '/xrealm') {
+      // The realm of a frame the page makes (childRealmProbe).
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end('<!doctype html><title>realm</title><body><script>(' + childRealmProbe.toString() + ')()<\/script></body>');
+      return;
+    }
+    if (url.pathname === '/xshape') {
+      // Constants, statics, names and lengths of the stand-ins (builtinShapeProbe).
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end('<!doctype html><title>shape</title><body><script>(' + builtinShapeProbe.toString() + ')()<\/script></body>');
       return;
     }
     if (url.pathname === '/xredef') {
@@ -8170,6 +8264,91 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     assert.match(direct['push other origin'], /^SecurityError: Failed to execute 'pushState' on 'History': A history state object with URL 'URL' cannot be created in a document with origin 'ORIGIN' and URL 'URL'/);
     assert.match(direct['push user info'], /^SecurityError/, 'natively user info is a different URL');
     assert.match(direct['push relative'], /^ok:/);
+    assert.deepEqual(proxied, direct);
+  });
+
+  // The membrane scans the DOM for itself — frames, scripts, styles, the URL attributes — and used to do it through the page's
+  // `node.querySelectorAll`, `createTreeWalker`, `encodeURIComponent`. A wrapper on those (a canary Cloudflare's challenge sets, and
+  // a page that wants to hide a frame or script from the sweep) saw every selector and every target URL and tab id the membrane
+  // used. Natively only the page's own calls arrive.
+  await t.test('the membrane\'s own DOM scans do not run through the page\'s DOM methods (matches native)', async () => {
+    const targetBase = `http://${targetHost}:${targetPort}`;
+    const collect = async p => {
+      try {
+        await p.waitForFunction(() => window.__xdomscan, { timeout: 60000, polling: 100 });
+        return await p.evaluate(() => window.__xdomscan.calls);
+      } finally {
+        await p.close();
+      }
+    };
+    const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    let direct;
+    try {
+      const p = await directBrowser.newPage();
+      await p.goto(`${targetBase}/xdomscan`, { waitUntil: 'domcontentloaded' });
+      direct = await collect(p);
+    } finally {
+      await directBrowser.close();
+    }
+    const proxied = await collect(await openProxiedPage(`${targetBase}/xdomscan`));
+    fs.writeFileSync(path.join(artifacts, 'dom-scan-canary.json'), JSON.stringify({ direct, proxied }, null, 2));
+    assert.deepEqual(proxied, direct, 'a call the page did not make reached its wrapper');
+  });
+
+  // A frame's own realm: code running inside it (`(0, eval)("Object")`, `Function("return this")()`) finds the frame's built-ins, its
+  // replaced functions are functions of the frame (`instanceof` its Function), the classes it shares are its own constructors, and
+  // the frame's own reflection lists no helper of ours. The frame's code used to be handed OUR eval and Function — it ran in the
+  // parent's realm — and every function the membrane put into the frame was a function of the parent's.
+  await t.test('a frame the page makes has a realm of its own (matches native)', async () => {
+    const targetBase = `http://${targetHost}:${targetPort}`;
+    const collect = async p => {
+      try {
+        await p.waitForFunction(() => window.__xrealm, { timeout: 60000, polling: 100 });
+        return await p.evaluate(() => window.__xrealm);
+      } finally {
+        await p.close();
+      }
+    };
+    const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    let direct;
+    try {
+      const p = await directBrowser.newPage();
+      await p.goto(`${targetBase}/xrealm`, { waitUntil: 'domcontentloaded' });
+      direct = await collect(p);
+    } finally {
+      await directBrowser.close();
+    }
+    const proxied = await collect(await openProxiedPage(`${targetBase}/xrealm`));
+    fs.writeFileSync(path.join(artifacts, 'child-realm.json'), JSON.stringify({ direct, proxied }, null, 2));
+    assert.equal(direct['eval(Object) === frame.Object'], 'true');
+    assert.equal(direct['eval(Object) === own Object'], 'false');
+    assert.deepEqual(proxied, direct);
+  });
+
+  // What a page can read about the classes and functions the membrane stands in for.
+  await t.test('replaced built-ins carry the constants, statics, names and lengths of the natives (matches native)', async () => {
+    const targetBase = `http://${targetHost}:${targetPort}`;
+    const collect = async p => {
+      try {
+        await p.waitForFunction(() => window.__xshape, { timeout: 60000, polling: 100 });
+        return await p.evaluate(() => window.__xshape);
+      } finally {
+        await p.close();
+      }
+    };
+    const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    let direct;
+    try {
+      const p = await directBrowser.newPage();
+      await p.goto(`${targetBase}/xshape`, { waitUntil: 'domcontentloaded' });
+      direct = await collect(p);
+    } finally {
+      await directBrowser.close();
+    }
+    const proxied = await collect(await openProxiedPage(`${targetBase}/xshape`));
+    fs.writeFileSync(path.join(artifacts, 'builtin-shape.json'), JSON.stringify({ direct, proxied }, null, 2));
+    assert.equal(direct['EventSource.CONNECTING/OPEN/CLOSED'], '0,1,2');
+    assert.equal(direct['globalThis.Proxy.revocable'], '1');
     assert.deepEqual(proxied, direct);
   });
 

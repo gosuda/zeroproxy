@@ -353,7 +353,8 @@
       define(w, 'URL', ZPURL);
       // `webkitURL` is a live alias of the native constructor — unwrapped it
       // resolves relative input against the REAL document base (proxy URL).
-      if (w.webkitURL) define(w, 'webkitURL', ZPURL);
+      // the same function under a second name (`define` would rename it: URL.name read "webkitURL")
+      if (w.webkitURL) { try { Object.defineProperty(w, 'webkitURL', { value: ZPURL, enumerable: nativeEnumerability(w, 'webkitURL'), configurable: false, writable: true }); } catch {} }
     }
     // ★컨테인먼트가 자식 창에 먼저 심은 래퍼 위에 자식 prelude 가 다시 심으면
     // 이중 래핑이다 — SharedWorker 는 workerBootstrapURL 이 두 번 적용돼
@@ -762,6 +763,17 @@
         if (!policy || !policy.features().includes(name)) return false;
         return !policy.allowsFeature(name);
       } catch { return false; }
+    }
+    // `screen.isExtended` is false where 'window-management' is not allowed — a cross-origin frame natively (measured in the Turnstile
+    // widget on a two-monitor machine: false; through the proxy, where every frame is the embedder's origin underneath: true).
+    if (w.Screen && w.Screen.prototype) {
+      const ied = Object.getOwnPropertyDescriptor(w.Screen.prototype, 'isExtended');
+      if (ied && typeof ied.get === 'function') {
+        replaceNativeAccessor(w.Screen.prototype, 'isExtended', function () {
+          const v = Reflect.apply(ied.get, this, []);
+          return v && featureDeniedHere('window-management') ? false : v;
+        });
+      }
     }
     // D7: Notification permission state must be per-target-origin. Wrap the
     // static permission getter; granting is still gated by the native browser

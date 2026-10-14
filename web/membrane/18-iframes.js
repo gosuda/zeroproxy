@@ -232,9 +232,9 @@
     if ((node.nodeName || '').toUpperCase() === 'SCRIPT') prepareScriptElement(node);
     if (/^(IFRAME|FRAME)$/.test(node.nodeName || '')) sanitizeFrameSandbox(node);
     if (node.querySelectorAll) {
-      const scripts = node.querySelectorAll('script');
+      const scripts = qsaOf(node, 'script');
       for (let i = 0; i < scripts.length; i++) prepareScriptElement(scripts[i]);
-      const frames = node.querySelectorAll('iframe,frame');
+      const frames = qsaOf(node, 'iframe,frame');
       for (let i = 0; i < frames.length; i++) sanitizeFrameSandbox(frames[i]);
     }
   }
@@ -250,7 +250,7 @@
       frames.push(node);
     }
     if (node.querySelectorAll) {
-      const descendants = node.querySelectorAll('iframe,frame');
+      const descendants = qsaOf(node, 'iframe,frame');
       for (let i = 0; i < descendants.length; i++) {
         if (!frames) frames = [];
         frames.push(descendants[i]);
@@ -466,7 +466,7 @@
       } catch {}
       // Also hook image load events for instant snap after image arrival.
       try {
-        const imgs = doc.querySelectorAll('img');
+        const imgs = qsaOf(doc, 'img');
         for (let i = 0; i < imgs.length; i++) {
           try { imgs[i].addEventListener('load', apply, { once: true }); } catch {}
         }

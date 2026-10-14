@@ -35,6 +35,13 @@
     } catch { return false; }
   }
   function installNetworkContainment(w) {
+    const prevFP = realmInstallFP;
+    try {
+      realmInstallFP = w && w !== root && w.Function ? w.Function.prototype : null;
+      return installNetworkContainmentBody(w);
+    } finally { realmInstallFP = prevFP; }
+  }
+  function installNetworkContainmentBody(w) {
     if (!w) return;
     try { if (w[networkContainmentMarker]) return; } catch {}
     if (w !== root && (ownsMembrane(w) || bootingProxiedDocument(w))) return;
@@ -424,12 +431,13 @@
     installGetterMasking(w);
     installStorageFacades(w);
     installPostMessageHooks(w);
-    if (root.XMLHttpRequest && !define(w, 'XMLHttpRequest', root.XMLHttpRequest)) throw normalizedError('SecurityError');
-    if (root.EventSource && !define(w, 'EventSource', root.EventSource)) throw normalizedError('SecurityError');
-    if (root.WebSocket && !define(w, 'WebSocket', root.WebSocket)) throw normalizedError('SecurityError');
-    if (root.WebSocketStream && !define(w, 'WebSocketStream', root.WebSocketStream)) throw normalizedError('SecurityError');
+    if (root.XMLHttpRequest && !define(w, 'XMLHttpRequest', realmCopyOf(w, root.XMLHttpRequest))) throw normalizedError('SecurityError');
+    if (root.EventSource && !define(w, 'EventSource', realmCopyOf(w, root.EventSource))) throw normalizedError('SecurityError');
+    if (root.WebSocket && !define(w, 'WebSocket', realmCopyOf(w, root.WebSocket))) throw normalizedError('SecurityError');
+    if (root.WebSocketStream && !define(w, 'WebSocketStream', realmCopyOf(w, root.WebSocketStream))) throw normalizedError('SecurityError');
     if (w.navigator && navigator.sendBeacon) define(w.navigator, 'sendBeacon', navigator.sendBeacon.bind(navigator));
     installDOMHooks(w);
+    hideInternalNamesInRealm(w);
     installStealthMembrane(w);
     installTargetServiceWorkerBlocker(w);
     installIframeHooks(w);
@@ -438,6 +446,60 @@
     installAudioAntiFingerprinting(w);
     installNavigationBackstop(w, w.document && w.document.documentElement);
     try { Object.defineProperty(w, networkContainmentMarker, { value: true, enumerable: false, configurable: false }); } catch {}
+  }
+
+  // The membrane's helpers live on a contained frame's global object (its rewritten code finds them there), so the frame's own
+  // reflection — `Object.getOwnPropertyNames(window)`, `Reflect.ownKeys`, `Object.getOwnPropertyDescriptors`, run through the frame's
+  // OWN built-ins, which are not the patched ones of the page's realm — listed some fifty `__zp_*` names that no window has. The
+  // frame's reflection answers for its global as the page's realm's does.
+  // A class of ours that a contained frame shares (XMLHttpRequest, WebSocket, EventSource): the SAME constructor in both realms is a
+  // function of the page's realm in the frame too — the frame's `XMLHttpRequest instanceof Function` reads false, and `frame.
+  // XMLHttpRequest === XMLHttpRequest` true where natively every realm has its own. The frame gets a constructor of its own over the
+  // same prototype (so instances are interchangeable), with the frame's Function.prototype and the class's statics.
+  function realmCopyOf(w, rootCtor) {
+    try {
+      const name = rootCtor.name;
+      // a constructor must be an ordinary function: a method (`{ [name]() {} }`) has no [[Construct]]
+      const copy = function () {
+        if (!new.target) throw new TypeError("Failed to construct '" + name + "': Please use the 'new' operator, this DOM object constructor cannot be called as a function.");
+        return Reflect.construct(rootCtor, arguments, new.target);
+      };
+      Object.defineProperty(copy, 'prototype', { value: rootCtor.prototype, writable: false, enumerable: false, configurable: false });
+      for (const key of Reflect.ownKeys(rootCtor)) {
+        if (key === 'prototype' || key === 'length' || key === 'name') continue;
+        const d = Object.getOwnPropertyDescriptor(rootCtor, key);
+        try { Object.defineProperty(copy, key, d); } catch {}
+      }
+      lengthLike(copy, rootCtor);
+      nameLike(copy, name);
+      maskNativeFunction(copy, name);
+      // the frame's own native class sits where the copy goes: its [[Prototype]] (an interface constructor's is its parent interface's)
+      let native = null;
+      try { const d = Object.getOwnPropertyDescriptor(w, name); native = d && typeof d.value === 'function' ? d.value : null; } catch {}
+      const fp = (native && Object.getPrototypeOf(native)) || (w.Function && w.Function.prototype);
+      if (fp) Object.setPrototypeOf(copy, fp);
+      return copy;
+    } catch { return rootCtor; }
+  }
+  function hideInternalNamesInRealm(w) {
+    const isHidden = k => typeof k === 'string' && ZP_HIDDEN_RE.test(k);
+    const isGlobal = t => { try { return t === w || (!!t && typeof t === 'object' && t.window === t); } catch { return false; } };
+    const patch = (owner, name, filter) => {
+      try {
+        if (!owner || typeof owner[name] !== 'function') return;
+        const orig = owner[name];
+        const patched = ({ [name](target) { const out = Reflect.apply(orig, this, arguments); return isGlobal(target) ? filter(out) : out; } })[name];
+        lengthLike(patched, orig);
+        maskNativeFunction(patched, name);
+        try { Object.setPrototypeOf(patched, Object.getPrototypeOf(orig)); } catch {}
+        Object.defineProperty(owner, name, { value: patched, writable: true, enumerable: false, configurable: true });
+      } catch {}
+    };
+    const names = out => (Array.isArray(out) ? out.filter(k => !isHidden(k)) : out);
+    const descriptors = out => { if (out && typeof out === 'object') for (const k of Reflect.ownKeys(out)) if (isHidden(k)) delete out[k]; return out; };
+    patch(w.Object, 'getOwnPropertyNames', names);
+    patch(w.Reflect, 'ownKeys', names);
+    patch(w.Object, 'getOwnPropertyDescriptors', descriptors);
   }
 
   function installBlockers(w, strict = false) {

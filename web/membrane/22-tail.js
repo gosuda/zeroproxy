@@ -54,6 +54,8 @@
     try { Object.defineProperty(fn, 'name', { value: orig.name, configurable: true }); } catch {}
     try { Object.defineProperty(fn, 'length', { value: orig.length, configurable: true }); } catch {}
     maskNativeFunction(fn, key);
+    // a method of a contained frame's prototype is that frame's: its [[Prototype]] is the frame's Function.prototype
+    try { const fp = Object.getPrototypeOf(orig); if (fp && Object.getPrototypeOf(fn) !== fp) Object.setPrototypeOf(fn, fp); } catch {}
     try { Object.defineProperty(proto, key, { value: fn, writable: d.writable, enumerable: d.enumerable, configurable: d.configurable }); } catch {}
   }
 

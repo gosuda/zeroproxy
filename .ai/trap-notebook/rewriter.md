@@ -1881,3 +1881,20 @@ ERRATA 91). **재발 방지**: 창 속성을 멤브레인이 대신 답하게 �
 (`__zp_realBC`) **네이티브 생성자의 이름이 바뀐다** — `BroadcastChannel.prototype.constructor.name` 이 내부 이름을 드러냈다. 별칭·보관은 `Object.defineProperty` 로 직접. 또 대체
 클래스는 네이티브의 상수·정적 멤버를 가져야 한다(`EventSource.CLOSED`), `bind` 는 함수의 own 멤버를 안 옮긴다(`globalThis.Proxy.revocable`). 이름은 가린 소스 문구를 따르고
 (`maskNativeFunction`/`maskAccessorFn`) 길이는 네이티브를 따른다(`lengthLike`). 모양 전수 A/B: `ab-shape.js`(4275 키).
+
+## <a id="프레임-realm-과-내부-호출"></a>프레임은 자기 realm 을 갖는다, 멤브레인의 내부 호출은 페이지가 못 바꾸는 네이티브로 (2026-10-14, ERRATA 100–101)
+
+**증상**: 페이지가 만든 about:blank 프레임 안에서 `(0, eval)("Object") === Object` 가 false(네이티브 true), `Function("return this")()` 가 부모 창, 프레임에 들어간
+함수 ~100개가 부모 realm 의 함수(`instanceof` 프레임의 Function 이 false), XHR·WebSocket 이 부모 창의 생성자 그대로, 프레임의 `W.Object.getOwnPropertyNames(W)` 에 `__zp_*` 오십여 개.
+그리고 멤브레인의 DOM 스캔(`querySelectorAll('iframe,frame')` 등)과 `encodeURIComponent` 가 **페이지가 바꿀 수 있는 메서드**를 거쳐, 챌린지의 카나리가 셀렉터 목록을 받았다.
+**원인**: 부모 `get` 의 `dynamicGlobal` 이 어느 창에든 부모의 eval/Function 을 줬고, 프레임에 심는 함수는 부모 realm 에서 만들어져 `[[Prototype]]` 이 부모의 Function.prototype 이었다.
+**고침**: 프레임의 eval/Function 은 프레임 것을 돌려준다, `define` 은 프레임을 가두는 동안 그 프레임의 Function.prototype 을 안다(`realmInstallFP`), 공유 클래스는 프레임용 생성자
+(`realmCopyOf`), 프레임의 리플렉션은 헬퍼 이름을 숨긴다, 내부 스캔은 부팅 때 잡아 둔 네이티브(`qsaOf`, `nativeEncodeURIComponent`). **재발 방지**: 멤브레인 코드에서 `node.querySelectorAll(`·
+`createElement(`·`encodeURIComponent(` 같은 **전역·프로토타입 메서드를 직접 부르지 않는다** — 부팅 때 잡은 것을 쓴다. 프레임에 함수를 심는 새 경로는 A/B(`page-childrealm.html`)로 `instanceof`.
+
+## <a id="챌린지-페이로드-읽기"></a>챌린지가 보내는 값은 디버거로 읽는다 — 페이지에 심으면 차단된다 (2026-10-14)
+
+Cloudflare 챌린지 요청 본문은 압축·난독화돼 있고, 페이지에 계측(`Function.prototype.toString` 교체 하나만으로도)을 넣으면 **네이티브가 차단 페이지**를 받는다. 대신 `XMLHttpRequest.prototype.send` 에
+CDP 브레이크포인트(`Debugger.setBreakpointOnFunctionCall`)를 걸고 멈출 때 호출 프레임의 스코프에서 JSON 직렬화되는 객체를 읽는다(`.lean-ctx/gd-pause.js`, 페이지에 코드 없음). 같은 도구로 네이티브와
+프록시를 떠서 `gd-table-diff.js`(속성 이름 표), `gd-fields.js`(필드·프로브별 시간 범위)로 비교한다. 이 방법으로 ERRATA 100·101 의 원인을 찾았다. 표가 네이티브와 같아진 뒤에도 판정은 그대로였다 — 남은 것은
+타이밍(VM 구간 2–4× 느림)과 서버 쪽 요인이다. 스택 줄·열 위치는 아니다(네이티브에서 스크립트를 30줄·500열 밀어도 통과).

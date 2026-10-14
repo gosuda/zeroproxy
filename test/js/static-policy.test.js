@@ -479,9 +479,9 @@ test('?url= 빌더가 Rust 와 바이트 단위로 같다', () => {
   const fixture = JSON.parse(fs.readFileSync('crates/zp-shared/testdata/proxy_url_cases.json', 'utf8'));
   for (const c of fixture.cases) {
     const build = new Function(
-      'proxyOrigin', 'ZP', 'boot',
+      'proxyOrigin', 'ZP', 'boot', 'nativeEncodeURIComponent',
       grab('encodeURLParam') + '\n' + grab('subresourceProxyPath') + '\nreturn subresourceProxyPath;'
-    )('http://proxy.example', { apiPath: (n) => '/zp/api/' + n }, c.tab ? { tabId: c.tab } : null);
+    )('http://proxy.example', { apiPath: (n) => '/zp/api/' + n }, c.tab ? { tabId: c.tab } : null, encodeURIComponent);
     assert.equal(build(c.url), c.want, c.id + ': 페이지 realm 출력이 Rust 와 다르다');
   }
 });
@@ -616,7 +616,7 @@ test('교차창 프록시의 parent 를 타고 올라가면 top 에 닿는다', 
   // 실제 구현을 뜯어 실행한다 — 창 3단을 흉내 내고 그 위에서 CMP 루프를 돈다.
   const src = rt.slice(start, end);
   const make = new Function('root', 'scope', 'postMessageWrapperFor', 'crossWindowProxyCache', 'crossWindowTargets',
-    'definePropertiesMasked', 'windowHandleFor', 'get', 'ZP_HIDDEN_RE', 'MEMBER_DANGER',
+    'definePropertiesMasked', 'windowHandleFor', 'get', 'ZP_HIDDEN_RE', 'MEMBER_DANGER', 'winGet',
     src + '\nreturn safeCrossWindow;');
 
   const top = { name: 'top' };
@@ -632,7 +632,7 @@ test('교차창 프록시의 parent 를 타고 올라가면 top 에 닿는다', 
   // windows the policy's answer IS this stand-in, so late-bind it.
   let safeRef = null;
   const safeCrossWindow = make(leaf, scope, () => () => {}, new WeakMap(), new WeakMap(), Object.defineProperties,
-    w => safeRef(w), () => {}, /^__zp_/, new Set());
+    w => safeRef(w), () => {}, /^__zp_/, new Set(), (w, n) => w[n]);
   safeRef = safeCrossWindow;
 
   const windowTop = safeCrossWindow(top);

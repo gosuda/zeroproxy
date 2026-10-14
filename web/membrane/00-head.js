@@ -2,6 +2,9 @@
   'use strict';
   const root = window;
   const nativeOwnKeys = Reflect.ownKeys;
+  // The browser's own, taken before any page script ran. A bare `encodeURIComponent` would be the page's: it can wrap the global
+  // and so sees every URL, tab id and entry id the membrane encodes (a canary on it recorded them).
+  const nativeEncodeURIComponent = encodeURIComponent;
   // The membrane's own tables. A table is a real Map/Set/WeakMap/WeakSet whose prototype is a copy of the built-in's,
   // taken before any page script ran: `table.get(key)` finds the copy's native method, never `Map.prototype.get` as the
   // page has since left it. A page that wraps those methods otherwise sees every key, value and result the membrane keeps

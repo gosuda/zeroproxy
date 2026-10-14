@@ -298,6 +298,7 @@
       Object.defineProperty(wrapped, 'name', { value: 'postMessage', configurable: true });
     } catch {}
     maskNativeFunction(wrapped, 'postMessage');
+    try { const fp = Object.getPrototypeOf(originalPm); if (fp && Object.getPrototypeOf(wrapped) !== fp) Object.setPrototypeOf(wrapped, fp); } catch {}
     postMessageWrappers.set(target, wrapped);
     return wrapped;
   }

@@ -197,18 +197,18 @@
         try {
           const rid = 'sx' + ZP.randomId();
           let u = proxyOrigin + ZP.apiPath('sync-fetch')
-            + '?rid=' + encodeURIComponent(rid)
-            + '&u=' + encodeURIComponent(xhr._url)
-            + '&m=' + encodeURIComponent(xhr._method)
-            + '&tab=' + encodeURIComponent(boot.tabId || '')
-            + '&entry=' + encodeURIComponent(activeEntryId || '');
-          for (const kv of xhr._headers) u += '&h=' + encodeURIComponent(kv[0] + ':' + kv[1]);
+            + '?rid=' + nativeEncodeURIComponent(rid)
+            + '&u=' + nativeEncodeURIComponent(xhr._url)
+            + '&m=' + nativeEncodeURIComponent(xhr._method)
+            + '&tab=' + nativeEncodeURIComponent(boot.tabId || '')
+            + '&entry=' + nativeEncodeURIComponent(activeEntryId || '');
+          for (const kv of xhr._headers) u += '&h=' + nativeEncodeURIComponent(kv[0] + ':' + kv[1]);
           if (xhr.withCredentials) u += '&wc=1';
           // A cookie written a moment ago may not have reached the worker: this call cannot wait for it.
           const unsent = pendingCookieWrites();
           if (unsent.length) {
-            u += '&dv=' + encodeURIComponent(virtualURL.href);
-            for (const w of unsent) u += '&ck=' + encodeURIComponent(JSON.stringify(w));
+            u += '&dv=' + nativeEncodeURIComponent(virtualURL.href);
+            for (const w of unsent) u += '&ck=' + nativeEncodeURIComponent(JSON.stringify(w));
           }
 
           const nx = new Native.XMLHttpRequest();
