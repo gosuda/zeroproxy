@@ -30,6 +30,11 @@
       if (windowMethodBindings.has(prop)) return windowMethodBindings.get(prop);
       const bound = fn.bind(target);
       maskNativeFunction(bound, prop);
+      // a bound function carries none of the function's own members: `globalThis.Proxy.revocable` was undefined (immer calls it)
+      for (const key of Reflect.ownKeys(fn)) {
+        if (key === 'length' || key === 'name' || key === 'prototype') continue;
+        try { Object.defineProperty(bound, key, Object.getOwnPropertyDescriptor(fn, key)); } catch {}
+      }
       windowMethodBindings.set(prop, bound);
       return bound;
     }
@@ -627,23 +632,22 @@
         };
         const replace = function replace(value) { navigate(value, true); };
         maskNativeFunction(replace, 'replace');
-        const deny = () => { throw normalizedError('SecurityError'); };
+        const deny = () => { throw crossOriginDenied('refuse', undefined, 'Location'); };
+        const denyRead = prop => { throw crossOriginDenied('read a named property', prop, 'Location'); };
         const hrefAccessor = () => {
-          const g = function () { return deny(); };
           const s = function (v) { navigate(v, false); };
-          toStringMap.set(g, nativeAccessorSource('get', 'href'));
-          toStringMap.set(s, nativeAccessorSource('set', 'href'));
-          return { get: g, set: s, enumerable: true, configurable: true };
+          maskAccessorFn(s, 'set', 'href');
+          return { get: undefined, set: s, enumerable: false, configurable: true };
         };
         // Names measured on a Chrome cross-origin Location: href, replace, then.
         restricted = new Proxy(Object.create(null), {
           get(_target, prop) {
             if (prop === 'replace') return replace;
-            if (prop === 'then' || typeof prop === 'symbol') return undefined;
-            throw normalizedError('SecurityError');
+            if (prop === 'then' || CROSS_ORIGIN_SYMBOLS.includes(prop)) return undefined;
+            return denyRead(prop);
           },
           set(_target, prop, value) {
-            if (prop !== 'href') throw normalizedError('SecurityError');
+            if (prop !== 'href') throw crossOriginDenied('set a named property', prop, 'Location');
             navigate(value, false);
             return true;
           },
@@ -655,7 +659,7 @@
             if (prop === 'then' || prop === Symbol.toStringTag || prop === Symbol.hasInstance || prop === Symbol.isConcatSpreadable) {
               return { value: undefined, writable: false, enumerable: false, configurable: true };
             }
-            return deny();
+            return denyRead(prop);
           },
           deleteProperty: deny,
           defineProperty: deny,
@@ -1033,10 +1037,29 @@
       if (hint === 'ancestor' || (hint === undefined && isAncestorWindow(win))) return sameOriginAncestor(win);
       return win;
     }
-    function crossOriginDenied(verb, prop) {
-      const name = typeof prop === 'symbol' ? 'Symbol(' + (prop.description || '') + ')' : String(prop);
+    // The browser's sentences, word for word (measured on Chrome 154, a window and a Location of another origin). A read names
+    // the property — an index by its number, a symbol not at all — and says "from"; a write says "on"; every other refusal
+    // (in, delete, define, setPrototypeOf, preventExtensions) is only the closing sentence. Ours said "on 'Window'" for all of
+    // them, "Failed to check a named property…" for 'in', and "Blocked by ZeroProxy policy" for every Location.
+    const INDEX_NAME_RE = /^(?:0|[1-9]\d*)$/;
+    function crossOriginDenied(verb, prop, iface) {
+      const face = iface || 'Window';
+      const indexed = typeof prop === 'string' && INDEX_NAME_RE.test(prop);
+      // a symbol is named by its description in brackets — except the one the engine looks up itself when it converts the
+      // window to a primitive (Symbol.toPrimitive), and a symbol without a description: those name nothing
+      const nameText = typeof prop === 'symbol'
+        ? (prop === Symbol.toPrimitive || !prop.description ? '' : " '[" + prop.description + "]'")
+        : " '" + String(prop) + "'";
+      let lead = '';
+      if (verb === 'read a named property' || (verb === 'check a named property' && indexed)) {
+        lead = indexed ? 'Failed to read an indexed property [' + prop + "] from '" + face + "': "
+          : 'Failed to read a named property' + nameText + " from '" + face + "': ";
+      } else if (verb === 'set a named property') {
+        lead = indexed ? 'Failed to set an indexed property [' + prop + "] on '" + face + "': "
+          : 'Failed to set a named property' + nameText + " on '" + face + "': ";
+      }
       try {
-        return new Native.DOMException('Failed to ' + verb + " '" + name + "' on 'Window': Blocked a frame with origin \"" + displayOrigin(securityOrigin()) + '" from accessing a cross-origin frame.', 'SecurityError');
+        return new Native.DOMException(lead + 'Blocked a frame with origin "' + displayOrigin(securityOrigin()) + '" from accessing a cross-origin frame.', 'SecurityError');
       } catch { return normalizedError('SecurityError'); }
     }
     // close / focus / blur: one stable function per window, as natively.
@@ -1086,9 +1109,9 @@
       };
       const accessor = (name, setter) => {
         const g = function () { return read(name); };
-        toStringMap.set(g, nativeAccessorSource('get', name));
+        maskAccessorFn(g, 'get', name);
         let s;
-        if (setter) { s = function (v) { setter(v); }; toStringMap.set(s, nativeAccessorSource('set', name)); }
+        if (setter) { s = function (v) { setter(v); }; maskAccessorFn(s, 'set', name); }
         return { get: g, set: s, enumerable: false, configurable: true };
       };
       const denyMutation = (verb, prop) => { throw crossOriginDenied(verb, prop); };
@@ -1204,8 +1227,8 @@
       if (this !== root && !isScopeProxy(this)) throw new TypeError('Illegal invocation');
       setVirtualLocation(value);
     };
-    toStringMap.set(scopeLocationGet, nativeAccessorSource('get', 'location'));
-    toStringMap.set(scopeLocationSet, nativeAccessorSource('set', 'location'));
+    maskAccessorFn(scopeLocationGet, 'get', 'location');
+    maskAccessorFn(scopeLocationSet, 'set', 'location');
     defineMasked(scopeTarget, 'location', {
       get: scopeLocationGet, set: scopeLocationSet,
       enumerable: nativeWindowLocation.enumerable,
@@ -1229,6 +1252,34 @@
       if (!own || !own.configurable || !(own.get || own.set)) return false;
       const boot = bootOwnAccessors.get(prop);
       return !boot || boot.get !== own.get || boot.set !== own.set;
+    }
+    // The window attributes the membrane answers for itself — the frame it sits in, its parent, its opener, its name — are
+    // the PAGE's to redefine, as any property of its own window is: `Object.defineProperty(window, 'frameElement', { get })`
+    // (Cloudflare's challenge does exactly that, then reads it back), a getter for `parent`, an assignment `window.self = x`
+    // (a [Replaceable] attribute becomes a plain data property). The page's definition answers, and its descriptor reads
+    // back as it wrote it. Before this the membrane answered from its own state whatever the page had done — the redefinition
+    // "succeeded" and was never seen. The page's getter runs with the facade as `this`, never the real window.
+    const PAGE_DEFINABLE = newSet(['self', 'frames', 'parent', 'opener', 'frameElement', 'name', 'navigation', 'history']);
+    const bootDefinable = newMap();
+    for (const name of ['self', 'frames', 'parent', 'opener', 'frameElement', 'name', 'navigation', 'history']) {
+      const d = Reflect.getOwnPropertyDescriptor(root, name);
+      if (d) bootDefinable.set(name, d);
+    }
+    const NO_PAGE_DEFINITION = {};
+    function pageDefined(prop) {
+      const boot = bootDefinable.get(prop);
+      if (!boot) return null;
+      const own = Reflect.getOwnPropertyDescriptor(root, prop);
+      if (!own) return null;
+      if (own.get === boot.get && own.set === boot.set && own.value === boot.value) return null;
+      // only the setter changed: reads are still the browser's own getter, which the membrane answers for
+      if (own.get && own.get === boot.get) return null;
+      return own;
+    }
+    function pageDefinedMember(prop) {
+      const own = pageDefined(prop);
+      if (!own) return NO_PAGE_DEFINITION;
+      return own.get ? Reflect.apply(own.get, scope, []) : own.value;
     }
     // R1: classic script 의 top-level let/const/class 는 **스크립트를 넘어
     // 지속되는 공유 전역 렉시컬 환경**에 산다. 각 스크립트가 별도 indirect
@@ -1258,6 +1309,7 @@
     function scopeGet(prop, hide) {
       if (prop === Symbol.unscopables) return undefined;
       if (hide && typeof prop === 'string' && ZP_HIDDEN_RE.test(prop)) return undefined;
+      if (typeof prop === 'string' && PAGE_DEFINABLE.has(prop)) { const v = pageDefinedMember(prop); if (v !== NO_PAGE_DEFINITION) return v; }
       if (prop === 'window' || prop === 'self' || prop === 'globalThis' || prop === 'frames') return scope;
       if (prop === 'top' || prop === 'parent' || prop === 'opener') return virtualWindowProperty(root, prop);
       if (prop === 'frameElement') return virtualFrameElement(root);
@@ -1316,7 +1368,7 @@
       getOwnPropertyDescriptor(target, prop) {
         if (prop === 'location') return Reflect.getOwnPropertyDescriptor(target, prop);
         if (typeof prop === 'string' && ZP_HIDDEN_RE.test(prop)) return undefined;
-        if (typeof prop === 'string' && MEMBER_DANGER.has(prop)) {
+        if (typeof prop === 'string' && MEMBER_DANGER.has(prop) && !(PAGE_DEFINABLE.has(prop) && pageDefined(prop))) {
           // A property reported non-configurable must exist, with this very descriptor, on the proxy's target (Proxy
           // invariant). `window`, `document`, `top`… are [LegacyUnforgeable]: the report threw "trap reported
           // non-configurability" and `Object.keys(window)` — any enumeration of the window — threw with it.
@@ -1325,7 +1377,8 @@
           const native = Reflect.getOwnPropertyDescriptor(root, prop);
           const d = {
             get: membraneGetter(scope, prop),
-            set: membraneSetter(scope, prop),
+            // a read-only attribute (frameElement, history, top, window, document) has no setter natively
+            set: native && !native.set ? undefined : membraneSetter(scope, prop),
             enumerable: native ? native.enumerable : true,
             configurable: native ? native.configurable : false,
           };
@@ -1545,6 +1598,7 @@
           const le = zpLexGetEntry(prop);
           if (le) return zpLexRead(le, prop);
         }
+        if ((base === root || isScopeProxy(base)) && typeof prop === 'string' && PAGE_DEFINABLE.has(prop)) { const v = pageDefinedMember(prop); if (v !== NO_PAGE_DEFINITION) return v; }
         if (prop === 'window' || prop === 'self' || prop === 'globalThis' || prop === 'frames') return isScopeProxy(base) || base === root ? scope : base;
         if (prop === 'top' || prop === 'parent' || prop === 'opener') return virtualWindowProperty(crossWindowTargets.get(base) || (isScopeProxy(base) ? root : base), prop);
         if (prop === 'location') {
@@ -1733,12 +1787,14 @@
     // virtualized descriptor hands out instead of the real native accessor.
     function membraneGetter(base, prop) {
       const g = function () { return get(base, prop); };
-      toStringMap.set(g, nativeAccessorSource('get', prop));
+      Reflect.defineProperty(g, 'name', { value: 'get ' + String(prop), configurable: true });
+      maskAccessorFn(g, 'get', prop);
       return g;
     }
     function membraneSetter(base, prop) {
       const s = function (v) { set(base, prop, v); };
-      toStringMap.set(s, nativeAccessorSource('set', prop));
+      Reflect.defineProperty(s, 'name', { value: 'set ' + String(prop), configurable: true });
+      maskAccessorFn(s, 'set', prop);
       return s;
     }
     function getOwnPropertyDescriptor(base, prop) {
@@ -1755,11 +1811,12 @@
         if (prop === 'location' && (base === root || isScopeProxy(base))) {
           return Reflect.getOwnPropertyDescriptor(scopeTarget, prop);
         }
+        if ((base === root || isScopeProxy(base)) && PAGE_DEFINABLE.has(prop)) { const own = pageDefined(prop); if (own) return own; }
         const receiver = crossWindowTargets.get(base) || base;
         const native = Reflect.getOwnPropertyDescriptor(receiver, prop);
         return {
           get: membraneGetter(base, prop),
-          set: membraneSetter(base, prop),
+          set: native && !native.set ? undefined : membraneSetter(base, prop),
           enumerable: native ? native.enumerable : true,
           configurable: native ? native.configurable : false,
         };

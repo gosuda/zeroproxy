@@ -197,13 +197,13 @@
     const nativeToStringSources = newWeakMap();
     const origToString = Function.prototype.toString;
     try {
-      Object.defineProperty(Function.prototype, 'toString', {
-        value: function () {
-          const src = nativeToStringSources.get(this);
-          return origToString.call(src || this);
-        },
-        writable: true, configurable: true
-      });
+      const patchedToString = function () {
+        const src = nativeToStringSources.get(this);
+        return origToString.call(src || this);
+      };
+      Object.defineProperty(patchedToString, 'name', { value: 'toString', configurable: true });
+      Object.defineProperty(patchedToString, 'length', { value: origToString.length, configurable: true });
+      Object.defineProperty(Function.prototype, 'toString', { value: patchedToString, writable: true, configurable: true });
     } catch {}
     hideFrom(Object, 'getOwnPropertyNames');
     hideFrom(Object, 'keys');

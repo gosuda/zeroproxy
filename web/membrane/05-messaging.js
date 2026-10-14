@@ -274,6 +274,8 @@
     // origin pm 그대로. 단, mapped !== targetOrigin (virtual → real 변환됨)
     // 케이스만 wrap 통해 변환 + native call.
     const wrapped = function postMessage(message, targetOrigin, transfer) {
+      // the browser checks the argument count before anything else (WebIDL: `message` is required)
+      if (arguments.length < 1) throw new TypeError("Failed to execute 'postMessage' on 'Window': 1 argument required, but only 0 present.");
       // Two overloads: (message, targetOrigin, transfer) and (message, { targetOrigin,
       // transfer }) — the options form used to reach the browser as the string
       // "[object Object]" and throw a SyntaxError.

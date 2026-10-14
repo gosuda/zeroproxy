@@ -207,6 +207,85 @@ function miniTrueTypeFont() {
   return font;
 }
 
+// Probes serialized into a fixture page with Function.prototype.toString: real functions, nothing to escape. Each reports
+// what a page can observe as plain strings, so the native browser and the proxy can be compared key by key.
+// What a page that redefines its own window's accessors sees (Cloudflare's challenge puts a getter on frameElement,
+// not configurable, and reads it back).
+function windowRedefineProbe() {
+  var out = {};
+  var tryIt = function (k, fn) { try { var v = fn(); out[k] = (v && typeof v === 'object') ? JSON.stringify(v) : String(v); } catch (e) { out[k] = '!' + e.name; } };
+  // assigning a [Replaceable] attribute makes it a data property of the window
+  tryIt('assign self', function () { var w = window; w.self = 5; return String(w.self); });
+  tryIt('assign frames', function () { window.frames = 6; return String(window.frames); });
+  tryIt('assign parent', function () { window.parent = 7; return String(window.parent); });
+  tryIt('assign opener', function () { window.opener = 8; return String(window.opener); });
+  tryIt('own after assign', function () { return ['self', 'frames', 'parent', 'opener'].map(function (n) { var d = Object.getOwnPropertyDescriptor(window, n); return n + ':' + (d ? ('value' in d ? 'data=' + d.value : 'accessor') : 'none'); }).join(' '); });
+  ['frameElement', 'parent', 'opener', 'self', 'frames', 'name', 'navigation', 'history'].forEach(function (n) {
+    var bound = function () { return 'mine:' + n; }.bind(null);
+    tryIt(n + '.define', function () { Object.defineProperty(window, n, { get: bound, configurable: false, enumerable: true }); return 'returned'; });
+    tryIt(n + '.read', function () { return window[n]; });
+    tryIt(n + '.bare', function () { return (0, eval)(n); });
+    tryIt(n + '.desc', function () { var d = Object.getOwnPropertyDescriptor(window, n); return d ? { sameGet: d.get === bound, c: d.configurable, e: d.enumerable } : 'none'; });
+  });
+  // a getter that returns its receiver: the window, and never another one
+  Object.defineProperty(window, 'zzFixed', { get: function () { return this; }, configurable: false });
+  tryIt('fixed getter receiver', function () { return window.zzFixed === window; });
+  window.__xredef = out;
+}
+// The errors of another origin's window and Location (the parent page embeds a frame of 127.0.0.1).
+function crossOriginDenialProbe(src) {
+  var f = document.createElement('iframe');
+  f.src = src;
+  f.onload = function () {
+    var w = f.contentWindow, out = {};
+    var norm = function (s) { return String(s).split(location.origin).join('ORIGIN').slice(0, 240); };
+    var t = function (k, fn) { try { var v = fn(); out[k] = 'ok:' + norm(typeof v === 'object' && v ? '[object]' : String(v)); } catch (e) { out[k] = e.name + '|' + e.constructor.name + '|' + norm(e.message); } };
+    var flags = function (d) { return d && [('value' in d) ? 'v:' + typeof d.value : 'get:' + typeof d.get + '/set:' + typeof d.set, 'w:' + d.writable, 'e:' + d.enumerable, 'c:' + d.configurable].join(' '); };
+    ['document', 'foo', 'localStorage', 'eval', 'toString', 'constructor', 'then', '0', '5', 'length', 'closed'].forEach(function (n) { t('read ' + n, function () { return w[n]; }); });
+    ['href', 'origin', 'toString', 'foo', 'assign', 'replace', 'hash'].forEach(function (n) { t('location.' + n, function () { var v = w.location[n]; return typeof v === 'function' ? 'function' : v; }); });
+    t('String(location)', function () { return String(w.location); });
+    t('set foo', function () { w.foo = 1; return 'set'; });
+    t('set document', function () { w.document = 1; return 'set'; });
+    t('set 0', function () { w[0] = 1; return 'set'; });
+    t('set 5', function () { w[5] = 1; return 'set'; });
+    t('set location.foo', function () { w.location.foo = 1; return 'set'; });
+    t('set location.hash', function () { w.location.hash = 'x'; return 'set'; });
+    ['foo', 'document', 'postMessage', '0'].forEach(function (n) { t('in ' + n, function () { return n in w; }); });
+    t('in location.foo', function () { return 'foo' in w.location; });
+    t('in location.href', function () { return 'href' in w.location; });
+    t('keys', function () { return Object.keys(w); });
+    t('ownKeys', function () { return Reflect.ownKeys(w).map(String); });
+    t('location keys', function () { return Object.keys(w.location); });
+    t('location ownKeys', function () { return Reflect.ownKeys(w.location).map(String); });
+    t('gopd document', function () { return Object.getOwnPropertyDescriptor(w, 'document'); });
+    t('gopd 0', function () { return Object.getOwnPropertyDescriptor(w, 0); });
+    t('gopd location.foo', function () { return Object.getOwnPropertyDescriptor(w.location, 'foo'); });
+    ['postMessage', 'close', 'focus', 'blur', 'then', 'location', 'window', 'self', 'length', 'closed', 'top', 'parent', 'opener', 'frames'].forEach(function (n) { t('desc ' + n, function () { return flags(Object.getOwnPropertyDescriptor(w, n)); }); });
+    ['href', 'replace', 'then'].forEach(function (n) { t('desc location.' + n, function () { return flags(Object.getOwnPropertyDescriptor(w.location, n)); }); });
+    t('delete document', function () { return delete w.document; });
+    t('delete foo', function () { return delete w.foo; });
+    t('delete location.href', function () { return delete w.location.href; });
+    t('define x', function () { Object.defineProperty(w, 'x', { value: 1 }); return 'defined'; });
+    t('define location.x', function () { Object.defineProperty(w.location, 'x', { value: 1 }); return 'defined'; });
+    t('setPrototypeOf', function () { return Object.setPrototypeOf(w, {}); });
+    t('preventExtensions', function () { return Object.preventExtensions(w); });
+    t('Reflect.defineProperty', function () { return Reflect.defineProperty(w, 'x', { value: 1 }); });
+    t('Reflect.deleteProperty', function () { return Reflect.deleteProperty(w, 'foo'); });
+    t('JSON.stringify', function () { return JSON.stringify(w); });
+    t('w + ""', function () { return w + ''; });
+    ['asyncIterator', 'iterator', 'match', 'species', 'toPrimitive', 'toStringTag', 'unscopables', 'hasInstance', 'isConcatSpreadable'].forEach(function (n) {
+      t('read Symbol.' + n, function () { return w[Symbol[n]]; });
+      t('read location Symbol.' + n, function () { return w.location[Symbol[n]]; });
+    });
+    t('read Symbol(abc)', function () { return w[Symbol('abc')]; });
+    t('read Symbol()', function () { return w[Symbol()]; });
+    t('set Symbol.iterator', function () { w[Symbol.iterator] = 1; return 'set'; });
+    t('postMessage()', function () { return w.postMessage(); });
+    window.__xdeny = out;
+  };
+  document.body.appendChild(f);
+}
+
 function createTargetServer(requests, pendingResponses) {
   // tag → the names of the cookies the request that carried it had (see /xck-echo)
   const xckSeen = new Map();
@@ -2607,6 +2686,19 @@ function createTargetServer(requests, pendingResponses) {
         d.close();
         addEventListener('message', function (e) { if (e.data && e.data.childOut) window.__xdeval.child = e.data.childOut; });
       <\/script></body>`);
+      return;
+    }
+    if (url.pathname === '/xredef') {
+      // A page redefines its own window's accessors (windowRedefineProbe).
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end('<!doctype html><title>redefine</title><body><script>(' + windowRedefineProbe.toString() + ')()<\/script></body>');
+      return;
+    }
+    if (url.pathname === '/xdeny' || url.pathname === '/xdeny-child') {
+      // The errors a window and a Location of another origin raise (crossOriginDenialProbe).
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      if (url.pathname === '/xdeny-child') { res.end('<!doctype html><title>child</title><body>child</body>'); return; }
+      res.end('<!doctype html><title>deny</title><body><script>(' + crossOriginDenialProbe.toString() + ')(' + JSON.stringify('http://127.0.0.1:' + req.socket.localPort + '/xdeny-child') + ')<\/script></body>');
       return;
     }
     if (url.pathname === '/xhist') {
@@ -8078,6 +8170,69 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     assert.match(direct['push other origin'], /^SecurityError: Failed to execute 'pushState' on 'History': A history state object with URL 'URL' cannot be created in a document with origin 'ORIGIN' and URL 'URL'/);
     assert.match(direct['push user info'], /^SecurityError/, 'natively user info is a different URL');
     assert.match(direct['push relative'], /^ok:/);
+    assert.deepEqual(proxied, direct);
+  });
+
+  // The window's own attributes are the page's to redefine: a getter put on `frameElement`/`parent`/`opener`/`self`/`frames`/
+  // `name`/`navigation`/`history` answers, reads back as written, and an assignment to a replaceable one makes it a data
+  // property. The membrane answered from its own state whatever the page did (Cloudflare's challenge redefines frameElement
+  // and reads it back). Not compared: the message of a refused redefinition ("'defineProperty' on proxy…" — the window is a
+  // Proxy), which these probes do not trigger.
+  await t.test('a page may redefine and assign its own window attributes (matches native)', async () => {
+    const targetBase = `http://${targetHost}:${targetPort}`;
+    const collect = async p => {
+      try {
+        await p.waitForFunction(() => window.__xredef, { timeout: 60000, polling: 100 });
+        return await p.evaluate(() => window.__xredef);
+      } finally {
+        await p.close();
+      }
+    };
+    const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    let direct;
+    try {
+      const p = await directBrowser.newPage();
+      await p.goto(`${targetBase}/xredef`, { waitUntil: 'domcontentloaded' });
+      direct = await collect(p);
+    } finally {
+      await directBrowser.close();
+    }
+    const proxied = await collect(await openProxiedPage(`${targetBase}/xredef`));
+    fs.writeFileSync(path.join(artifacts, 'window-redefine.json'), JSON.stringify({ direct, proxied }, null, 2));
+    assert.equal(direct['frameElement.read'], 'mine:frameElement', 'natively the page getter answers');
+    assert.deepEqual(direct['frameElement.desc'], '{"sameGet":true,"c":false,"e":true}');
+    assert.equal(direct['assign self'], '5');
+    assert.deepEqual(proxied, direct);
+  });
+
+  // The sentences a window and a Location of another origin raise, word for word: a read names the property ("from"; an
+  // index by its number; a symbol by its description in brackets, Symbol.toPrimitive not at all), a write says "on", and
+  // in / delete / defineProperty / setPrototypeOf / preventExtensions are only the closing sentence. Ours said "on 'Window'"
+  // for all of them and "Blocked by ZeroProxy policy" for every Location.
+  await t.test('a cross-origin window and Location refuse with the browser\'s own sentences (matches native)', async () => {
+    const targetBase = `http://${targetHost}:${targetPort}`;
+    const collect = async p => {
+      try {
+        await p.waitForFunction(() => window.__xdeny, { timeout: 60000, polling: 100 });
+        return await p.evaluate(() => window.__xdeny);
+      } finally {
+        await p.close();
+      }
+    };
+    const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    let direct;
+    try {
+      const p = await directBrowser.newPage();
+      await p.goto(`${targetBase}/xdeny`, { waitUntil: 'domcontentloaded' });
+      direct = await collect(p);
+    } finally {
+      await directBrowser.close();
+    }
+    const proxied = await collect(await openProxiedPage(`${targetBase}/xdeny`));
+    fs.writeFileSync(path.join(artifacts, 'cross-origin-denials.json'), JSON.stringify({ direct, proxied }, null, 2));
+    assert.match(direct['read document'], /^SecurityError\|DOMException\|Failed to read a named property 'document' from 'Window': Blocked a frame with origin "ORIGIN" from accessing a cross-origin frame\.$/);
+    assert.match(direct['read 5'], /^SecurityError\|DOMException\|Failed to read an indexed property \[5\] from 'Window'/);
+    assert.match(direct['location.href'], /from 'Location'/);
     assert.deepEqual(proxied, direct);
   });
 

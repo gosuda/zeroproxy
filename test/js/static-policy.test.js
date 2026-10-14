@@ -1284,7 +1284,7 @@ test('훅은 설치 지점에서 소스를 가린다 (날 defineProperty 접근�
     const win = rest.join(' ');
     if (!/[{,]\s*(get|set)\s*[(:]/.test(win)) continue;
     // 헬퍼 본체 자신은 예외다 — 마스킹을 **하는** 쪽이다.
-    if (win.includes('toStringMap.set(')) continue;
+    if (win.includes('toStringMap.set(') || win.includes('maskAccessorFn(')) continue;
     offenders.push((i + 1) + ': ' + lines[i].trim().slice(0, 90));
   }
   assert.deepEqual(offenders, [],
@@ -1311,11 +1311,13 @@ test('마스킹 헬퍼 셋은 실제로 소스를 가린다', () => {
   assert.ok(from > 0 && to > from, '마스킹 헬퍼 구간을 못 찾았다');
   const masked = new Map();
   const api = new Function(
-    'toStringMap', 'nativeAccessorSource', 'maskNativeFunction',
+    'toStringMap', 'nativeAccessorSource', 'maskNativeFunction', 'maskAccessorFn', 'nameLike',
     rt.slice(from, to) + '\nreturn { defineMasked, definePropertiesMasked, assignMasked };')(
     masked,
     (kind, key) => 'function ' + kind + ' ' + String(key) + '() { [native code] }',
     (fn, key) => { if (typeof fn === 'function') masked.set(fn, 'function ' + String(key) + '() { [native code] }'); },
+    (fn, kind, key) => { if (typeof fn === 'function') masked.set(fn, 'function ' + kind + ' ' + String(key) + '() { [native code] }'); },
+    () => {},
   );
 
   const NATIVE = /\{\s*\[native code\]\s*\}/;

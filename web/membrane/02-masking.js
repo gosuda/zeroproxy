@@ -10,8 +10,26 @@
     const name = typeof key === 'symbol' ? '' : String(key);
     return 'function ' + kind + ' ' + name + '() { [native code] }';
   }
+  // A function masked as `function key() { [native code] }` is called `key` — the minifier leaves "", "n", "value", and a
+  // `bind` says "bound key". An accessor is `get key` / `set key`. (A symbol key keeps its name.)
+  function nameLike(fn, name) {
+    if (typeof fn !== 'function' || fn.name === name) return;
+    try { Object.defineProperty(fn, 'name', { value: name, configurable: true }); } catch {}
+  }
   function maskNativeFunction(fn, key) {
-    if (typeof fn === 'function') toStringMap.set(fn, nativeFunctionSource(key));
+    if (typeof fn !== 'function') return;
+    toStringMap.set(fn, nativeFunctionSource(key));
+    if (typeof key === 'string') nameLike(fn, key);
+  }
+  function maskAccessorFn(fn, kind, key) {
+    toStringMap.set(fn, nativeAccessorSource(kind, key));
+    if (typeof key === 'string') nameLike(fn, kind + ' ' + key);
+  }
+  // The native function `ours` stands in for reports its length too (a hand-written wrapper has the arity it was written with:
+  // `fetch.length` read 2, `addEventListener.length` 3, `history.pushState.length` 3).
+  function lengthLike(ours, native) {
+    if (typeof ours !== 'function' || typeof native !== 'function' || ours.length === native.length) return;
+    try { Object.defineProperty(ours, 'length', { value: native.length, configurable: true }); } catch {}
   }
   function maskMethods(obj, keys) {
     for (const key of keys) maskNativeFunction(obj && obj[key], key);
@@ -54,7 +72,9 @@
   }
   function define(obj, key, value) {
     try {
+      const prev = typeof value === 'function' ? Object.getOwnPropertyDescriptor(obj, key) : null;
       Object.defineProperty(obj, key, { value, enumerable: nativeEnumerability(obj, key), configurable: false, writable: true });
+      if (prev && typeof prev.value === 'function') lengthLike(value, prev.value);
       // A native method's `.name` equals its property key. Ours came out of the
       // minifier as "" or a one-letter token, so `setTimeout.name`,
       // `window.addEventListener.name` and `navigator.serviceWorker.register
@@ -76,8 +96,8 @@
   function defineAccessor(obj, key, get, set, enumSrc) {
     try {
       Object.defineProperty(obj, key, { get, set, enumerable: nativeEnumerability(enumSrc || obj, key), configurable: false });
-      if (typeof get === 'function') toStringMap.set(get, nativeAccessorSource('get', key));
-      if (typeof set === 'function') toStringMap.set(set, nativeAccessorSource('set', key));
+      if (typeof get === 'function') maskAccessorFn(get, 'get', key);
+      if (typeof set === 'function') maskAccessorFn(set, 'set', key);
       return true;
     } catch { return false; }
   }
@@ -94,8 +114,9 @@
   // enumerable 을 일부러 다르게 둔 자리가 있어서 의미를 바꾸면 안 된다.
   function defineMasked(obj, key, desc) {
     try { Object.defineProperty(obj, key, desc); } catch { return false; }
-    if (typeof desc.get === 'function') toStringMap.set(desc.get, nativeAccessorSource('get', key));
-    if (typeof desc.set === 'function') toStringMap.set(desc.set, nativeAccessorSource('set', key));
+    if (typeof desc.value === 'function' && typeof key === 'string') nameLike(desc.value, key);
+    if (typeof desc.get === 'function') maskAccessorFn(desc.get, 'get', key);
+    if (typeof desc.set === 'function') maskAccessorFn(desc.set, 'set', key);
     return true;
   }
   // 복수형도 같은 규칙이다 — 한 번에 여러 접근자를 심는 자리가 다섯 곳 있다.
@@ -104,8 +125,8 @@
     for (const key of Object.getOwnPropertyNames(descs)) {
       const d = descs[key];
       if (!d) continue;
-      if (typeof d.get === 'function') toStringMap.set(d.get, nativeAccessorSource('get', key));
-      if (typeof d.set === 'function') toStringMap.set(d.set, nativeAccessorSource('set', key));
+      if (typeof d.get === 'function') maskAccessorFn(d.get, 'get', key);
+      if (typeof d.set === 'function') maskAccessorFn(d.set, 'set', key);
       if (typeof d.value === 'function') maskNativeFunction(d.value, key);
     }
     return true;
@@ -120,8 +141,8 @@
       const d = Object.getOwnPropertyDescriptor(proto, key);
       if (!d) continue;
       if (typeof d.value === 'function') maskNativeFunction(d.value, key);
-      if (typeof d.get === 'function') toStringMap.set(d.get, nativeAccessorSource('get', key));
-      if (typeof d.set === 'function') toStringMap.set(d.set, nativeAccessorSource('set', key));
+      if (typeof d.get === 'function') maskAccessorFn(d.get, 'get', key);
+      if (typeof d.set === 'function') maskAccessorFn(d.set, 'set', key);
     }
     return proto;
   }
@@ -424,6 +445,7 @@
       return unrewriteSourceText(orig.call(this));
     };
     toStringMap.set(maskedToString, 'function toString() { [native code] }');
+    nameLike(maskedToString, 'toString');
     try {
       Object.defineProperty(proto, 'toString', { value: maskedToString, enumerable: false, configurable: true, writable: true });
       toStringMaskedPrototypes.add(proto);
@@ -473,6 +495,43 @@
   function brandLikeNative(ctor, proto, name) {
     try { if (ctor) Object.defineProperty(ctor, 'name', { value: name, configurable: true }); } catch {}
     try { if (proto) Object.defineProperty(proto, Symbol.toStringTag, { value: name, configurable: true }); } catch {}
+    adoptNativeShape(ctor, proto, name);
+  }
+  // The class this replaces — still the window's own while the replacement is being built — lends its shape: the constructor's
+  // length, the constants and static members the replacement lacks (`EventSource.CLOSED`, `RTCPeerConnection.generateCertificate`:
+  // a page that compares `readyState === EventSource.CLOSED` got `undefined`), and the length of each method it has.
+  function adoptNativeShape(ctor, proto, name) {
+    try {
+      const d = Object.getOwnPropertyDescriptor(root, name);
+      const nat = d && typeof d.value === 'function' ? d.value : null;
+      if (!ctor || !nat || nat === ctor) return;
+      lengthLike(ctor, nat);
+      for (const key of Reflect.ownKeys(nat)) {
+        if (key === 'prototype' || key === 'length' || key === 'name') continue;
+        const nd = Object.getOwnPropertyDescriptor(nat, key);
+        const od = Object.getOwnPropertyDescriptor(ctor, key);
+        if (!od) {
+          if (typeof nd.value === 'function') {
+            const member = function () { return Reflect.apply(nd.value, nat, arguments); };
+            if (typeof key === 'string') { nameLike(member, key); maskNativeFunction(member, key); }
+            lengthLike(member, nd.value);
+            Object.defineProperty(ctor, key, { value: member, writable: nd.writable, enumerable: nd.enumerable, configurable: nd.configurable });
+          } else if ('value' in nd) {
+            Object.defineProperty(ctor, key, nd);
+          }
+        } else if (typeof od.value === 'function' && typeof nd.value === 'function') {
+          lengthLike(od.value, nd.value);
+        }
+      }
+      if (proto && nat.prototype) {
+        for (const key of Reflect.ownKeys(nat.prototype)) {
+          if (key === 'constructor') continue;
+          const nd = Object.getOwnPropertyDescriptor(nat.prototype, key);
+          const od = Object.getOwnPropertyDescriptor(proto, key);
+          if (od && typeof od.value === 'function' && typeof nd.value === 'function') lengthLike(od.value, nd.value);
+        }
+      }
+    } catch {}
   }
   // D7: 타깃 오리진마다 SharedWorker 이름을 이 접두어로 스코프한다 — 없으면
   // 프록시 오리진 하나를 공유하는 서로 다른 타깃 두 개가 **같은** SharedWorker

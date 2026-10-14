@@ -192,8 +192,8 @@
           configurable: false,
         });
         const installed = Object.getOwnPropertyDescriptor(proto, 'sandbox');
-        if (installed && typeof installed.get === 'function') toStringMap.set(installed.get, nativeAccessorSource('get', 'sandbox'));
-        if (installed && typeof installed.set === 'function') toStringMap.set(installed.set, nativeAccessorSource('set', 'sandbox'));
+        if (installed && typeof installed.get === 'function') maskAccessorFn(installed.get, 'get', 'sandbox');
+        if (installed && typeof installed.set === 'function') maskAccessorFn(installed.set, 'set', 'sandbox');
       } catch {}
     }
     function installFrameProp(proto, prop) {
@@ -219,8 +219,8 @@
         // srcdoc 게터를 JS 함수로 갈아끼웠으므로 toString 위장을 같이 건다 —
         // 안 하면 "게터 소스를 읽어 본다" 는 흔한 검사에 우리만 튄다.
         const installed = Object.getOwnPropertyDescriptor(proto, prop);
-        if (installed && typeof installed.get === 'function' && installed.get !== d.get) toStringMap.set(installed.get, nativeAccessorSource('get', prop));
-        if (installed && typeof installed.set === 'function') toStringMap.set(installed.set, nativeAccessorSource('set', prop));
+        if (installed && typeof installed.get === 'function' && installed.get !== d.get) maskAccessorFn(installed.get, 'get', prop);
+        if (installed && typeof installed.set === 'function') maskAccessorFn(installed.set, 'set', prop);
       } catch {}
     }
   }

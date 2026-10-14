@@ -362,7 +362,9 @@
     // __zp_real* 에 붙들어 두고 재설치는 항상 그것을 감싸게 한다.
     function realCtor(w, stash, cur) {
       const real = w[stash] || cur;
-      if (!w[stash]) { try { define(w, stash, real); } catch {} }
+      // Not `define`: that names the function after the key it is installed under, and the native constructor — which `new Native`
+      // and `.prototype.constructor` still are — would read "__zp_realBC" to the page.
+      if (!w[stash]) { try { Object.defineProperty(w, stash, { value: real, enumerable: false, configurable: false, writable: true }); } catch {} }
       return real;
     }
     // D7: BroadcastChannel must be origin-scoped. Wrap constructor to prefix
@@ -568,7 +570,7 @@
               configurable: true,
               enumerable: desc.enumerable,
             });
-            toStringMap.set(Object.getOwnPropertyDescriptor(resProto, key).get, nativeAccessorSource('get', key));
+            maskAccessorFn(Object.getOwnPropertyDescriptor(resProto, key).get, 'get', key);
           } catch {}
         }
         // toJSON 은 내부 슬롯에서 직렬화해 게터를 건너뛴다 — 이름과 같은 문제다.

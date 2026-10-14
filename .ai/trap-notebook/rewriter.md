@@ -1860,3 +1860,24 @@ null 로 바꾸면 멤브레인의 샌드박스 판정이 "샌드박스 아님" 
 - **원인:** 초기 `about:blank` 에서 같은 출처 문서로 가면 브라우저가 Window 객체를 **재사용**한다. 부모 격리가 이미 깔아 둔 `Function`/`eval` 파사드를 자식 프렐류드가 `Native.FunctionCtor` 로 잡아, 자기 래퍼(`Function('eval','__zp_env','__zp_src',…)`)를 부모 리라이터에 통과시켰다 — 예전엔 조용한 이중 리라이트였고, 런타임 이름 거부(ERRATA 86)가 생기자 깨졌다.
 - **고침:** 런타임 래퍼 매개변수(`__zp_scope`·`__zp_args`·`__zp_self`·`__zp_env`·`__zp_src`·`__zp_inner__`…)는 거부 대상에서 뺐다(래핑된 코드 밖에서만 읽힌다). `__zp_this` 매개변수는 헬퍼 이름이라 `__zp_self` 로. 이미 헬퍼를 묶고 시작하는 `with` 본문에는 두 번째 묶음을 넣지 않는다(재선언).
 - **규칙:** 자식 realm 의 "네이티브" 캡처는 부모가 먼저 손댄 값일 수 있다. 우리 래퍼 코드는 **리라이터를 다시 지나도** 같은 뜻이어야 한다.
+
+## <a id="창-속성-페이지-정의"></a>창의 frameElement·parent·self… 는 페이지가 정의하면 페이지 것이다 (2026-10-14, ERRATA 97)
+
+**증상**: Cloudflare 챌린지 문서(와 위젯)는 `window.frameElement` 를 자기 getter(비구성, `bound v8`)로 갈아끼우고 되읽는다 — 네이티브에서는 `undefined`. 프록시에서는
+`defineProperty` 가 성공해도 읽기는 멤브레인 값(`null`)이었고 서술자는 우리가 만든 것이었다. **원인**: `scopeGet`/`__zp_get`/서술자 경로가 이 이름들을 멤브레인 상태로
+먼저 답했다. **고침**: 페이지가 실제 창의 그 속성을 부팅 때 서술자와 다르게 만들었으면(`pageDefined`) 그 정의가 답한다 — getter 는 `this`=파사드로 부른다(진짜 창이 아니다,
+ERRATA 91). **재발 방지**: 창 속성을 멤브레인이 대신 답하게 만들 때는 "페이지가 이걸 재정의하거나 대입하면?" 을 A/B(`ab-page.js`)로 먼저 본다. 이 정정은 Glassdoor 결과를
+바꾸지 않았다 — 실제 결함이라 둔다.
+
+## <a id="교차-출처-거부-문구"></a>교차 출처 창·Location 의 거부는 브라우저의 문장 그대로다 (2026-10-14, ERRATA 98)
+
+읽기는 `Failed to read a named property 'X' from 'Window'`(인덱스는 `an indexed property [N]`, 심볼은 `'[Symbol.iterator]'`, `toPrimitive` 와 설명 없는 심볼은 이름 생략), 쓰기는 `on`,
+`in`/`delete`/`defineProperty`/`setPrototypeOf`/`preventExtensions` 는 닫는 문장뿐이다. 우리는 전부 `on 'Window'`, Location 은 전부 `Blocked by ZeroProxy policy` 였다.
+130 탐침 A/B(`ab-xwin.js`)로 정했고 129 가 맞는다(`hasOwnProperty` 만 같은 트랩이라 못 가른다). **기준값은 규격이 아니라 실측이다**(문장 단위까지).
+
+## <a id="대체-클래스-모양"></a>`define` 은 함수 이름을 바꾼다 — 별칭과 보관에는 쓰지 않는다 (2026-10-14, ERRATA 99)
+
+`define(obj, key, fn)` 은 `fn.name` 을 `key` 로 맞춘다(미니파이어 이름 때문). 같은 함수를 둘째 이름으로 걸거나(`webkitRTCPeerConnection = RTCPeerConnection`) 네이티브를 보관하면
+(`__zp_realBC`) **네이티브 생성자의 이름이 바뀐다** — `BroadcastChannel.prototype.constructor.name` 이 내부 이름을 드러냈다. 별칭·보관은 `Object.defineProperty` 로 직접. 또 대체
+클래스는 네이티브의 상수·정적 멤버를 가져야 한다(`EventSource.CLOSED`), `bind` 는 함수의 own 멤버를 안 옮긴다(`globalThis.Proxy.revocable`). 이름은 가린 소스 문구를 따르고
+(`maskNativeFunction`/`maskAccessorFn`) 길이는 네이티브를 따른다(`lengthLike`). 모양 전수 A/B: `ab-shape.js`(4275 키).

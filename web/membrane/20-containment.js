@@ -472,7 +472,12 @@
       const ok = define(w, name, blockCtor);
       if (strict && name in w && !ok) throw normalizedError('SecurityError');
     }
-    if (hadWebkitRTC && !define(w, 'webkitRTCPeerConnection', w.RTCPeerConnection) && strict) throw normalizedError('SecurityError');
+    // the same function under a second name, as natively (`define` would rename it: RTCPeerConnection.name read "webkitRTCPeerConnection")
+    if (hadWebkitRTC) {
+      let aliased = false;
+      try { Object.defineProperty(w, 'webkitRTCPeerConnection', { value: w.RTCPeerConnection, enumerable: nativeEnumerability(w, 'webkitRTCPeerConnection'), configurable: false, writable: true }); aliased = true; } catch {}
+      if (!aliased && strict) throw normalizedError('SecurityError');
+    }
     // B4 / EventSource: intentionally NOT wrapped. The Service Worker
     // intercepts all controlled-origin fetches including SSE, so the native
     // EventSource implementation is safe. Wrapping it would change the
@@ -485,7 +490,7 @@
     if (nav) {
       for (const name of /* intentionally empty — see D6 in PHASE2 plan */ []) {
         const deny = function(){ throw normalizedError('NotSupportedError'); };
-        toStringMap.set(deny, nativeAccessorSource('get', name));
+        maskAccessorFn(deny, 'get', name);
         try { defineMasked(nav, name, { get: deny, configurable: false }); } catch {}
       }
       // D6: getUserMedia / getDisplayMedia / enumerateDevices pass through to

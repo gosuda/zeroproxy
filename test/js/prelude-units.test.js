@@ -744,6 +744,7 @@ function xoriginEnv(opts = {}) {
     maskNativeFunction() {},
     toStringMap: new Map(),
     nativeAccessorSource: () => 'function () { [native code] }',
+    maskAccessorFn() {},
     normalizedError,
     crossWindowTargets: new WeakMap(),
     URL,
