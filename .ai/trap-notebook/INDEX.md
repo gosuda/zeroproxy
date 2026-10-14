@@ -6,6 +6,8 @@
 
 | Date | Category | Summary | Detail |
 |---|---|---|---|
+| 2026-10-14 | worker / 호환성 | 워커 파사드가 페이지 것을 복사해 window·top·parent 를 돌려주고 in 이 전부 true. 없는 이름도 베껴야 한다(typeof = undefined). | rewriter.md#워커-전역-이름 |
+| 2026-10-14 | membrane / 프레임 | 교차 출처 창도 자식 프레임 이름에는 답한다(get·서술자, in 은 던짐). reCAPTCHA 도전 프레임이 parent['a-…'] 로 앵커를 찾는다. | rewriter.md#교차-출처-창-자식-이름 |
 | 2026-10-13 | membrane / 탈출 | 표를 맨 new Map() 으로 만들면 페이지가 Map.prototype 을 감싸 키·값을 보고, 전역을 읽는 감싼 함수는 재귀로 죽인다. 팩토리로 봉인. | rewriter.md#봉인된-표 |
 | 2026-10-13 | rewriter / eval | strict direct eval 은 with 를 품을 수 없다 → with 블록 안의 strict 화살표 + 블록 const eval. env.has 는 있는 이름만. | rewriter.md#strict-eval-with-안 |
 | 2026-10-13 | membrane / 탈출 | 창의 frameElement·parent… 는 페이지가 재정의하는 자기 속성. 멤브레인은 winGet(부팅 게터)으로만 읽는다. | rewriter.md#창-자기-접근자 |

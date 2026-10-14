@@ -1059,6 +1059,20 @@
       if (facade) return facade;
       const childCount = () => { try { return winGet(win, 'length') >>> 0; } catch { return 0; } };
       const isIndex = p => typeof p === 'string' && /^(?:0|[1-9]\d*)$/.test(p) && Number(p) < childCount();
+      // A cross-origin window still answers for the NAMES of its child frames (HTML: a document-tree child navigable's target
+      // name is a property of the window, after the allowed names and the indices): `parent['anchor']` is the sibling frame.
+      // reCAPTCHA's challenge frame finds its anchor frame that way. Only `get` and the descriptor do; `in` still throws,
+      // as natively (measured). The first child of that name in tree order; the page's own globals are never read through this.
+      const namedChild = p => {
+        if (typeof p !== 'string' || p === '') return null;
+        try {
+          for (let i = 0, n = childCount(); i < n; i++) {
+            const child = win[i];
+            if (child && String(winGet(child, 'name')) === p) return child;
+          }
+        } catch {}
+        return null;
+      };
       const read = name => {
         switch (name) {
           case 'window': case 'self': case 'frames': return facade;
@@ -1088,6 +1102,8 @@
           if (prop === 'then') return undefined;
           if (CROSS_ORIGIN_WINDOW_NAME_SET.has(prop)) return read(prop);
           if (isIndex(prop)) return windowHandleFor(win[prop]);
+          const named = namedChild(prop);
+          if (named) return windowHandleFor(named);
           throw crossOriginDenied('read a named property', prop);
         },
         set(_t, prop, value) {
@@ -1118,6 +1134,8 @@
               return accessor(prop);
           }
           if (isIndex(prop)) return { value: windowHandleFor(win[prop]), writable: false, enumerable: true, configurable: true };
+          const named = namedChild(prop);
+          if (named) return { value: windowHandleFor(named), writable: false, enumerable: false, configurable: true };
           throw crossOriginDenied('read a named property', prop);
         },
         ownKeys() {

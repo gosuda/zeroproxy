@@ -14,7 +14,8 @@ strings below are closed as *not doing*.
 
 ## State
 
-- Branch `main`; everything up to `a9edf11` (the sealed tables, item 93) and the scope commit after it is on `origin/main`.
+- Branch `main`; everything up to `a0c81d5` (the scope rule and the isolation audit, items 93) is on `origin/main`. The commit carrying this
+  version of the file (items 94–95) is local until the user says to push.
 - Commits of this arc: `8c178a7` HLS / loop cap / `innerHTML` / TLS refresh (ERRATA 58–61) · `8565ccf` five divergences found
   chasing the challenge (62–65) · `3ae6135` **Stack Overflow's Cloudflare challenge fixed** — the ClientHello lacked Chrome's
   `trust_anchors` extension — plus `Sec-Fetch-*` for frames and sub-requests (66–67) · `f8bb56a` element-load `Sec-Fetch-*`,
@@ -39,7 +40,9 @@ strings below are closed as *not doing*.
   and a sandboxed frame that redefined its own `frameElement` navigated the top window (91) (`8e9d936`) · the latest commit:
   **a direct `eval` sees its caller's bindings** in a frame the page writes into and in strict code (92) (`82332eb`) · the latest
   commit: **the membrane's tables sealed against a page that wraps `Map`/`Set`/`WeakMap`/`WeakSet`** — it saw every key and value
-  the membrane stored, and a wrapper that read a global variable recursed until the page died (93).
+  the membrane stored, and a wrapper that read a global variable recursed until the page died (93) (`a9edf11`) · the latest
+  commit: **Reddit's reCAPTCHA errors traced to their roots** — a cross-origin window did not answer for the names of its child
+  frames (94) and a worker answered to `window`/`top`/`parent` so libraries took it for a page (95).
 - Verification (`2fc889d`): cargo 317 / 3 ignored, go ok, test:js 165, test:wasm:ci 15, static-policy 62, test:e2e
   231; the 705 cached corpus scripts rewrite to code V8 parses. 13-site sweep: all answer; Wikipedia, GitHub, Guardian,
   MDN, Naver, Apple, npm 0 errors; NYT back to its 2 (a 404, FedCM) once item 90 landed. Known noise, unchanged: BBC's
@@ -54,10 +57,10 @@ strings below are closed as *not doing*.
   overflow on the unsealed build. The 13 sites were A/B-ed against the previous commit's build again: the same errors on both
   sides (CNN and Stack Overflow vary run to run on both), and a lookup/eval/`Function`/member/storage micro-benchmark is within
   its run-to-run spread (free-name lookups 292–319 ms before, 297–319 ms after).
-- Detail lives in [ERRATA.md](ERRATA.md) items 62–93 and its Residuals table, the trap-notebook entries
+- Detail lives in [ERRATA.md](ERRATA.md) items 62–95 and its Residuals table, the trap-notebook entries
   (`.ai/trap-notebook/rewriter.md`: `동적-코드-전역-this`, `chrome-hello-trust-anchors`, `coep-워커-부트스트랩`,
   `lol-html-원시-속성값`, `trusted-script-는-코드`, `워커-훅-자리`, `캔버스-파블링-결정적`, `prepare-stack-trace-페이지-뷰`,
-  `프렐류드-스크립트-잔존`, `referrer-한-곳에서`, `클라이언트-힌트-협상`, `전송-실패는-네트워크-오류`, `대조군은-quic`, `바쁜-렌더러는-진다`, `아이콘-링크-경주`, `교차-출처-프레임-권한`, `헬퍼-이름-응답`, `with-안의-이름`, `인라인-가드`, `같은-소스-재리라이트`, `부모-파사드로-부팅한-자식`, `창-자기-접근자`, `strict-eval-with-안`, `봉인된-표`), and the verification table in [PHASE2_STATUS.md](PHASE2_STATUS.md). No gate
+  `프렐류드-스크립트-잔존`, `referrer-한-곳에서`, `클라이언트-힌트-협상`, `전송-실패는-네트워크-오류`, `대조군은-quic`, `바쁜-렌더러는-진다`, `아이콘-링크-경주`, `교차-출처-프레임-권한`, `헬퍼-이름-응답`, `with-안의-이름`, `인라인-가드`, `같은-소스-재리라이트`, `부모-파사드로-부팅한-자식`, `창-자기-접근자`, `strict-eval-with-안`, `봉인된-표`, `워커-전역-이름`, `교차-출처-창-자식-이름`), and the verification table in [PHASE2_STATUS.md](PHASE2_STATUS.md). No gate
   in PHASE2_STATUS is open.
 - **A product decision was made without asking — flag it to the user:** the canvas/audio masking (ERRATA Q6, "intentional")
   stayed, but became deterministic per profile and origin (item 73). Removing it outright would be the other choice; the
@@ -92,11 +95,12 @@ strings below are closed as *not doing*.
    (3 of 27: `Reflect.set`, `Reflect.getOwnPropertyDescriptor`, `RegExp.prototype.test`; ERRATA Residuals, first row) — accepted,
    no known site. Tools: `.lean-ctx/spy-bisect.js` with `page-spy-groups.html` (spies) or `page-wrapglobal.html` (wrappers),
    `wrap-report.js` and `spy-report.js` for the verdicts.
-6. Reddit (when it serves reCAPTCHA): a worker running `recaptcha__ko.js` throws `Cannot read properties of undefined
-   (reading 'body')` (line 246 of the rewritten worker script). Present before the worker-realm work too (A/B on the
-   previous `web/`, 2026-10-12); not traced. Compare with a native reCAPTCHA worker (the e2e `/xwenv` pattern).
+6. **Closed 2026-10-14:** Reddit's reCAPTCHA errors had two roots, both fixed — the challenge frame's `parent['a-…']` (ERRATA 94) and the
+   worker's `document.body` (ERRATA 95: the proxy's worker answered to `window`). Reddit still serves its own "Prove your humanity"
+   interstitial; passing it is not ours to do (scope). Five loads after the fixes: the worker runs, no exception in any target.
+   Lab tool: `.lean-ctx/reddit-targets.js` (lists targets, exceptions with stack and source around the position).
 
-Done this round and closed: items 71–93 (see State); before that the meta-CSP lone `'` (69), the inline-script stack (70),
+Done this round and closed: items 71–95 (see State); before that the meta-CSP lone `'` (69), the inline-script stack (70),
 Reddit (parity re-checked with a fresh unautomated Chrome — same wall natively).
 
 ## How to run things

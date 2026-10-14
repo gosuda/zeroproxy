@@ -314,13 +314,22 @@
     globalMethodBindings.set(value, bound);
     return bound;
   }
+  // A worker's global has `self` and `globalThis` and NOT `window`, `top`, `parent`, `frames`, `document`: `typeof window` is
+  // the check libraries make to tell a worker from a page, and reCAPTCHA's worker took the `document.body` branch because
+  // ours answered (Reddit: "Cannot read properties of undefined (reading 'body')"). So this object answers for what the
+  // worker really has, plus the lexical bindings its scripts share. A name it does not answer for falls out of the `with`
+  // to the real global scope: `typeof window` is 'undefined' there, as natively (a bare read stays undefined, see `get`).
   const scope = new Proxy(self, {
-    has(_target, prop) { return prop !== Symbol.unscopables; },
+    has(target, prop) {
+      if (prop === Symbol.unscopables) return false;
+      if (typeof prop === 'symbol') return Reflect.has(target, prop);
+      return zpLexEntry(prop) !== undefined || Reflect.has(target, prop);
+    },
     get(target, prop) {
       if (prop === Symbol.unscopables) return undefined;
       const le = zpLexEntry(prop);
       if (le) return zpLexRead(le, prop);
-      if (prop === 'self' || prop === 'globalThis' || prop === 'window' || prop === 'top' || prop === 'parent' || prop === 'frames') return scope;
+      if (prop === 'self' || prop === 'globalThis') return scope;
       if (prop === 'location') return base;
       if (prop === 'eval') return workerEval;
       if (prop === 'Function') return workerFunction;
@@ -355,7 +364,7 @@
       // 렉시컬을 보는 잔여 divergence 는 허용(동형 이름 let 선언 필요).
       const le = zpLexEntry(prop);
       if (le) return zpLexRead(le, prop);
-      if (prop === 'self' || prop === 'globalThis' || prop === 'window' || prop === 'top' || prop === 'parent' || prop === 'frames') return scope;
+      if (prop === 'self' || prop === 'globalThis') return scope;
       if (prop === 'location') return base;
       if (prop === 'eval') return workerEval;
       if (prop === 'Function') return workerFunction;

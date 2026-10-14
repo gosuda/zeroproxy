@@ -2487,6 +2487,12 @@ function createTargetServer(requests, pendingResponses) {
         P('globalKeys', function () { return Object.keys(self).sort().join(','); });
         P('globalSyms', function () { return Object.getOwnPropertySymbols(self).length; });
         P('thisIsSelf', function () { return [this === self, (function () { return this; })() === self, globalThis === self].join(','); });
+        // What tells a worker from a page: a library asks typeof window. A worker's global has no window, document, top,
+        // parent, frames, opener (reCAPTCHA's worker took its document.body branch because ours answered).
+        P('typeofWindowNames', function () { return [typeof window, typeof document, typeof top, typeof parent, typeof frames, typeof opener].join(','); });
+        P('inSelf', function () { return ['window', 'document', 'top', 'parent', 'frames', 'opener', 'closed', 'length', 'self', 'globalThis', 'navigator', 'location'].map(function (n) { return n in self; }).join(','); });
+        P('selfMembers', function () { return [self.window, self.document, self.top, self.parent, self.frames, self.opener].map(function (v) { return v === undefined ? 'u' : (v === self ? 'self' : 'other'); }).join(','); });
+        P('globalThisMembers', function () { return ['window', 'document', 'top', 'parent', 'frames', 'opener'].map(function (n) { return typeof globalThis[n]; }).join(','); });
         P('location', function () { return typeof WorkerGlobalScope === 'function' && self instanceof WorkerGlobalScope ? [location.protocol, typeof location.href].join(' ') : 'page'; });
         P('origin', function () { return self.origin; });
         P('secure', function () { return [isSecureContext, crossOriginIsolated].join(','); });
@@ -2600,6 +2606,63 @@ function createTargetServer(requests, pendingResponses) {
         d.write('<!doctype html><body><scr' + 'ipt>' + ${JSON.stringify(cases)}.split('<\\/').join('<\\/') + ' parent.postMessage({ childOut: out }, "*");<\/scr' + 'ipt>');
         d.close();
         addEventListener('message', function (e) { if (e.data && e.data.childOut) window.__xdeval.child = e.data.childOut; });
+      <\/script></body>`);
+      return;
+    }
+    if (url.pathname === '/xnf' || url.pathname === '/xnf-anchor' || url.pathname === '/xnf-challenge') {
+      // The shape of reCAPTCHA: a page holds two frames of another site, named; the second reads the first through its
+      // parent — `parent['anchor']` — and the page reads a frame inside the first through its window. The parent is
+      // cross-origin to the reader, and a cross-origin window still answers for the names of its child frames.
+      const other = `http://127.0.0.1:${req.socket.localPort}`;
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      const show = `var show = function (fn) { try { var v = fn(); return v === undefined ? 'undefined' : (typeof v === 'object' && v !== null) ? (v === window ? 'self' : 'object') : String(v); } catch (e) { return 'threw:' + e.name; } };
+        var flags = function (w, k) { var d = Object.getOwnPropertyDescriptor(w, k); return d ? [typeof d.value, d.writable, d.enumerable, d.configurable].join(',') : 'none'; };`;
+      if (url.pathname === '/xnf-anchor') {
+        res.end(`<!doctype html><title>anchor</title><body><script>
+          var g = document.createElement('iframe'); g.name = 'grand'; document.body.appendChild(g);
+          parent.postMessage({ anchorReady: 1 }, '*');
+        <\/script></body>`);
+        return;
+      }
+      if (url.pathname === '/xnf-challenge') {
+        res.end(`<!doctype html><title>challenge</title><body><script>
+          ${show}
+          var r = {};
+          r.byName = show(function () { return parent['anchor']; });
+          r.byFrames = show(function () { return parent.frames['anchor']; });
+          r.has = show(function () { return 'anchor' in parent; });
+          r.hasMissing = show(function () { return 'nope' in parent; });
+          r.getMissing = show(function () { return parent['nope']; });
+          r.flags = show(function () { return flags(parent, 'anchor'); });
+          r.sameAsIndex = show(function () { return parent['anchor'] === parent[0]; });
+          r.siblingDocument = show(function () { return parent['anchor'].document.body.children.length; });
+          r.siblingChild = show(function () { return parent['anchor']['grand']; });
+          r.keys = show(function () { return Object.keys(parent).join(','); });
+          r.names = show(function () { return parent['challenge'] === window; });
+          parent.postMessage({ challengeReport: r }, '*');
+        <\/script></body>`);
+        return;
+      }
+      res.end(`<!doctype html><title>named frames</title><body><script>
+        window.__xnf = null;
+        ${show}
+        var out = {};
+        addEventListener('message', function (e) {
+          if (!e.data || typeof e.data !== 'object') return;
+          if (e.data.anchorReady) {
+            var cw = a.contentWindow;
+            out['p.byName'] = show(function () { return cw['grand']; });
+            out['p.has'] = show(function () { return 'grand' in cw; });
+            out['p.sameAsIndex'] = show(function () { return cw['grand'] === cw[0]; });
+            out['p.flags'] = show(function () { return flags(cw, 'grand'); });
+            out['p.childDocument'] = show(function () { return cw['grand'].document; });
+            out['p.missingGet'] = show(function () { return cw['nope']; });
+            out['p.missingHas'] = show(function () { return 'nope' in cw; });
+            var c = document.createElement('iframe'); c.name = 'challenge'; c.src = '${other}/xnf-challenge'; document.body.appendChild(c);
+          }
+          if (e.data.challengeReport) { for (var k in e.data.challengeReport) out['c.' + k] = e.data.challengeReport[k]; window.__xnf = out; }
+        });
+        var a = document.createElement('iframe'); a.name = 'anchor'; a.src = '${other}/xnf-anchor'; document.body.appendChild(a);
       <\/script></body>`);
       return;
     }
@@ -7959,6 +8022,40 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     assert.equal(direct.page.strictCaller, 6);
     assert.deepEqual(proxied.page, direct.page, 'the page realm');
     assert.deepEqual(proxied.child, direct.child, 'the written frame\'s realm');
+  });
+
+  // A cross-origin window answers for the names of its child frames: `parent['anchor']` is the sibling frame, not a
+  // SecurityError. reCAPTCHA's challenge frame finds its anchor frame that way; the membrane's cross-origin window took
+  // indices only and threw for a name (Reddit's "Prove your humanity" page: the challenge script died in `init`).
+  await t.test('a cross-origin window answers for the names of its child frames (matches native)', async () => {
+    const targetBase = `http://${targetHost}:${targetPort}`;
+    const collect = async p => {
+      try {
+        await p.waitForFunction(() => window.__xnf, { timeout: 60000, polling: 100 });
+        return await p.evaluate(() => window.__xnf);
+      } finally {
+        await p.close();
+      }
+    };
+    const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    let direct;
+    try {
+      const p = await directBrowser.newPage();
+      await p.goto(`${targetBase}/xnf`, { waitUntil: 'domcontentloaded' });
+      direct = await collect(p);
+    } finally {
+      await directBrowser.close();
+    }
+    const proxied = await collect(await openProxiedPage(`${targetBase}/xnf`));
+    fs.writeFileSync(path.join(artifacts, 'named-child-frames.json'), JSON.stringify({ direct, proxied }, null, 2));
+    // the reference: what a browser does
+    assert.equal(direct['c.byName'], 'object', 'a frame reads its sibling by name through a cross-origin parent');
+    assert.equal(direct['c.has'], 'threw:SecurityError', 'measured: `in` throws for a child name, `get` does not');
+    assert.equal(direct['c.flags'], 'object,false,false,true');
+    assert.equal(direct['c.getMissing'], 'threw:SecurityError');
+    assert.equal(direct['p.byName'], 'object', 'the page reads a frame inside a cross-origin frame by name');
+    assert.equal(direct['p.childDocument'], 'threw:SecurityError');
+    assert.deepEqual(proxied, direct);
   });
 
   // The membrane keeps its state in Maps, Sets, WeakMaps and WeakSets — real windows and elements among the keys and
