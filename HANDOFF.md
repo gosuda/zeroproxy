@@ -87,8 +87,11 @@ strings below are closed as *not doing*.
    share URL with its `#k=` key, the relay pipe, tab/entry ids, its own request URLs. No real window or Location object was seen;
    the tables that hold them are sealed (item 93). Closing it would take a captured native at every string/array/JSON call
    (thousands of sites) or a realm of its own for the membrane, for something that is concealment. Decided 2026-10-14: not closed.
-   Still worth a look, because they touch containment/robustness: cross-site frames and popups under the spies, and `Reflect.*`
-   wrapped by a function that reads a global (the free-name lookup's traps call `Reflect.getOwnPropertyDescriptor`/`Reflect.has`).
+   Both follow-up checks were run 2026-10-14: cross-site frames and popups under every spy group leak no real window/Location, and
+   built-ins wrapped by a global-reading function never kill the page unless the wrapper itself is made by `new Function`/`eval`
+   (3 of 27: `Reflect.set`, `Reflect.getOwnPropertyDescriptor`, `RegExp.prototype.test`; ERRATA Residuals, first row) — accepted,
+   no known site. Tools: `.lean-ctx/spy-bisect.js` with `page-spy-groups.html` (spies) or `page-wrapglobal.html` (wrappers),
+   `wrap-report.js` and `spy-report.js` for the verdicts.
 6. Reddit (when it serves reCAPTCHA): a worker running `recaptcha__ko.js` throws `Cannot read properties of undefined
    (reading 'body')` (line 246 of the rewritten worker script). Present before the worker-realm work too (A/B on the
    previous `web/`, 2026-10-12); not traced. Compare with a native reCAPTCHA worker (the e2e `/xwenv` pattern).
