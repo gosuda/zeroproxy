@@ -1921,3 +1921,43 @@ plain 객체(리터럴·`Reflect`·VM 디스패치 표)의 멤버 읽기/쓰기/
 **함정**: ① `req.fetchPostData()` 는 가로챈 내비게이션 POST(폼)에서 protocolTimeout(120 s)까지 멈추고 빈 본문이 된다 — `req.postData()` 를 먼저 쓴다. 처음 두 실행이 이것 때문에 실패했고 "서버가 120 s 붙잡는 타피트" 처럼 보였다.
 요청 헤더를 와이어(`Network.requestWillBeSentExtraInfo`)와 나란히 보고서야 본문 길이 0 을 알았다. ② CDP 수준의 요청 헤더에는 Sec-Fetch-*·Accept-Language 가 없다 — 네트워크 층이 나중에 붙인다.
 **다음**: 부모 페이지의 `…/fo/…` POST 가 프록시에서 7980 B, 네이티브에서 9047 B 다 — 위젯의 큰 POST 둘은 같은 크기. 부모의 페이로드를 디버거로 읽어 비교한다.
+
+## <a id="교차출처-프레임-정책-게이트-api"></a>교차출처 프레임에서 정책 게이트 API 가 네이티브와 달리 열렸다 (2026-10-15)
+
+**증상/발견**: Turnstile 위젯의 페이로드를 네이티브와 단계별로 대조하니(`gd-pause2.js` + `stages-all`) 범주형 답이 갈린 단계가 있었다 — 내장 AI `availability()` 가 네이티브 `unavailable`(20 ms) 대 프록시 `downloadable`(3.1 s,
+Summarizer 의 응답 시간), WebGL `powerPreference` 가 `low-power` 대 `default`.
+**원인**: 프록시에서는 모든 프레임이 같은 실제 오리진이라 브라우저 자신의 Permissions-Policy 검사가 교차출처 프레임에 대해 통과한다. 멤브레인의 가상 정책(`featureDeniedHere`)은 `allowsFeature`/`permissions.query` 등만 덮고 있었다.
+**방법(재사용 가능)**: API 한 족을 **교차출처 iframe 안에서 네이티브로** 호출해 결과(resolve 모양 / throw 이름·문장)를 받고, 같은 호출을 프록시된 페이지에서 받아 차분한다 — `.lean-ctx/gd-gated-apis.js native|proxied` 후 `diff`(92 호출),
+`gd-ai-avail.js`, `gd-webgl-attr.js`, `gd-ai-detail.js`(네이티브 에러 문장). 표를 코드로 옮긴 자리: `12-storage.js` 의 `gatedMembers`/`gatedConstructors`(`featureDeniedHere`).
+**함정**: ① 사용자 활성화 검사가 정책 검사보다 먼저인 API(`IdleDetector.requestPermission`, `getScreenDetails`)는 제스처 없이는 네이티브가 제스처 에러를 던진다 — 정책 문장으로 덮으면 틀린다(제외). ② 정책이 아닌 교차출처 규칙
+(`share`/`canShare`/파일 피커)은 `feature === null` 로 따로 둔다. ③ 센서 권한은 교차출처에서도 `granted`(네이티브) — `permissions.query` 의 "기능 거부 → denied" 일반화가 틀렸다. ④ 생성자(센서, PaymentRequest)는 `Proxy`+`construct`
+트랩으로 감싸고 `prototype.constructor` 를 되돌려 심는다. ⑤ headless e2e 의 `Magnetometer` 처럼 없는 생성자를 호출하면 V8 이 재작성된 호출문을 에러 문장에 찍는다 — 존재하는 것만 부른다.
+**교정**: WebGL 은 교차출처 프레임에서 `getContext('webgl'|'webgl2')` 요청에 `powerPreference: 'low-power'` 를 얹는다(네이티브가 요청과 무관하게 low-power).
+
+## <a id="xml-노드-직렬화-스크럽-복제본"></a>XML 노드의 outerHTML 이 HTML 직렬화기로 나갔다 (2026-10-15)
+
+**증상**: `new DOMParser().parseFromString('<br/><![CDATA[x]]>', 'application/xml').documentElement.outerHTML` 이 네이티브는 `<br/>…<![CDATA[x]]>`, 프록시는 `<br></br>…x`(CDATA 소실, `xmlns` 속성 탈락).
+**원인**: `scrubbedClone`(13-attrs.js)이 노드를 inert **HTML** 문서(`createHTMLDocument`)로 `importNode` 한 뒤 직렬화한다 — 복제본의 문서가 직렬화기를 정한다. XML 노드는 inert **XML** 문서
+(`document.implementation.createDocument(null,null,null)`)로 복제해야 한다(`Native.createXMLDocument`). 판별은 `/xml/i.test(ownerDocument.contentType)` — `text/plain` 문서는 HTML 문서 구조다.
+**발견 경로**: 위젯의 파서 탐침(`<p>FpDs9</div><p>DwoXA1</p>`, `<div data-foo="&#34;">`)을 네이티브·프록시로 돌려 MIME 별로 직렬화를 차분(`gd-parser-cmp.js`). e2e `an XML document from DOMParser serializes as XML…`.
+**부수 발견(미수정, ERRATA Residuals)**: `<noscript>` 를 lol_html 이 마크업으로 토큰화, 파싱 문서의 핸들러 속성이 재작성 문장으로 읽힘, 인라인 스크립트 본문의 엔티티 디코드(`'&amp;'` → `'&'`).
+**e2e 픽스처 규칙(기존)**: 인라인 스크립트의 JS 문자열에 엔티티를 쓰지 말고 `'&' + 'amp;'` 로 조립한다.
+
+## <a id="위젯-페이로드-단계별-대조-방법"></a>위젯 페이로드를 단계별로 읽고 비교하는 방법과 함정 (2026-10-15)
+
+**방법**: ① `Debugger.setBreakpointOnFunctionCall` 로 `XMLHttpRequest.prototype.send` 에 걸고(코드를 페이지에 넣지 않는다) 호출 프레임의 스코프에서 JSON 이 600자를 넘는 객체를 읽는다(`gd-pause2.js`; 클릭까지 사람 순서).
+위젯의 최종 POST 페이로드는 `{"1":{"VZWLc7":…},…}` 로 시작하는 ~110 KB 객체이고, 단계(`"1"`,`"2"`…)마다 `ncMr7`/`RCCiX6`(시작·끝 ms)와 `JLXMj9`(걸린 시간)가 붙는다. 단계 순서는 실행마다 섞이므로 키 집합(서명)으로 짝짓는다
+(`stages-all.js`: 네이티브 N개 대 프록시 M개에서 "각 모드 안에서는 상수인데 모드 사이에서 다른" 필드만 뽑는다). ② 단계가 부른 API 는 멤브레인 `get`/`set` 에 25 ms 구간별 (종류:대상:이름) 개수를 세는 임시 패치
+(`__rec`)를 넣어 단계의 `ncMr7..RCCiX6` 창으로 자른다(`stage-ops.js`) — 커밋하지 않는다. ③ 문서 시작 훅(`page.evaluateOnNewDocument`)은 OOPIF 위젯 프레임에도 걸린다 — `JSON.stringify`/`createPolicy`/싱크 setter 를
+감싸 `console.debug` 로 내보낸다(`gd-jsonhook.js`, `gd-tthook.js`).
+**함정**: ① **디버거를 붙인 네이티브 부모는 망가진다**(Debugger.enable 만으로 57 s 정지 후 오류 300031) — 위젯만 읽는다. ② 프록시 페이지에서는 멤브레인이 `XMLHttpRequest.prototype.send` 를 prelude 가 늦게 교체하므로 컨텍스트 생성 50 ms 뒤 한 번 거는 중단점은
+네이티브 함수에 걸려 부모 XHR 을 놓친다 — 여러 시점에 다시 건다. ③ 훅 안에서 만든 로그 문자열에 전역 `JSON.stringify` 를 쓰면 훅이 자기 자신을 재귀로 센다. ④ 임시 패치를 되돌리지 않은 채 `build:web` 하면 e2e 가
+엉뚱한 곳에서 깨진다(오디오 파블 끄기 + `Map` 래핑 시험의 스택 오버플로) — 되돌린 뒤 다시 빌드하고 돌린다. ⑤ bash heredoc/`node -e` 가 역슬래시를 반으로 줄인다 — 정규식·이스케이프가 든 파일은 Edit/Write.
+**남은 범주형 차이**(ERRATA Residuals): 대상 CSP 미적용(Trusted Types `default` 정책 호출 43 대 0), `connection.rtt` 0, 오디오 노이즈 탐지, 단계 시간 합 1.4 s 대 6.7 s.
+
+## <a id="챌린지-종류-http3"></a>사람이 받는 챌린지 종류는 HTTP/3 에 달렸다 (2026-10-15)
+
+**측정**: `window._cf_chl_opt.cType`(`gd-ctype.js`, 새 프로필 매번): 기본 Chrome(문서 요청이 h3/QUIC) `managed` 8/8 — 위젯이 알아서 풀고 클릭이 필요 없다. `--disable-quic` 한 같은 Chrome 은 h2 로 `managed` 2·`interactive` 3(5회).
+프록시의 kernel(브리지·프록시 모두) `interactive` 7/7(그 밖의 실행도 모두 체크박스가 나왔다). 와이어에서 읽히는 것(JA4, 확장 집합, ECH, H2 프레임·헤더 순서·값, TCP/IP)은 `tls.peet.ws` 로 대조해 같다(`gd-echo.js`, `gd-echo-proxied.js`) — 브리지의
+puppeteer 가로채기는 Sec-Fetch-*·Accept-Language·Priority 를 못 보므로 브리지 문서 GET 에는 그 헤더가 빠진다(프록시 SW 는 붙인다).
+**읽는 법**: HTTP/3 가 사람이 받는 챌린지를 확정하고, 체크박스가 나오면 네이티브는 통과·프록시는 위젯 단계의 범주형 차이로 `600010` 을 받는다. H3 자체는 UDP 경로+QUIC 스택이라 큰 일이다.

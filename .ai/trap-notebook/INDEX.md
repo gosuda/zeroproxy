@@ -6,6 +6,10 @@
 
 | Date | Category | Summary | Detail |
 |---|---|---|---|
+| 2026-10-15 | 실측 / 방법 | 위젯 페이로드: 단계별(ncMr7..RCCiX6)로 짝지어 범주형 차이만 뽑는다. 디버거는 네이티브 부모를 망친다(57 s·300031) — 위젯만 읽는다. | rewriter.md#위젯-페이로드-단계별-대조-방법 |
+| 2026-10-15 | 실사이트 / 실측 | 사람이 받는 챌린지는 HTTP/3 에 달렸다: h3 managed 8/8, h2 2/5, kernel interactive 7/7. 와이어(JA4·H2·TCP)는 같다. | rewriter.md#챌린지-종류-http3 |
+| 2026-10-15 | membrane / 수정 | 교차출처 프레임에서 정책 게이트 API(AI·MIDI·USB·센서·PaymentRequest…)와 WebGL low-power 가 네이티브와 달리 열렸다. 표로 거부. | rewriter.md#교차출처-프레임-정책-게이트-api |
+| 2026-10-15 | membrane / 수정 | XML 노드의 outerHTML 이 inert HTML 문서 복제본으로 직렬화돼 CDATA·xmlns 를 잃었다. XML 은 inert XML 문서로 복제. | rewriter.md#xml-노드-직렬화-스크럽-복제본 |
 | 2026-10-15 | 실사이트 / 방법 | 네이티브 페이지+우리 kernel 만으로 Glassdoor 가 통과(13/13) — 전송은 원인이 아니다. 가로챈 POST 본문 함정. | rewriter.md#전송만-떼어-보는-대조 |
 | 2026-10-14 | membrane / 성능 | 느림은 연산별로 잰다: 인라인 script 의 with 가 자유 식별자 132배, toString·document·location.href 20–680배였다. 고쳐도 챌린지는 그대로. | rewriter.md#멤브레인-경로-비용 |
 | 2026-10-14 | membrane / 프레임 | 프레임은 자기 realm 을 갖는다(eval/Function·함수 프로토타입·클래스). 내부 DOM 스캔은 부팅 때 잡은 네이티브로 — 페이지 메서드를 타지 않는다. | rewriter.md#프레임-realm-과-내부-호출 |

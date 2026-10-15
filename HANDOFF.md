@@ -15,7 +15,7 @@ strings below are closed as *not doing*.
 ## State
 
 - Branch `main`; everything up to `a0c81d5` (the scope rule and the isolation audit, items 93) is on `origin/main`. The commit carrying this
-  version of the file (items 94–103) is local until the user says to push.
+  version of the file (items 94–104) is local until the user says to push.
 - Commits of this arc: `8c178a7` HLS / loop cap / `innerHTML` / TLS refresh (ERRATA 58–61) · `8565ccf` five divergences found
   chasing the challenge (62–65) · `3ae6135` **Stack Overflow's Cloudflare challenge fixed** — the ClientHello lacked Chrome's
   `trust_anchors` extension — plus `Sec-Fetch-*` for frames and sub-requests (66–67) · `f8bb56a` element-load `Sec-Fetch-*`,
@@ -57,7 +57,7 @@ strings below are closed as *not doing*.
   overflow on the unsealed build. The 13 sites were A/B-ed against the previous commit's build again: the same errors on both
   sides (CNN and Stack Overflow vary run to run on both), and a lookup/eval/`Function`/member/storage micro-benchmark is within
   its run-to-run spread (free-name lookups 292–319 ms before, 297–319 ms after).
-- Detail lives in [ERRATA.md](ERRATA.md) items 62–103 and its Residuals table, the trap-notebook entries
+- Detail lives in [ERRATA.md](ERRATA.md) items 62–104 and its Residuals table, the trap-notebook entries
   (`.ai/trap-notebook/rewriter.md`: `동적-코드-전역-this`, `chrome-hello-trust-anchors`, `coep-워커-부트스트랩`,
   `lol-html-원시-속성값`, `trusted-script-는-코드`, `워커-훅-자리`, `캔버스-파블링-결정적`, `prepare-stack-trace-페이지-뷰`,
   `프렐류드-스크립트-잔존`, `referrer-한-곳에서`, `클라이언트-힌트-협상`, `전송-실패는-네트워크-오류`, `대조군은-quic`, `바쁜-렌더러는-진다`, `아이콘-링크-경주`, `교차-출처-프레임-권한`, `헬퍼-이름-응답`, `with-안의-이름`, `인라인-가드`, `같은-소스-재리라이트`, `부모-파사드로-부팅한-자식`, `창-자기-접근자`, `strict-eval-with-안`, `봉인된-표`, `워커-전역-이름`, `교차-출처-창-자식-이름`), and the verification table in [PHASE2_STATUS.md](PHASE2_STATUS.md). No gate
@@ -89,9 +89,17 @@ strings below are closed as *not doing*.
    its residual rows; fixing the three left the spans and the outcome unchanged) and what the server sees that the page cannot. **2026-10-15: the transport is cleared.** A native page whose requests are all answered by the proxy's
    own kernel passes the challenge in 13 of 13 runs (after a harness bug — an empty form-POST body — was fixed) (`.lean-ctx/gd-phase-bridge.js bridge`; ERRATA Residuals, first Glassdoor row), so HTTP/3 and the TLS/HTTP-2 stack are not
    it, and neither are the persona's Accept/Referer/header-order differences (added to the passing run one by one: still passes). The cause is in the page-side layer.
-   The lead: the **parent page's** POST to `…/fo/…` is 7980 B proxied against 9047 B natively (the widget's two big POSTs are equal in size), and then the proxied page
-   reloads instead of posting the form. Next: read the parent's payload (`orchestrate/chl_page/v1`) natively and proxied with the debugger method of `gd-pause.js`
-   (arm the main frame too), diff it as `gd-table-diff.js` does for the widget's. Other tools: `gd-proxied-trace.js` (kernel calls recorded in the SW), `gd-phase.js native|proxied`.
+   **2026-10-15, later: the challenge a person is given, and the widget's own answers.** `window._cf_chl_opt.cType` (`gd-ctype.js`): Chrome over HTTP/3 gets `managed` (passes by itself) every time, over
+   HTTP/2 about half, the proxy's kernel never (7 counted runs, every other run showed the checkbox) — the wire a probe can read is equal (`gd-echo.js`: JA4, extensions, H2 frames, TCP/IP), so HTTP/3 is what makes it reliable. The person then ticks the checkbox and
+   passes natively but not through the proxy: the parent's final payload carries the widget's `error` / `600010`. The widget's payload (read after the click with a breakpoint on `XMLHttpRequest.send`,
+   `gd-pause2.js`; an attached debugger spoils the native parent, so only the widget is read natively) is 38 probe stages with a wall time and a categorical answer each. Compared stage by stage:
+   fixed in ERRATA 104 — the built-in AI, ~20 policy-gated APIs and the sensors/PaymentRequest constructors in a cross-origin frame, WebGL's low-power preference there, XML `outerHTML`
+   (the payload fields now equal native's; the outcome is unchanged). Found, measured, not done (Residuals): the target's CSP is not applied (the widget counts its Trusted Types `default` policy
+   being called 43 times natively, 0 proxied), `connection.rtt` is 0, audio noise is detected (the proxy's `getChannelData` farble: with it off the audio hash equals native's; **your call whether to keep it**),
+   inline-script entity decoding, the stage timings (sum 1.4 s native, 6.7 s proxied). Method that found them: per-stage membrane operation counts (a temporary `get`/`set` bucket counter keyed by the stage's own
+   `ncMr7..RCCiX6` window) and native-vs-proxied probes of one API family at a time (`gd-gated-apis.js`, `gd-webgl-attr.js`, `gd-ai-avail.js`, `gd-parser-cmp.js`, `gd-tthook.js`). **The inverse experiment is next**:
+   `gd-inverse.js` makes the native-page+kernel run (which passes) behave like the proxied one a factor at a time (`INVERSE=ai|gl|gated|audio|rtt|csp|csp-all`, `N=3`) — a factor that turns the pass into a fail
+   is worth building (Trusted Types enforcement is the expensive one). Other tools: `gd-proxied-trace.js` (kernel calls recorded in the SW), `gd-phase.js native|proxied`.
    Measured Resource Timing gaps worth fixing on their own (an XHR is `fetch`, a `<link>` load is `img`, a cross-origin frame's
    entry shows `h2`/sizes) are in the same row.
 4. **Not doing:** a page's own `eval` / `new Function` code prints as a script frame, not V8's eval-origin text (ERRATA
@@ -114,7 +122,7 @@ strings below are closed as *not doing*.
    interstitial; passing it is not ours to do (scope). Five loads after the fixes: the worker runs, no exception in any target.
    Lab tool: `.lean-ctx/reddit-targets.js` (lists targets, exceptions with stack and source around the position).
 
-Done this round and closed: items 71–103 (see State); before that the meta-CSP lone `'` (69), the inline-script stack (70),
+Done this round and closed: items 71–104 (see State); before that the meta-CSP lone `'` (69), the inline-script stack (70),
 Reddit (parity re-checked with a fresh unautomated Chrome — same wall natively).
 
 ## How to run things
