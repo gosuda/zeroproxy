@@ -3062,16 +3062,87 @@ function createTargetServer(requests, pendingResponses) {
         out.allowed = fp.allowedFeatures().filter(function (f) { return f !== 'unload'; }).sort().join(',');
         out.allowsCamera = fp.allowsFeature('camera') + ' ' + fp.allowsFeature('camera', 'https://other.example') + ' ' + fp.allowsFeature('sync-xhr', 'https://other.example');
         out.allowlist = ['camera', 'fullscreen', 'sync-xhr', 'payment'].map(function (f) { return f + '=' + JSON.stringify(fp.getAllowlistForFeature(f)); }).join(' ');
+        // What the policy-gated APIs answer where their feature is refused (the cross-origin frame without delegation): the
+        // browser's own error, at once. The frame that is delegated only reads the values that follow from 'fullscreen'.
+        out.fullscreenEnabled = document.fullscreenEnabled;
+        var gl = function (c, kind, attrs) { try { var g = c.getContext(kind, attrs); return g ? g.getContextAttributes().powerPreference : 'null'; } catch (e) { return e.name; } };
+        out.power = [gl(document.createElement('canvas'), 'webgl2'), gl(document.createElement('canvas'), 'webgl', { powerPreference: 'high-performance' }), gl(new OffscreenCanvas(8, 8), 'webgl2', { powerPreference: 'low-power' })].join();
+        if (location.pathname === '/xfp-cross') {
+          out.gated = {};
+          var settle = function (name, f) {
+            return Promise.race([Promise.resolve().then(f), new Promise(function (r) { setTimeout(function () { r('TIMEOUT'); }, 3000); })]).then(
+              function (v) { out.gated[name] = 'ok ' + (v === 'TIMEOUT' ? v : typeof v === 'object' && v ? v.constructor.name : String(v)); },
+              function (e) { out.gated[name] = e.name + ': ' + e.message; });
+          };
+          var tests = [
+            ['keyboard.getLayoutMap', function () { return navigator.keyboard.getLayoutMap(); }],
+            ['requestMIDIAccess', function () { return navigator.requestMIDIAccess(); }],
+            ['requestMediaKeySystemAccess', function () { return navigator.requestMediaKeySystemAccess('org.w3.clearkey', [{ initDataTypes: ['cenc'], videoCapabilities: [{ contentType: 'video/mp4; codecs="avc1.42E01E"' }] }]); }],
+            ['getDisplayMedia', function () { return navigator.mediaDevices.getDisplayMedia({ video: true }); }],
+            ['getUserMedia', function () { return navigator.mediaDevices.getUserMedia({ audio: true }); }],
+            ['usb', function () { return navigator.usb.getDevices(); }],
+            ['hid', function () { return navigator.hid.getDevices(); }],
+            ['serial', function () { return navigator.serial.getPorts(); }],
+            ['bluetooth', function () { return navigator.bluetooth.getAvailability(); }],
+            ['wakeLock', function () { return navigator.wakeLock.request('screen'); }],
+            ['queryLocalFonts', function () { return window.queryLocalFonts(); }],
+            ['share', function () { return navigator.share({ title: 'x' }); }],
+            ['canShare', function () { return navigator.canShare({ title: 'x' }); }],
+            ['xr', function () { return navigator.xr.isSessionSupported('immersive-vr'); }],
+            ['requestFullscreen', function () { return document.documentElement.requestFullscreen(); }],
+            ['showOpenFilePicker', function () { return window.showOpenFilePicker(); }],
+            ['payment', function () { return new PaymentRequest([{ supportedMethods: 'basic-card' }], { total: { label: 'x', amount: { currency: 'USD', value: '1' } } }); }],
+          ];
+          ['Accelerometer', 'Gyroscope', 'Magnetometer', 'LinearAccelerationSensor', 'AbsoluteOrientationSensor'].forEach(function (n) { if (window[n]) tests.push(['new ' + n, function () { return new window[n](); }]); });
+          [['Translator', { sourceLanguage: 'en', targetLanguage: 'ko' }], ['Summarizer'], ['LanguageDetector'], ['LanguageModel']].forEach(function (a) {
+            if (!window[a[0]]) return;
+            tests.push([a[0] + '.availability', function () { return window[a[0]].availability(a[1]); }]);
+            tests.push([a[0] + '.create', function () { return window[a[0]].create(a[1]); }]);
+          });
+          for (var t of tests) await settle(t[0], t[1]);
+          // the construction is the sync path: it throws, it does not reject
+          try { new Gyroscope(); out.gated.gyroSync = 'constructed'; } catch (e) { out.gated.gyroSync = e.name; }
+          out.gated.ctorIdentity = (Object.getPrototypeOf(Gyroscope.prototype) === Sensor.prototype) + ' ' + (Gyroscope.prototype.constructor === Gyroscope) + ' ' + Gyroscope.name + ' ' + Gyroscope.length + ' ' + Function.prototype.toString.call(Gyroscope);
+        }
+        // delegated with the allow attribute: the browser own answer, the one the top frame gets
+        if (location.pathname === '/xfp-cross-allow') { try { out.delegated = await Translator.availability({ sourceLanguage: 'en', targetLanguage: 'ko' }); } catch (e) { out.delegated = e.name; } }
         if (window.top === window) window.__xfpAdd(out); else parent.postMessage({ xfp: out }, '*');
       })();</script>`;
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       if (url.pathname === '/xfp') {
         res.end(`<!doctype html><title>fp</title><script>window.__xfpAdd = function (o) { window.__xfpOut = (window.__xfpOut || []).concat([o]); if (window.__xfpOut.length === 4) window.__xfp = window.__xfpOut.slice().sort(function (a, b) { return a.where < b.where ? -1 : 1; }); };
           addEventListener('message', function (e) { if (e.data && e.data.xfp) window.__xfpAdd(e.data.xfp); });</script>${probe}
-          <iframe src="/xfp-same"></iframe><iframe src="${other}/xfp-cross"></iframe><iframe src="${other}/xfp-cross-allow" allow="fullscreen; autoplay; camera"></iframe>`);
+          <iframe src="/xfp-same"></iframe><iframe src="${other}/xfp-cross"></iframe><iframe src="${other}/xfp-cross-allow" allow="fullscreen; autoplay; camera; translator"></iframe>`);
         return;
       }
       res.end(`<!doctype html><title>fp</title>${probe}`);
+      return;
+    }
+    if (url.pathname === '/xxml') {
+      // A document the page makes with DOMParser from an XML type, and what its elements serialize as: the XML serializer's
+      // text (self-closing tags, CDATA sections, the namespace attributes), not the HTML one's. An HTML parse is the control.
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(`<!doctype html><title>xml</title><script>
+        (function () {
+          var out = {};
+          var cases = [
+            ['application/xml', '<root><br/><![CDATA[a<b]]><x xmlns="urn:x" a="&' + 'amp;"/></root>'],
+            ['image/svg+xml', '<svg xmlns="http://www.w3.org/2000/svg"><desc><![CDATA[x]]></desc><circle r="1"/></svg>'],
+            ['text/xml', '<div data-foo="&' + '#34;"></div>'],
+            ['text/xml', '<p>a</div>'],
+            ['application/xhtml+xml', '<html xmlns="http://www.w3.org/1999/xhtml"><body><br/><p>a</p></body></html>'],
+          ];
+          cases.forEach(function (c, i) {
+            var d = new DOMParser().parseFromString(c[1], c[0]), de = d.documentElement;
+            out[i + ' outer'] = de.outerHTML;
+            out[i + ' inner'] = de.innerHTML;
+            out[i + ' serial'] = new XMLSerializer().serializeToString(d);
+            out[i + ' child'] = de.firstElementChild ? de.firstElementChild.outerHTML : '';
+          });
+          out.html = new DOMParser().parseFromString('<p>a<br>b</p><img src=x>', 'text/html').body.innerHTML;
+          window.__xxml = out;
+        })();
+      </script>`);
       return;
     }
     if (url.pathname.startsWith('/xch')) {
@@ -8203,6 +8274,33 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     const cross = direct.find(o => o.where === '/xfp-cross');
     assert.equal(cross.notif, 'denied');
     assert.notEqual(cross.allowed, direct.find(o => o.where === '/xfp').allowed, 'natively a cross-origin frame is allowed fewer features');
+    assert.deepEqual(proxied, direct);
+  });
+
+  // A DOMParser document of an XML type read back with `outerHTML` / `innerHTML`: the membrane's serialization scrub copied the
+  // element into an HTML document, whose serializer writes `<br></br>`, drops CDATA sections and the `xmlns` attributes.
+  await t.test('an XML document from DOMParser serializes as XML, CDATA and namespaces kept (matches native)', async () => {
+    const targetBase = `http://${targetHost}:${targetPort}`;
+    const collect = async p => {
+      try {
+        await p.waitForFunction(() => window.__xxml, { timeout: 120000, polling: 100 });
+        return await p.evaluate(() => window.__xxml);
+      } finally {
+        await p.close();
+      }
+    };
+    const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    let direct;
+    try {
+      const p = await directBrowser.newPage();
+      await p.goto(`${targetBase}/xxml`, { waitUntil: 'domcontentloaded' });
+      direct = await collect(p);
+    } finally {
+      await directBrowser.close();
+    }
+    const proxied = await collect(await openProxiedPage(`${targetBase}/xxml`));
+    fs.writeFileSync(path.join(artifacts, 'xml-serialization.json'), JSON.stringify({ direct, proxied }, null, 2));
+    assert.ok(direct['0 outer'].includes('<br/>') && direct['1 serial'].includes('CDATA'), 'natively the XML serializer is used');
     assert.deepEqual(proxied, direct);
   });
 

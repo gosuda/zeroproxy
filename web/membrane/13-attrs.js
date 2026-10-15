@@ -636,15 +636,24 @@
   // every read produced attempts and violation reports; e2e wire, 2026-09-29).
   // A live clone also runs custom-element constructors: page code executing
   // because something serialized. Native serialization does neither.
-  let scrubDoc = null;
-  function inertScrubDocument() {
+  let scrubDoc = null, scrubXmlDoc = null;
+  // An XML node (a DOMParser 'application/xml' / 'image/svg+xml' result, an XHTML page) is serialized by the XML serializer —
+  // `<br/>`, CDATA sections and `xmlns` kept — so its copy is made in an inert XML document, not the HTML one, whose serializer
+  // gives `<br></br>`, loses the CDATA and drops the namespace attribute (the same string natively differs: measured 2026-10-15).
+  function inertScrubDocument(node) {
+    let xml = false;
+    try { const od = node && node.ownerDocument; xml = !!(od && /xml/i.test(od.contentType)); } catch {}
+    if (xml) {
+      if (!scrubXmlDoc && Native.createXMLDocument) { try { scrubXmlDoc = Native.createXMLDocument(); } catch { scrubXmlDoc = null; } }
+      return scrubXmlDoc;
+    }
     if (!scrubDoc && Native.createHTMLDocument) { try { scrubDoc = Native.createHTMLDocument(''); } catch { scrubDoc = null; } }
     return scrubDoc;
   }
   function scrubbedClone(node) {
     let clone;
     try {
-      const inert = node && node.nodeType !== 9 && typeof Native.importNode === 'function' ? inertScrubDocument() : null;
+      const inert = node && node.nodeType !== 9 && typeof Native.importNode === 'function' ? inertScrubDocument(node) : null;
       clone = inert ? Native.importNode.call(inert, node, true) : node.cloneNode(true);
     } catch { clone = null; }
     if (!clone) return null;

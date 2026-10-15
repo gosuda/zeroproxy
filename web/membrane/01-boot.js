@@ -112,6 +112,7 @@
       createNodeIterator: w.Document.prototype.createNodeIterator,
       createTreeWalker: w.Document.prototype.createTreeWalker,
       createHTMLDocument: d.implementation && d.implementation.createHTMLDocument && d.implementation.createHTMLDocument.bind(d.implementation),
+      createXMLDocument: d.implementation && d.implementation.createDocument && (() => d.implementation.createDocument(null, null, null)),
       importNode: w.Document.prototype.importNode,
       scriptText: w.HTMLScriptElement && Object.getOwnPropertyDescriptor(w.HTMLScriptElement.prototype, 'text'),
       nodeTextContent: Object.getOwnPropertyDescriptor(w.Node.prototype, 'textContent'),

@@ -775,6 +775,128 @@
         });
       }
     }
+    // ── Policy-gated APIs in a frame cross-origin to its embedder (2026-10-15; .lean-ctx/gd-gated-apis.js, Chrome 154) ──────────────
+    // Underneath, every frame is the proxy origin, so the browser's own policy check let a cross-origin frame use what only a
+    // same-origin one may: each feature whose default allowlist is 'self' and that the embedder did not delegate with `allow`.
+    // Natively these APIs refuse there, at once, with the browser's own error — and Turnstile's widget reads how they answer
+    // (its stage said "downloadable" for the built-in AI here against "unavailable" natively, and Summarizer took 3 s to say so).
+    // The table is what Chrome 154 answered in a cross-origin frame. "Denied here" is the virtual policy above — an `allow` that
+    // delegates the feature, or the document's own Permissions-Policy header, are the same question the browser asks — so a call
+    // the browser would have let through runs natively.
+    const policyError = (name, message) => (name === 'TypeError'
+      ? new (w.TypeError || TypeError)(message)
+      : new (w.DOMException || Native.DOMException)(message, name));
+    const rejects = (name, message) => () => (w.Promise || Promise).reject(policyError(name, message));
+    const resolves = value => () => (w.Promise || Promise).resolve(value);
+    const filePickerRefusal = member => rejects('SecurityError', `Failed to execute '${member}' on 'Window': Cross origin sub frames aren't allowed to show a file picker.`);
+    const refusal = (api, member, feature) => rejects('SecurityError', `Failed to execute '${member}' on '${api}': Access to the feature "${feature}" is disallowed by permissions policy.`);
+    const gatedMembers = [
+      // [interface, member, feature, answer]; 'Window' members sit on the window itself, a static one on the constructor (static: true)
+      ['Keyboard', 'getLayoutMap', 'keyboard-map', rejects('SecurityError', 'getLayoutMap() must be called from a top-level browsing context or allowed by the permission policy.')],
+      ['Navigator', 'requestMIDIAccess', 'midi', rejects('SecurityError', `Failed to execute 'requestMIDIAccess' on 'Navigator': Midi has been disabled in this document by permissions policy.`)],
+      ['Navigator', 'requestMediaKeySystemAccess', 'encrypted-media', rejects('SecurityError', `Failed to execute 'requestMediaKeySystemAccess' on 'Navigator': requestMediaKeySystemAccess is disabled by permissions policy.`)],
+      ['MediaDevices', 'getDisplayMedia', 'display-capture', rejects('NotAllowedError', `Failed to execute 'getDisplayMedia' on 'MediaDevices': Access to the feature "display-capture" is disallowed by permissions policy.`)],
+      ['USB', 'getDevices', 'usb', refusal('USB', 'getDevices', 'usb')],
+      ['HID', 'getDevices', 'hid', refusal('HID', 'getDevices', 'hid')],
+      ['Serial', 'getPorts', 'serial', refusal('Serial', 'getPorts', 'serial')],
+      ['Bluetooth', 'getAvailability', 'bluetooth', resolves(false)],
+      ['WakeLock', 'request', 'screen-wake-lock', rejects('NotAllowedError', `Failed to execute 'request' on 'WakeLock': Access to Screen Wake Lock features is disallowed by permissions policy`)],
+      ['Window', 'getScreenDetails', 'window-management', rejects('NotAllowedError', 'Permission denied.')],
+      ['Window', 'queryLocalFonts', 'local-fonts', rejects('SecurityError', `Failed to execute 'queryLocalFonts' on 'Window': Access to the feature "local-fonts" is disallowed by Permissions Policy`)],
+      // not policy: the browser refuses these in any frame cross-origin to the top (feature null)
+      ['Navigator', 'share', null, rejects('NotAllowedError', `Failed to execute 'share' on 'Navigator': Permission denied`)],
+      ['Navigator', 'canShare', null, () => false],
+      ['Window', 'showOpenFilePicker', null, filePickerRefusal('showOpenFilePicker')],
+      ['Window', 'showSaveFilePicker', null, filePickerRefusal('showSaveFilePicker')],
+      ['Window', 'showDirectoryPicker', null, filePickerRefusal('showDirectoryPicker')],
+      ['XRSystem', 'isSessionSupported', 'xr-spatial-tracking', refusal('XRSystem', 'isSessionSupported', 'xr')],
+      ['PressureObserver', 'observe', 'compute-pressure', rejects('NotAllowedError', `Failed to execute 'observe' on 'PressureObserver': Access to the feature "compute pressure" is disallowed by permissions policy.`)],
+      ['Element', 'requestFullscreen', 'fullscreen', rejects('TypeError', 'Disallowed by permissions policy')],
+    ];
+    // the built-in AI: `availability()` is "unavailable" at once and `create()` is refused
+    for (const [apiName, feature] of [['Translator', 'translator'], ['LanguageDetector', 'language-detector'], ['Summarizer', 'summarizer'],
+      ['LanguageModel', 'language-model'], ['Writer', 'writer'], ['Rewriter', 'rewriter'], ['Proofreader', 'proofreader']]) {
+      gatedMembers.push([apiName, 'availability', feature, resolves('unavailable'), true]);
+      gatedMembers.push([apiName, 'create', feature, rejects('NotAllowedError', 'Access denied because the Permission Policy is not enabled.'), true]);
+    }
+    for (const [apiName, member, feature, answer, isStatic] of gatedMembers) {
+      let holder;
+      try { holder = apiName === 'Window' ? w : (isStatic ? w[apiName] : w[apiName] && w[apiName].prototype); } catch { holder = null; }
+      if (!holder || (apiName !== 'Window' && typeof w[apiName] !== 'function')) continue;
+      replaceNativeMethod(holder, member, orig => ({ [member](...args) {
+        if (feature === null ? crossOriginFrame : featureDeniedHere(feature)) return answer();
+        return Reflect.apply(orig, this, args);
+      } })[member]);
+    }
+    // Constructors that refuse the same way (a sensor, a payment request): a Proxy of the native, which keeps its prototype and
+    // statics; the prototype's `constructor` names the Proxy, so `new Gyroscope().constructor === Gyroscope` holds.
+    const gatedConstructors = [
+      ['Accelerometer', ['accelerometer']], ['LinearAccelerationSensor', ['accelerometer']], ['GravitySensor', ['accelerometer']],
+      ['Gyroscope', ['gyroscope']], ['Magnetometer', ['magnetometer']], ['AmbientLightSensor', ['ambient-light-sensor']],
+      ['AbsoluteOrientationSensor', ['accelerometer', 'gyroscope', 'magnetometer']], ['RelativeOrientationSensor', ['accelerometer', 'gyroscope']],
+    ];
+    for (const [ctorName, features] of gatedConstructors) {
+      const Orig = w[ctorName];
+      if (typeof Orig !== 'function') continue;
+      const wrapped = new Proxy(Orig, {
+        construct(target, args, newTarget) {
+          if (features.some(featureDeniedHere)) throw policyError('SecurityError', `Failed to construct '${ctorName}': Access to sensor features is disallowed by permissions policy`);
+          return Reflect.construct(target, args, newTarget === wrapped ? target : newTarget);
+        },
+      });
+      try { maskNativeFunction(wrapped, ctorName); } catch {}
+      try { Object.defineProperty(Orig.prototype, 'constructor', { value: wrapped, writable: true, configurable: true }); } catch {}
+      define(w, ctorName, wrapped);
+    }
+    if (typeof w.PaymentRequest === 'function') {
+      const Orig = w.PaymentRequest;
+      const wrapped = new Proxy(Orig, {
+        construct(target, args, newTarget) {
+          if (featureDeniedHere('payment')) throw policyError('SecurityError', `Failed to construct 'PaymentRequest': Must be in a top-level browsing context or an iframe needs to specify allow="payment" explicitly`);
+          return Reflect.construct(target, args, newTarget === wrapped ? target : newTarget);
+        },
+      });
+      try { maskNativeFunction(wrapped, 'PaymentRequest'); } catch {}
+      try { Object.defineProperty(Orig.prototype, 'constructor', { value: wrapped, writable: true, configurable: true }); } catch {}
+      define(w, 'PaymentRequest', wrapped);
+    }
+    // a camera or a microphone is refused before any prompt
+    if (w.MediaDevices && w.MediaDevices.prototype) {
+      replaceNativeMethod(w.MediaDevices.prototype, 'getUserMedia', orig => ({ getUserMedia(...args) {
+        let audio = false, video = false;
+        try { const c = args[0]; audio = !!(c && c.audio); video = !!(c && c.video); } catch {}
+        if ((audio && featureDeniedHere('microphone')) || (video && featureDeniedHere('camera'))) return rejects('NotAllowedError', 'Permission denied')();
+        return Reflect.apply(orig, this, args);
+      } }).getUserMedia);
+    }
+    // `document.fullscreenEnabled` is false where 'fullscreen' is not allowed
+    for (const key of ['fullscreenEnabled', 'webkitFullscreenEnabled']) {
+      const fd = w.Document && Object.getOwnPropertyDescriptor(w.Document.prototype, key);
+      if (fd && typeof fd.get === 'function') {
+        replaceNativeAccessor(w.Document.prototype, key, function () {
+          const v = Reflect.apply(fd.get, this, []);
+          return v && featureDeniedHere('fullscreen') ? false : v;
+        });
+      }
+    }
+    // A WebGL context made in a cross-origin frame is on the low-power GPU whatever it asked for (measured natively: the attribute
+    // reads "low-power" for a request of "default", "high-performance" and "low-power" alike, on WebGL and WebGL2, canvas and
+    // OffscreenCanvas; the top frame honours the request). Turnstile's widget reads the attribute.
+    if (crossOriginFrame) {
+      for (const Ctor of [w.HTMLCanvasElement, w.OffscreenCanvas]) {
+        replaceNativeMethod(Ctor && Ctor.prototype, 'getContext', orig => ({ getContext(...args) {
+          try {
+            if (/^(experimental-)?webgl2?$/.test(String(args[0]))) {
+              const given = args[1];
+              if (given === undefined || given === null || typeof given === 'object' || typeof given === 'function') {
+                args = [args[0], Object.create(given || null, { powerPreference: { value: 'low-power', enumerable: true } }), ...args.slice(2)];
+              }
+            }
+          } catch {}
+          return Reflect.apply(orig, this, args);
+        } }).getContext);
+      }
+    }
     // D7: Notification permission state must be per-target-origin. Wrap the
     // static permission getter; granting is still gated by the native browser
     // UI but target code seeing 'default'/'denied' will react in its own
@@ -901,7 +1023,7 @@
         if (typeof name !== 'string') return null;
         if (opaqueDocument) return 'denied';
         if (crossOriginFrame && (name === 'notifications' || name === 'push')) return 'denied';
-        if (featureDeniedHere(name)) return 'denied';
+        if (name !== 'accelerometer' && name !== 'gyroscope' && name !== 'magnetometer' && featureDeniedHere(name)) return 'denied';
         if (trackedPerms.has(name) && !grantedPerms.has(name)) return 'prompt';
         return null;
       };
