@@ -86,9 +86,12 @@ strings below are closed as *not doing*.
    breakpoint on `XMLHttpRequest.send` (`gd-pause.js`; `gd-table-diff.js`, `gd-fields.js`). With those fixed the VM's property table matches native in every group and the
    outcome is unchanged; stack positions are not part of the verdict (`gd-shift.js`). What is left: the time profile (the VM's phases run 3–4× slower; the membrane's
    self time is more than the challenge script's — per-operation loops found four paths 20–680× native (toString, `document`, `location.href`, plain-object members) and the inline-script `with` at 132×, ERRATA 103 and
-   its residual rows; fixing the three left the spans and the outcome unchanged) and what the server sees that the page cannot — HTTP/3 is the other open road. Left: HTTP/3 (a default Chrome gets a challenge that
-   passes by itself; with QUIC off native gets the checkbox the proxy gets) or further measurements of what the widget reads, one
-   hypothesis per run (harness: `gd-phase.js native|proxied`, `CPU=`/`LAT=` to slow native; each run is ~1 minute; space them).
+   its residual rows; fixing the three left the spans and the outcome unchanged) and what the server sees that the page cannot. **2026-10-15: the transport is cleared.** A native page whose requests are all answered by the proxy's
+   own kernel passes the challenge in 13 of 13 runs (after a harness bug — an empty form-POST body — was fixed) (`.lean-ctx/gd-phase-bridge.js bridge`; ERRATA Residuals, first Glassdoor row), so HTTP/3 and the TLS/HTTP-2 stack are not
+   it, and neither are the persona's Accept/Referer/header-order differences (added to the passing run one by one: still passes). The cause is in the page-side layer.
+   The lead: the **parent page's** POST to `…/fo/…` is 7980 B proxied against 9047 B natively (the widget's two big POSTs are equal in size), and then the proxied page
+   reloads instead of posting the form. Next: read the parent's payload (`orchestrate/chl_page/v1`) natively and proxied with the debugger method of `gd-pause.js`
+   (arm the main frame too), diff it as `gd-table-diff.js` does for the widget's. Other tools: `gd-proxied-trace.js` (kernel calls recorded in the SW), `gd-phase.js native|proxied`.
    Measured Resource Timing gaps worth fixing on their own (an XHR is `fetch`, a `<link>` load is `img`, a cross-origin frame's
    entry shows `h2`/sizes) are in the same row.
 4. **Not doing:** a page's own `eval` / `new Function` code prints as a script frame, not V8's eval-origin text (ERRATA

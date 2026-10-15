@@ -1910,3 +1910,14 @@ CDP 브레이크포인트(`Debugger.setBreakpointOnFunctionCall`)를 걸고 멈�
 plain 객체(리터럴·`Reflect`·VM 디스패치 표)의 멤버 읽기/쓰기/호출도 긴 길을 탔다 — 위젯 22 s 에 멤브레인 호출 1130만 번을 세어 보고 프로토타입이 `Object.prototype`/null 이면 빠른 길로 보냈다(610만 번, 멤브레인 시간 2.4 s → 1.6 s).
 **결과**: 위젯의 구간 합은 그대로(5.2–6.0 s)이고 판정도 그대로다 — 이 넷은 위젯 시간의 주된 몫이 아니었다. **재발 방지**: 멤브레인 경로를 건드릴 때 `page-globals.html` 류의 연산별 A/B 를 돌려 네이티브 대비 배수를 본다.
 `get`/`set`/`call` 에 검사를 더하면 모든 재작성 코드가 그 비용을 낸다. 위젯 프로파일은 `gd-profile.js`(CPU), `gd-evalstats.js`(eval 계측) 로 본다.
+
+## <a id="전송만-떼어-보는-대조"></a>전송 계층만 떼어 보는 대조 — 네이티브 페이지 + 우리 kernel (2026-10-15)
+
+**질문**: Glassdoor 챌린지가 실패하는 이유가 페이지 쪽(리라이터·멤브레인)인가, 전송(TLS/HTTP-2/kernel·HTTP/3 부재)인가. 둘이 한 경로에 얽혀 있어서 지문·페이로드를 아무리 맞춰도 가를 수 없었다.
+**방법**: 진짜 Chrome 이 진짜 오리진 `glassdoor.com` 을 연다(리라이터·멤브레인·프록시 SW 없음). puppeteer 요청 가로채기로 http(s) 요청을 전부(OOPIF 위젯 프레임 포함) 가로채 프록시 SW 안의 `self.kernelFetch` 에 CDP 로 넘긴다
+(`.lean-ctx/gd-bridge-lib.js`, 실행은 `gd-phase-bridge.js bridge`). 헤더는 Chrome 의 것을 SW 의 측정된 순서표로 정렬하고, 쿠키는 페이지의 jar 에서 읽어 응답의 Set-Cookie 를 도로 넣는다.
+**대조군**: 가로채기만 켜고 전부 `continue()` — 통과해야 가로채기 자체가 판정을 안 바꾼다는 뜻이다(통과). **결과**: 통과 13/13. 프록시 페르소나의 헤더 차이(이미지 Accept `*/*`, `no-referrer` fetch 의 Referer, 사용자 헤더 정렬)를 하나씩·함께 얹어도 통과 —
+전송과 그 헤더는 원인이 아니다. 원인은 프록시된 페이지 쪽에 있다.
+**함정**: ① `req.fetchPostData()` 는 가로챈 내비게이션 POST(폼)에서 protocolTimeout(120 s)까지 멈추고 빈 본문이 된다 — `req.postData()` 를 먼저 쓴다. 처음 두 실행이 이것 때문에 실패했고 "서버가 120 s 붙잡는 타피트" 처럼 보였다.
+요청 헤더를 와이어(`Network.requestWillBeSentExtraInfo`)와 나란히 보고서야 본문 길이 0 을 알았다. ② CDP 수준의 요청 헤더에는 Sec-Fetch-*·Accept-Language 가 없다 — 네트워크 층이 나중에 붙인다.
+**다음**: 부모 페이지의 `…/fo/…` POST 가 프록시에서 7980 B, 네이티브에서 9047 B 다 — 위젯의 큰 POST 둘은 같은 크기. 부모의 페이로드를 디버거로 읽어 비교한다.

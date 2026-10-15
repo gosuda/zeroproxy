@@ -6,6 +6,7 @@
 
 | Date | Category | Summary | Detail |
 |---|---|---|---|
+| 2026-10-15 | 실사이트 / 방법 | 네이티브 페이지+우리 kernel 만으로 Glassdoor 가 통과(13/13) — 전송은 원인이 아니다. 가로챈 POST 본문 함정. | rewriter.md#전송만-떼어-보는-대조 |
 | 2026-10-14 | membrane / 성능 | 느림은 연산별로 잰다: 인라인 script 의 with 가 자유 식별자 132배, toString·document·location.href 20–680배였다. 고쳐도 챌린지는 그대로. | rewriter.md#멤브레인-경로-비용 |
 | 2026-10-14 | membrane / 프레임 | 프레임은 자기 realm 을 갖는다(eval/Function·함수 프로토타입·클래스). 내부 DOM 스캔은 부팅 때 잡은 네이티브로 — 페이지 메서드를 타지 않는다. | rewriter.md#프레임-realm-과-내부-호출 |
 | 2026-10-14 | 실사이트 / 방법 | 챌린지가 보내는 값은 XHR.send 브레이크포인트로 읽는다(페이지에 계측하면 차단). 표·필드 비교 도구. 스택 위치는 원인이 아니다. | rewriter.md#챌린지-페이로드-읽기 |
