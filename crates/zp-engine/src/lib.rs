@@ -1,16 +1,16 @@
-//! zp-engine — host-agnostic transform facade (REFACTOR.md §3.1).
+//! Host-agnostic document transform facade (`zp-engine`).
 //!
 //! Single entry point for embedders that need ZeroProxy's document
-//! pipeline without the wasm-bindgen surface: script rewrite (full +
-//! patch mode), source-map composition, HTML transform (one-shot +
+//! pipeline without the wasm-bindgen surface: script rewrite (full and
+//! patch mode), source-map composition, HTML transform (one-shot and
 //! streaming [`zp_htmltx::HtmlTxn`]), CSS rewrite, CSP construction, and
 //! Cloudflare challenge detection.
 //!
 //! `zp-bundle` and `zp-page-bundle` `#[wasm_bindgen]` exports delegate
-//! here so the JS-facing and native paths share one implementation —
-//! including error strings, which callers surface verbatim.
+//! here so the JS-facing and native paths share one implementation,
+//! including error strings.
 //!
-//! No wasm-bindgen, no web-sys: this crate builds for any target.
+//! Builds for any target without `wasm-bindgen` or `web-sys`.
 
 pub use zp_css as css;
 pub use zp_htmltx as htmltx;
@@ -55,9 +55,8 @@ impl<'a> DocCtx<'a> {
     }
 }
 
-/// Facade error. `Display` deliberately delegates to the inner error's
-/// text so wasm shims (`JsError::new(&e.to_string())`) emit byte-identical
-/// messages to the pre-facade code.
+/// Facade error. `Display` delegates to the inner error text so WASM shims
+/// (`JsError::new(&e.to_string())`) emit identical messages.
 #[derive(Debug)]
 pub enum EngineError {
     UnknownScriptKind(String),
@@ -91,9 +90,8 @@ impl From<zp_htmltx::TransformError> for EngineError {
     }
 }
 
-/// `kind` string → [`ScriptKind`]. The accepted names are part of the JS
-/// ABI (`rewriteScript(src, kind, …)`), so the table lives here where
-/// both bundle shims can share it.
+/// Maps a `kind` string to [`ScriptKind`]. The accepted names form part of the
+/// JS ABI (`rewriteScript(src, kind, ...)`).
 pub fn parse_script_kind(kind: &str) -> Result<ScriptKind, EngineError> {
     match kind {
         "classic" => Ok(ScriptKind::Classic),
@@ -107,8 +105,8 @@ pub fn parse_script_kind(kind: &str) -> Result<ScriptKind, EngineError> {
     }
 }
 
-/// JSON envelope for patch-mode rewrites. Hand-rolled to avoid a
-/// serde_json dependency drag — the schema is the frozen wire contract:
+/// JSON envelope for patch-mode rewrites. Serialized without `serde_json`
+/// following the wire contract:
 /// `{"len":<u32>,"patches":[{"start":<u32>,"end":<u32>,"replacement":"<str>"}]}`.
 pub fn patches_to_json(source_len: usize, patches: &[zp_rewriter::Patch]) -> String {
     let mut out = String::with_capacity(source_len / 4 + 64);
@@ -170,8 +168,8 @@ impl TransformEngine {
         }
     }
 
-    /// Transformer version — mirrors `zp_shared::TRANSFORMER_VERSION`;
-    /// the SW↔prelude version check keys off this string.
+    /// Transformer version (mirrors `zp_shared::TRANSFORMER_VERSION`), used
+    /// by the version check between the Service Worker and prelude.
     pub fn version(&self) -> &'static str {
         zp_shared::TRANSFORMER_VERSION
     }
@@ -191,7 +189,7 @@ impl TransformEngine {
             .map_err(EngineError::from)
     }
 
-    /// Patch-mode emit — returns the flat patch JSON envelope
+    /// Patch-mode emit: returns the flat patch JSON envelope
     /// (`patches_to_json`) without reconstructing the output source.
     pub fn rewrite_script_patches_json(
         &mut self,
@@ -245,7 +243,7 @@ impl TransformEngine {
             .map_err(EngineError::from)
     }
 
-    /// Streaming HTML transform — the caller feeds decoded chunks into
+    /// Streaming HTML transform: the caller feeds decoded chunks into
     /// the returned transaction and pipes rewritten bytes out per write.
     pub fn html_txn(&self, ctx: &DocCtx, prelude_html: &str) -> zp_htmltx::HtmlTxn {
         let opts = ctx.transform_options();

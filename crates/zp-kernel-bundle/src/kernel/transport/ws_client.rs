@@ -1,25 +1,22 @@
 //! Target-side WebSocket client (RFC 6455).
 //!
-//! Sits on top of the existing dialer (yamux → SOCKS5 → optional TLS via
-//! `PooledConn`) and adds:
+//! Sits on top of the dialer (yamux, SOCKS5, and optional TLS via
+//! `PooledConn`) and implements:
 //!
-//! * **Client handshake** — HTTP/1.1 GET with `Upgrade: websocket`,
+//! * **Client handshake**: HTTP/1.1 GET with `Upgrade: websocket`,
 //!   random 16-byte `Sec-WebSocket-Key`, validation of the server's
 //!   `Sec-WebSocket-Accept = base64(SHA1(key || GUID))` per §1.3.
-//! * **Frame codec** — minimal subset of §5: encode binary/text/close/
-//!   pong with client mask (§5.3 — MUST be set for client→server), decode
-//!   server frames (MUST NOT be masked; fail the connection if they are).
+//! * **Frame codec**: minimal subset of §5: encode binary/text/close/
+//!   pong with client mask (§5.3, required for client-to-server frames), decode
+//!   server frames (must not be masked; fail the connection if they are).
 //!   Fragmentation across continuation frames is supported on read; we
 //!   never fragment on write (message bodies fit in one frame).
-//! * **JS surface** — `WsClient` is exposed to JS via `wasm_bindgen` with
+//! * **JS surface**: `WsClient` is exposed to JS via `wasm_bindgen` with
 //!   `protocol`, `send`, `setHandlers`, `close`, `abort`, and `bufferedAmount`
-//!   — the methods and properties the SW `openRuntimeStream`
-//!   calls (web/sw.js).
+//!   for the SW `openRuntimeStream` entrypoint (`web/sw.js`).
 //!
-//! Out of scope for this landing (would meaningfully increase LOC without
-//! changing escape-jail correctness): permessage-deflate, per-message
-//! compression, multiple subprotocol negotiation strategies beyond a
-//! straight pick-from-offered.
+//! Not implemented: `permessage-deflate` compression and custom subprotocol
+//! negotiation beyond matching the offered list.
 
 use std::cell::RefCell;
 use std::io;
@@ -52,7 +49,7 @@ struct WsUrl {
 impl WsUrl {
     fn parse(url: &str) -> Result<Self, String> {
         // Use the browser's WHATWG URL parser for safety against malformed
-        // ports / userinfo / IDN — same path the HTTP fetch uses.
+        // ports, userinfo, and IDN, matching the HTTP fetch path.
         let u = web_sys::Url::new(url).map_err(|_| format!("bad URL: {url}"))?;
         let proto = u.protocol(); // "ws:" / "wss:"
         let scheme = proto.trim_end_matches(':').to_ascii_lowercase();
@@ -111,9 +108,9 @@ fn jserr_str(s: impl Into<String>) -> JsValue {
     JsValue::from_str(&s.into())
 }
 
-/// Open a transport-level byte stream to (host, port) with the existing
-/// dialer (yamux + SOCKS5 + optional TLS). `secure` selects HTTPS layer
-/// with ALPN forced to `http/1.1` — WebSocket Upgrade requires HTTP/1.1.
+/// Open a transport-level byte stream to `(host, port)` via the dialer
+/// (yamux + SOCKS5 + optional TLS). `secure` selects TLS with ALPN forced
+/// to `http/1.1` because WebSocket Upgrade requires HTTP/1.1.
 async fn open_target_stream(
     host: &str,
     port: u16,
@@ -121,8 +118,6 @@ async fn open_target_stream(
     isolation_key: Option<&str>,
 ) -> Result<PooledConn, JsValue> {
     let relay_url = super::fetch::pick_relay_url().map_err(jserr_str)?;
-    // REFACTOR.md §3.2 — fetch 와 같은 Dialer seam. 기본 RelayDialer 가
-    // 기존 yamux→SOCKS5 경로(에러 코드 포함)를 그대로 수행한다.
     let addr = TargetAddr {
         host: host.to_string(),
         port,
@@ -132,9 +127,8 @@ async fn open_target_stream(
     if !secure {
         return Ok(PooledConn::Plain(stream));
     }
-    // ALPN for WS-over-TLS is always http/1.1 (RFC 8441 covers a separate
-    // h2 bootstrap but we don't implement that — the SW would have to
-    // perform an HTTP/2 CONNECT first).
+    // ALPN for WS-over-TLS is always http/1.1 (RFC 8441 extended CONNECT
+    // over HTTP/2 is not used here).
     let tls = TlsStream::connect(stream, host, &[b"http/1.1"])
         .await
         .map_err(|e| jserr_str(format!("TARGET_TLS_FAILED: {e}")))?;
@@ -271,10 +265,6 @@ async fn handshake(
     Ok(negotiated_protocol)
 }
 
-// ---------------------------------------------------------------------------
-// Frame codec (RFC 6455 §5).
-// ---------------------------------------------------------------------------
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Opcode {
     Continuation = 0x0,
@@ -332,7 +322,7 @@ fn encode_frame(op: Opcode, payload: &[u8]) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
-/// One decoded server→client frame. Server frames MUST NOT be masked
+/// One decoded server-to-client frame. Server frames MUST NOT be masked
 /// (§5.1); we enforce that and return an error if violated.
 #[derive(Debug)]
 struct Frame {
@@ -340,10 +330,6 @@ struct Frame {
     op: Opcode,
     payload: Vec<u8>,
 }
-
-// ---------------------------------------------------------------------------
-// JS-facing client.
-// ---------------------------------------------------------------------------
 
 /// Outbound work queue for the writer task. Strings, bytes, control frames,
 /// and a close request flow through here so the writer is the single
@@ -430,9 +416,8 @@ impl WsClient {
         Ok(())
     }
 
-    /// Send a payload — string → Text frame, ArrayBuffer / Uint8Array →
-    /// Binary frame. Other shapes are coerced via `toString()` to match
-    /// the native `WebSocket.send` polymorphism.
+    /// Send a payload: strings map to Text frames, and `ArrayBuffer` or
+    /// `Uint8Array` values map to Binary frames.
     pub fn send(&self, data: JsValue) -> Result<(), JsValue> {
         if *self.shared.closed.borrow() {
             return Err(JsValue::from_str("WS_BLOCKED: send after close"));
@@ -500,8 +485,8 @@ impl WsClient {
 
 const MAX_WS_BUFFER_BYTES: usize = 32 * 1024 * 1024;
 
-/// Public entry point — opens the transport, performs the handshake,
-/// spawns the reader/writer drivers, and returns the JS-facing client.
+/// Opens the transport, performs the handshake, spawns the reader/writer
+/// drivers, and returns the JS-facing client.
 pub async fn open(
     url: &str,
     protocols: &[String],
@@ -647,7 +632,7 @@ async fn reader_task(
     }
 }
 
-/// Read one frame from a `ReadHalf` — wraps the unified codec.
+/// Read one frame from a `ReadHalf`.
 async fn read_frame_split(
     conn: &mut futures_util::io::ReadHalf<PooledConn>,
 ) -> io::Result<Frame> {
@@ -755,8 +740,8 @@ async fn writer_task(
             }
         };
         // Decrement buffered by the original payload size (not the
-        // on-wire size which adds header + mask). Approximate matches the
-        // WHATWG behavior — bufferedAmount drops by the API-side payload.
+        // on-wire size which adds header + mask) so bufferedAmount drops
+        // by the API-side payload size per WHATWG behavior.
         {
             let mut w = shared.writer.borrow_mut();
             w.buffered = w.buffered.saturating_sub(payload.len());
@@ -873,10 +858,6 @@ fn surface_close(shared: &Rc<Shared>, code: u16, reason: String) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Unit tests (host-side only — they don't need a browser / network).
-// ---------------------------------------------------------------------------
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -942,7 +923,6 @@ mod tests {
         assert!(decode_close_payload(&[0x03]).is_err());
     }
 
-    // Note: `WsUrl::parse` calls `web_sys::Url::new` which requires a
-    // browser runtime — covered by build verification and the SW E2E
-    // path rather than host-side unit tests.
+    // `WsUrl::parse` calls `web_sys::Url::new`, which requires a browser
+    // runtime and is covered by SW E2E tests.
 }

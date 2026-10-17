@@ -1,19 +1,19 @@
 [
   {
     "__doc": [
-      "브라우저가 URL 을 내보내는 (tag, attr) 표면의 단일 소스.",
-      "kind: rewrite=프록시 경로로 바꾼다 / srcset=후보 목록이라 별도 파서 / navigation=?via= 로",
-      "      / deliberate=정책상 리라이트하지 않는다(이유 필수) / known-gap=아직 안 고침(이유 필수)",
-      "case: 이 표면을 재는 구멍 매트릭스 케이스 id. null 이면 why 로 이유를 적을 것.",
-      "이 파일을 고친 뒤에는 Rust(zp-shared::surfaces), 프렐류드(isURLBearing),",
-      "static-policy 가 전부 이 파일과 대조하므로 어느 한쪽만 고치면 실패한다."
+      "Single source of truth for (tag, attr) URL-bearing DOM surfaces.",
+      "kind: rewrite=rewrite to proxy route / srcset=candidate list parsed separately / navigation=rewrite to ?via=",
+      "      / deliberate=intentionally unrewritten (requires why) / known-gap=unfixed (requires why)",
+      "case: hole-matrix case id that exercises this surface. When null, provide why.",
+      "Rust (zp-shared::surfaces), the page prelude (isURLBearing), and static-policy",
+      "all validate against this file."
     ]
   },
   {
     "pair": "link:href",
     "kind": "rewrite",
     "case": null,
-    "why": "정적 link href 는 /style/a7.css 라 id 태그가 없다 — 도착 판정은 a7-netcss-url 이 대신한다"
+    "why": "Static link href uses /style/a7.css without an id tag; arrival is verified by a7-netcss-url instead"
   },
   {
     "pair": "script:src",
@@ -34,19 +34,19 @@
     "pair": "video:src",
     "kind": "rewrite",
     "case": null,
-    "why": "같은 미디어 경로를 source:src 가 덮는다"
+    "why": "Covered by the same media loading path as source:src"
   },
   {
     "pair": "audio:src",
     "kind": "rewrite",
     "case": null,
-    "why": "같은 미디어 경로를 source:src 가 덮는다"
+    "why": "Covered by the same media loading path as source:src"
   },
   {
     "pair": "track:src",
     "kind": "rewrite",
     "case": null,
-    "why": "같은 미디어 경로를 source:src 가 덮는다"
+    "why": "Covered by the same media loading path as source:src"
   },
   {
     "pair": "embed:src",
@@ -87,7 +87,7 @@
     "pair": "feimage:xlink:href",
     "kind": "rewrite",
     "case": null,
-    "why": "feimage:href 와 같은 경로"
+    "why": "Covered by the same rewrite path as feimage:href"
   },
   {
     "pair": "video:poster",
@@ -98,13 +98,13 @@
     "pair": "body:background",
     "kind": "rewrite",
     "case": null,
-    "why": "td:background 와 같은 레거시 경로"
+    "why": "Covered by the same legacy background attribute path as td:background"
   },
   {
     "pair": "table:background",
     "kind": "rewrite",
     "case": null,
-    "why": "td:background 와 같은 레거시 경로"
+    "why": "Covered by the same legacy background attribute path as td:background"
   },
   {
     "pair": "td:background",
@@ -115,13 +115,13 @@
     "pair": "th:background",
     "kind": "rewrite",
     "case": null,
-    "why": "td:background 와 같은 레거시 경로"
+    "why": "Covered by the same legacy background attribute path as td:background"
   },
   {
     "pair": "tr:background",
     "kind": "rewrite",
     "case": null,
-    "why": "td:background 와 같은 레거시 경로"
+    "why": "Covered by the same legacy background attribute path as td:background"
   },
   {
     "pair": "img:srcset",
@@ -137,37 +137,37 @@
     "pair": "link:imagesrcset",
     "kind": "srcset",
     "case": null,
-    "why": "preload 는 차단 목록이라 도착 케이스를 못 만든다"
+    "why": "Preload links are blocked by policy so an arrival test case does not apply"
   },
   {
     "pair": "a:href",
     "kind": "navigation",
     "case": null,
-    "why": "탈출 벡터 테스트가 별도로 있다"
+    "why": "Covered by dedicated navigation escape vector tests"
   },
   {
     "pair": "area:href",
     "kind": "navigation",
     "case": null,
-    "why": "a:href 와 같은 경로"
+    "why": "Covered by the same navigation path as a:href"
   },
   {
     "pair": "form:action",
     "kind": "navigation",
     "case": null,
-    "why": "탈출 벡터 테스트가 별도로 있다"
+    "why": "Covered by dedicated form navigation escape vector tests"
   },
   {
     "pair": "input:formaction",
     "kind": "navigation",
     "case": null,
-    "why": "form:action 과 같은 경로"
+    "why": "Covered by the same navigation path as form:action"
   },
   {
     "pair": "button:formaction",
     "kind": "navigation",
     "case": null,
-    "why": "form:action 과 같은 경로"
+    "why": "Covered by the same navigation path as form:action"
   },
   {
     "pair": "object:data",
@@ -178,54 +178,54 @@
     "pair": "a:ping",
     "kind": "deliberate",
     "case": "c11-ping-attr",
-    "why": "클릭 추적 비콘. 값이 URL 목록이고 통과가 목적에 반한다"
+    "why": "Click-tracking beacon attribute containing a space-separated URL list; stripped intentionally"
   },
   {
     "pair": "object:codebase",
     "kind": "deliberate",
     "case": null,
-    "why": "object-src 'none' — plugin 표면 금지 (object:data 와 같은 이유)"
+    "why": "Blocked by object-src 'none' plugin surface restriction (same rationale as object:data)"
   },
   {
     "pair": "iframe:src",
     "kind": "special",
     "case": "a10-static-iframe",
-    "why": "서버는 data-zp-frame-src 로 옮겨 두고 페이지 realm 이 share 경로로 활성화한다 — 서브리소스가 아니라 문서라 /zp/api/fetch 로 보내면 프렐류드 없는 문서가 생긴다"
+    "why": "Server stashes the URL in data-zp-frame-src and the page realm activates it via a share route so the frame loads with the runtime prelude"
   },
   {
     "pair": "frame:src",
     "kind": "special",
     "case": null,
-    "why": "iframe:src 와 같은 경로"
+    "why": "Covered by the same frame activation path as iframe:src"
   },
   {
     "pair": "iframe:srcdoc",
     "kind": "special",
     "case": "a17-static-srcdoc",
-    "why": "서버는 data-zp-srcdoc 로 옮기고 페이지 realm 이 프렐류드를 주입해 되돌린다"
+    "why": "Server stashes markup in data-zp-srcdoc and the page realm injects the runtime prelude before restoring srcdoc"
   },
   {
     "pair": "script:href",
     "kind": "rewrite",
     "case": null,
-    "why": "SVG script 는 src 가 아니라 href 로 로드 — 서브리소스 리라이트로 해결"
+    "why": "SVG script elements load via href rather than src; handled by subresource rewriting"
   },
   {
     "pair": "script:xlink:href",
     "kind": "rewrite",
     "case": null,
-    "why": "SVG script xlink:href — script:href 와 동일 표면"
+    "why": "SVG script xlink:href variant; handled by the same surface as script:href"
   },
   {
     "pair": "use:xlink:href",
     "kind": "rewrite",
     "case": null,
-    "why": "SVG use 의 xlink 변형 — use:href 와 동일"
+    "why": "SVG use xlink:href variant; handled by the same surface as use:href"
   },
   {
     "pair": "a:xlink:href",
     "kind": "navigation",
     "case": null,
-    "why": "SVG 앵커의 xlink 변형 — a:href 와 같은 내비게이션"
+    "why": "SVG anchor xlink:href variant; handled by the same navigation path as a:href"
   }
 ]

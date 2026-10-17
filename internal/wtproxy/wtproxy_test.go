@@ -24,10 +24,8 @@ import (
 	"github.com/quic-go/webtransport-go"
 )
 
-// TestHandlerReturns501WithErrorCode covers the legacy stub Handler()
-// — the public 501 surface stays around even after the D4 listener
-// lands, because operators may want to advertise WT_UNSUPPORTED on
-// their HTTP/1.1 path while the HTTP/3 listener is disabled.
+// TestHandlerReturns501WithErrorCode covers the HTTP/1.1 fallback Handler()
+// that advertises WT_UNSUPPORTED when a WebTransport path is hit over TCP.
 func TestHandlerReturns501WithErrorCode(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/__zp/wt", nil)
@@ -40,19 +38,9 @@ func TestHandlerReturns501WithErrorCode(t *testing.T) {
 	}
 }
 
-// TestListenerRejectsMissingTargetHeader brings up the D4 listener,
-// performs a real HTTP/3 + WebTransport CONNECT without the
-// `X-ZP-WT-Target` header, and asserts the gateway returns 400. This
-// pins:
-//   - listener actually binds the UDP socket + advertises h3 ALPN
-//   - selfSignedDevCert produces a valid serving cert
-//   - handleUpgrade enforces the target-header invariant before
-//     attempting to dial out
-//
-// The full per-stream relay path (target reachable + bidi echo) is
-// exercised by the host integration smoke tests under
-// test/e2e/wt_smoke.test.js (browser-driven) — keeping this Go-side
-// test focused on the gateway invariant means it stays fast.
+// TestListenerRejectsMissingTargetHeader starts the WebTransport listener,
+// performs an HTTP/3 + WebTransport CONNECT without the `X-ZP-WT-Target`
+// header, and asserts the gateway returns 400.
 func TestListenerRejectsMissingTargetHeader(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping HTTP/3 listener test in -short mode")
@@ -79,10 +67,6 @@ func TestListenerRejectsMissingTargetHeader(t *testing.T) {
 		}
 	}()
 
-	// Wait for the listener to bind. With no per-listener readiness
-	// channel exposed by webtransport-go, the safest probe is a short
-	// retry loop opening UDP connections; 200ms is plenty for a local
-	// bind.
 	time.Sleep(200 * time.Millisecond)
 
 	dialer := &webtransport.Dialer{
@@ -102,10 +86,8 @@ func TestListenerRejectsMissingTargetHeader(t *testing.T) {
 	dialCtx, dialCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer dialCancel()
 
-	// Intentionally pass no X-ZP-WT-Target — gateway should respond 400.
+	// Omit X-ZP-WT-Target so the gateway responds 400.
 	resp, _, err := dialer.Dial(dialCtx, gwURL, nil)
-	// webtransport-go returns a non-nil Response with the HTTP status
-	// on a non-2xx CONNECT result, plus an error.
 	if resp == nil {
 		t.Fatalf("expected HTTP response on CONNECT, got nil (err=%v)", err)
 	}
@@ -113,19 +95,12 @@ func TestListenerRejectsMissingTargetHeader(t *testing.T) {
 		t.Fatalf("expected 400, got %d", resp.StatusCode)
 	}
 
-	// Same listener — confirm the query-string fallback path: browsers
-	// can't set `X-ZP-WT-Target` from `new WebTransport(...)` so the
-	// JS-side virtual class shovels the target into `?target=...`. We
-	// expect the same 400 because the target won't actually dial, but a
-	// DIFFERENT failure mode (no longer "missing target"). The point is
-	// the gateway no longer immediately rejects the CONNECT.
+	// Verify the `?target=...` query-string fallback used by browser
+	// `new WebTransport(...)` calls, which cannot set custom headers.
 	gwURLWithQuery := (&url.URL{Scheme: "https", Host: gwAddr, Path: "/__zp/wt", RawQuery: "target=https%3A%2F%2F127.0.0.1%3A1%2Fecho"}).String()
 	dialCtx2, dialCancel2 := context.WithTimeout(context.Background(), 8*time.Second)
 	defer dialCancel2()
 	resp2, _, _ := dialer.Dial(dialCtx2, gwURLWithQuery, nil)
-	// The dial may either succeed (gateway accepts CONNECT, then closes
-	// when target dial fails) or fail with a non-400 error code. We just
-	// pin that we no longer get 400 with the query-string variant.
 	if resp2 != nil && resp2.StatusCode == http.StatusBadRequest {
 		t.Fatalf("query-string target should not have produced 400; got %d", resp2.StatusCode)
 	}
@@ -142,9 +117,9 @@ func freeUDPAddr(t *testing.T) string {
 	return "127.0.0.1:" + strconv.Itoa(addr.Port)
 }
 
-// TestGatewayBridgesToRealTarget is the gateway's actual job, which no test
-// exercised: a client session reaches a real WebTransport target through the
-// gateway, and a bidi stream and a datagram come back (2026-09-29).
+// TestGatewayBridgesToRealTarget verifies that a client session reaches a
+// WebTransport target through the gateway and echoes both a bidi stream and a
+// datagram.
 func TestGatewayBridgesToRealTarget(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping HTTP/3 listener test in -short mode")
@@ -193,7 +168,7 @@ func TestGatewayBridgesToRealTarget(t *testing.T) {
 	defer target.Close()
 
 	gwAddr := freeUDPAddr(t)
-	// The target is on loopback — allowed only as with `-socks internal`.
+	// The target is on loopback, permitted when AllowPrivateTargets is set.
 	gw, err := New(Config{Addr: gwAddr, Path: "/__zp/wt", AllowInsecureDevCert: true, AllowPrivateTargets: true})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -353,7 +328,7 @@ func TestGatewayFailsConnectOnUnreachableTarget(t *testing.T) {
 	}
 
 	// Allowed, but nothing listens there: the dial fails and so must the
-	// CONNECT — previously the page got a session that then closed.
+	// CONNECT handshake.
 	gw2Addr := freeUDPAddr(t)
 	gw2, err := New(Config{Addr: gw2Addr, AllowInsecureDevCert: true, AllowPrivateTargets: true})
 	if err != nil {
@@ -386,7 +361,7 @@ func selfSignedCertFor(t *testing.T, validity time.Duration) tls.Certificate {
 }
 
 // Browsers send the proxy page's Origin, whose port differs from the
-// gateway's — webtransport-go's same-host default refused every one of them.
+// gateway's; PageHosts compares hostnames without scheme or port.
 func TestGatewayAdmitsOnlyProxyPageOrigins(t *testing.T) {
 	l := &Listener{cfg: Config{PageHosts: []string{"proxy.localhost"}}}
 	for origin, want := range map[string]bool{

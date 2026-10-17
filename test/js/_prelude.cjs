@@ -1,7 +1,5 @@
 'use strict';
-// runtime-prelude 소스는 web/membrane/*.js concat 조각이다 (REFACTOR.md §3.3).
-// 테스트가 머지된 IIFE 전체를 읽어야 하므로 빌드와 같은 규칙 — 사전순 파일명,
-// '\n' join — 으로 조립한다. scripts/build.mjs 와 반드시 같은 순서.
+// Assemble runtime-prelude sources using the same lexicographical join order as scripts/build.mjs.
 const fs = require('node:fs');
 const path = require('node:path');
 

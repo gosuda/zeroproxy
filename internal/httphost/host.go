@@ -1,8 +1,8 @@
-// Package httphost — ZeroProxy HTTP 호스트: 정적 에셋 서빙, /zp/* 라우팅,
-// WS byte-pipe 브리지(ws-pipe → yamux → SOCKS5), 동기 XHR 허브, CSP report.
-// cmd/zeroproxy-server 의 핸들러를 패키지화한 것 (REFACTOR.md §3.4) —
-// 임베더는 NewHandler(Config) 로 http.Handler 를 얻어 자체 리스너/mux 에
-// 마운트한다. WT/RTC 게이트웨어 리스너 조립은 호출자 책임이다.
+// Package httphost implements the ZeroProxy HTTP host: static asset serving,
+// /zp/* routing, the WebSocket byte-pipe bridge (ws-pipe over yamux to SOCKS5),
+// the synchronous XHR hub, and CSP violation reporting.
+// Callers mount NewHandler(Config) on their own HTTP listener or mux and
+// manage optional WebTransport and TURN gateway listeners separately.
 package httphost
 
 import (
@@ -101,12 +101,10 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 	case path == controlPrefix+"sw.js":
 		s.serveWeb(w, r, "sw.js")
 	case path == controlPrefix+"ws-pipe":
-		// Step 14 + yamux: 1 WS = N yamux streams, each = 1 TCP+SOCKS5
-		// byte-pipe to the upstream dialer. The Rust WASM kernel speaks
-		// yamux (client) + SOCKS5 + TLS + HTTP/1.1 on top, so the relay
-		// only sees yamux framing + ciphertext. `handlePipe` calls
-		// `yamuxconn.Server()` on the WS and dispatches each accepted
-		// stream through `bridgeTargetStream`.
+		// Multiplexes yamux streams over a single WebSocket, bridging each
+		// stream to a TCP+SOCKS5 connection to the upstream dialer. The Rust
+		// WASM kernel runs yamux (client), SOCKS5, TLS, and HTTP on top, so
+		// the relay observes only yamux framing and TLS ciphertext.
 		s.handlePipe(w, r)
 	case strings.HasPrefix(path, controlPrefix+"p/"):
 		s.serveWeb(w, r, "index.html")
@@ -117,29 +115,26 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 	case path == controlPrefix+"worker-bootstrap.js":
 		s.workerBootstrap(w, r)
 	case path == controlPrefix+"api/sync-fetch":
-		// 동기 XHR 중계. SW 가 동기 XHR 을 가로채지 못하므로(실측), 페이지는
-		// 이 same-origin 엔드포인트로 던지고 Go 가 SW 에 일을 넘긴다.
-		// Go 는 타깃으로 직접 나가지 않는다 — syncfetch.go 주석 참고.
+		// Synchronous XHR relay: because Service Workers cannot intercept
+		// synchronous XHR, pages send requests to this same-origin endpoint
+		// and Go delegates fulfillment to the Service Worker.
 		s.handleSyncFetch(w, r)
 	case path == controlPrefix+"api/sync-fetch/poll":
 		s.handleSyncFetchPoll(w, r)
 	case path == controlPrefix+"api/sync-fetch/result":
 		s.handleSyncFetchResult(w, r)
 	case path == controlPrefix+"api/csp-report":
-		// 프록시 문서 CSP 의 report-uri 수신처. 우리가 리라이트를 놓친 자리를
-		// 이름으로 알려 주는 유일한 통로다 — 막힌 요청은 SW 까지 오지 못하므로
-		// __zp_refusals() 에는 남지 않는다. cspreport.go 주석 참고.
+		// Receives CSP report-uri payloads for requests blocked before reaching
+		// the Service Worker.
 		s.handleCSPReport(w, r)
 	case path == controlPrefix+"api/config":
-		// D4/D5 client config — the public WT gateway URL and its dev-cert
-		// pin, and fresh TURN credentials. The SW re-reads it per
-		// navigation (ensureRuntimeConfig) and threads it into the boot
-		// JSON the page realm reads.
+		// Client runtime configuration: public WebTransport gateway URL, dev-cert
+		// pin, and fresh TURN credentials. The Service Worker reads this per
+		// navigation and passes it into the page realm boot JSON.
 		s.serveConfig(w, r)
 	case path == controlPrefix+"api/rtc/signal":
-		// The pion signaling bridge that served this was removed
-		// (2026-09-30) — WebRTC is relay-only through the embedded TURN
-		// server and needs no signaling of ours.
+		// WebRTC runs relay-only through the embedded TURN server without
+		// custom signaling; this route returns 501 RTC_GATEWAY_UNAVAILABLE.
 		rtcgw.Handler().ServeHTTP(w, r)
 	case strings.HasPrefix(r.URL.Path, "/__zp/__zp/"):
 		// Defensive: in case build pipeline emits a double-prefixed path.
@@ -153,16 +148,11 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 		// fetches them from /__zp/<name>; serve from that nested path.
 		s.serveFile(w, r, filepath.Join(s.webDir, "__zp", filepath.Base(r.URL.Path)), mime.TypeByExtension(filepath.Ext(r.URL.Path)))
 	case strings.HasPrefix(r.URL.Path, "/__zp/wt"):
-		// D4 fallback: the real WebTransport gateway listens on a
-		// SEPARATE UDP port (configured via `-wt-addr`) — it speaks
-		// HTTP/3, not HTTP/1.1, so any /__zp/wt arrival on this TCP
-		// listener means the page-side virtual class accidentally
-		// routed here. Reply 501 with the stable WT_UNSUPPORTED code so
-		// the page can detect "gateway not available over HTTP/1.1
-		// fallback" and surface a friendlier message.
+		// The WebTransport gateway listens on a separate UDP port (-wt-addr)
+		// speaking HTTP/3. Any /__zp/wt request arriving on this TCP listener
+		// receives 501 WT_UNSUPPORTED.
 		wtproxy.Handler().ServeHTTP(w, r)
 	case strings.HasPrefix(r.URL.Path, "/__zp/rtc/"):
-		// D5: WebRTC signaling endpoint (placeholder until pion SFU lands).
 		rtcgw.Handler().ServeHTTP(w, r)
 	case strings.HasPrefix(path, "/p/"):
 		redirectLegacy(w, r, controlPrefix+"p/"+strings.TrimPrefix(path, "/p/"))
@@ -234,33 +224,10 @@ func (s *server) serveFile(w http.ResponseWriter, r *http.Request, path, content
 	if contentType != "" {
 		w.Header().Set("Content-Type", contentType)
 	}
-	// 2026-08-14 — 정적 에셋을 `no-store` 에서 `no-cache` 로.
-	//
-	// 측정: 페이지 1회 로드에 우리 에셋만 **1,042 KB** 가 매번 다시 내려갔다
-	// (page bundle wasm 377KB + prelude 117KB + …). SW 시작 시엔 3,945 KB.
-	// 프록시를 상시로 쓰기엔 성립하지 않는 비용이다.
-	//
-	// 원인은 캐시 지원이 없어서가 아니었다. `http.ServeContent` 는 이미
-	// Last-Modified 를 붙이고 조건부 요청에 304 를 준다(실측 확인). 그런데
-	// `no-store` 는 브라우저가 응답을 **저장하는 것 자체**를 막으므로
-	// If-Modified-Since 가 영영 나가지 않는다. `no-cache` 는 저장은 하되
-	// **매번 재검증**을 강제한다 — 신선도 보장은 `no-store` 와 동일하고,
-	// 바뀌지 않았으면 본문 대신 304 만 오간다.
-	//
-	// `sw.js` 와 런처 문서는 그대로 `no-store` 로 둔다. 오늘 아침 확인한
-	// 업데이트 전파 경로(sw.js 재검사 → skipWaiting → clients.claim)의
-	// 방아쇠라, 그 경로는 건드리지 않는다.
-	//
-	// **주의**: `no-cache` 는 디스크 캐시에 본문이 남는 것을 허용한다. 로컬
-	// 포렌식에 흔적을 남기지 않는 것이 요구사항이라면 이 결정을 되돌려야
-	// 한다 — 코드/플랜/트랩노트 어디에도 그런 의도는 적혀 있지 않아
-	// 기본값으로 판단했다. 남는 것은 우리 자신의 에셋뿐이고(타깃 콘텐츠가
-	// 아니다), 방문한 사이트는 드러나지 않는다.
-	//
-	// `?v=<build id>` 가 붙어 오면 `immutable` 로 준다. build id 는 소스+wasm
-	// 바이트 해시라 빌드가 바뀌면 URL 이 바뀐다 — 낡은 사본이 재사용될 수
-	// 없으므로 1년 캐시가 안전하고, 재검증 왕복까지 사라진다.
-	// 쿼리가 없으면(개발 중 dist 를 안 거치거나 직접 열었을 때) `no-cache`.
+	// Keep sw.js and index.html uncached (no-store) so Service Worker updates
+	// propagate immediately. Static assets versioned with ?v=<build id> are
+	// content-hashed and cached as immutable for 1 year; unversioned assets use
+	// no-cache to allow disk caching with If-Modified-Since (304) revalidation.
 	switch name := st.Name(); {
 	case name == "sw.js" || name == "index.html":
 		w.Header().Set("Cache-Control", "no-store")
@@ -279,16 +246,12 @@ func (s *server) workerBootstrap(w http.ResponseWriter, r *http.Request) {
 	_, _ = io.WriteString(w, body)
 }
 
-// serveConfig emits the minimal client-facing runtime config the SW
-// reads per navigation. D4 = wtGateway (+ its dev-cert pin); D5 = rtcICEServers.
-// SW only ever does ONE fetch on boot.
+// serveConfig emits the client-facing runtime config read by the Service Worker
+// on boot (wtGateway, wtGatewayCertHashes, and rtcICEServers).
 //
-// `rtcICEServers` is a fresh time-limited cred tuple from the
-// embedded TURN server (when -rtc-turn-addr is set). Each call to
-// serveConfig issues a new cred set so re-registration of the SW
-// (which re-fetches /zp/api/config) rotates credentials. Without
-// embedded TURN the field is `[]` so page realm's RTCPC falls back
-// to host candidates only.
+// `rtcICEServers` contains a fresh time-limited credential tuple from the
+// embedded TURN server when -rtc-turn-addr is configured. Without embedded
+// TURN, the field is `[]`.
 func (s *server) serveConfig(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -314,8 +277,6 @@ func (s *server) serveConfig(w http.ResponseWriter, r *http.Request) {
 	if hashes == nil {
 		hashes = []string{}
 	}
-	// encoding/json, not a format string: the hand-escaped `%s` quoted `"`
-	// but not `\`, so a URL with a backslash produced invalid JSON.
 	_ = json.NewEncoder(w).Encode(struct {
 		WtGateway           string                `json:"wtGateway"`
 		WtGatewayCertHashes []string              `json:"wtGatewayCertHashes"`
@@ -577,13 +538,9 @@ func (s *server) resolveInternalTarget(ctx context.Context, host, port string) (
 }
 
 // traceBridge optionally wraps both ends of a bridged stream so each
-// direction's read timeline is logged — used to localize the cold-bootstrap
-// "exactly 60s" first-request stall. Gated by ZP_BRIDGE_TRACE so it is
-// zero-cost in normal operation. The discriminator: c2u (browser→upstream)
-// logs request bytes leaving the browser; u2c (upstream→browser) logs the
-// response. A long gap on c2u before the request means the request was
-// stuck on OUR side; a long gap only on u2c (request already forwarded)
-// means the upstream held the response.
+// direction's read timeline is logged when ZP_BRIDGE_TRACE is set.
+// c2u (browser to upstream) logs request bytes leaving the browser;
+// u2c (upstream to browser) logs the response.
 func traceBridge(stream, target net.Conn, host string) (net.Conn, net.Conn) {
 	if os.Getenv("ZP_BRIDGE_TRACE") == "" {
 		return stream, target

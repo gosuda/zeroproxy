@@ -31,12 +31,9 @@
   __zpStep('NavigationBackstop', () => installNavigationBackstop(root, root.document && root.document.documentElement));
   __zpStep('SurfaceGuards', () => installSurfaceGuards(root));
   zpTrace('install:all:done');
-  // Modal-dialog override — synchronous alert/confirm/prompt block the
-  // main thread until the browser shell dismisses them. In headless /
-  // automated contexts the shell never dismisses, so any site that fires
-  // a modal mid-init wedges CDP itself (CPU 0% but every JS evaluate
-  // times out). Log via zpTrace and return safe defaults instead of
-  // calling native. Same treatment for window.print (also synchronous).
+  // Synchronous modal dialogs (alert, confirm, prompt) and print block the main
+  // thread until dismissed. In headless or automated sessions no shell dismisses
+  // them, which wedges CDP evaluation. Log via zpTrace and return safe defaults.
   try {
     if (typeof root.alert === 'function') {
       define(root, 'alert', function alert(msg) { try { zpTrace('alert', String(msg||'').slice(0,200)); } catch {} });
@@ -51,8 +48,7 @@
       define(root, 'print', function print() { try { zpTrace('print'); } catch {} });
     }
   } catch {}
-  // Diagnostic-only WebAssembly trace — wrap top-level WebAssembly.* methods
-  // so we can see WTM/anti-bot WASM loads in the post-mortem trace.
+  // Trace top-level WebAssembly compilation and instantiation for diagnostics.
   try {
     const WA = root.WebAssembly;
     if (WA) {
@@ -69,45 +65,37 @@
   } catch {}
 
 
-  // ── Error.stack sanitizer ────────────────────────────────────────────
-  // V8 formats `.stack` lazily through Error.prepareStackTrace — the one
-  // interception point that exists for every error object. Without it,
-  // `new Error().stack` hands the page frames whose file names are our
-  // /zp/api/script / share-path URLs. Install a prepareStackTrace that
-  // routes every URL-bearing frame accessor through deproxyURL; a page-
-  // supplied prepareStackTrace still runs, but on SANITIZED frames so the
-  // custom formatter can't recover the raw URLs either.
+  // V8 formats `.stack` lazily through Error.prepareStackTrace. Route every
+  // URL-bearing frame accessor through deproxyURL so stack traces do not expose
+  // proxy asset or share-path URLs. User-supplied prepareStackTrace hooks
+  // receive wrapped frames so custom formatters see only sanitized URLs.
   function installStackSanitizer() {
     const E = root.Error;
     if (!E) return;
     let userPrepare = null;
-    // 프레임 텍스트에는 URL 만이 아니라 **우리 내부 식별자**도 섞인다 —
-    // `at Proxy.__zp_dyn__ (…)` 처럼. 페이지에는 원본 스크립트의 함수명만이
-    // 의미가 있으니 `__zp_*` 이름은 중립 식별자로 지운다.
+    // Replace internal `__zp_*` wrapper identifiers with `<anonymous>` in addition to deproxying URLs.
     function sanitizeFrameText(v) {
       if (v == null) return v;
       return deproxyURL(String(v), { scan: true, fallback: 'share' }).replace(/\b__zp_[A-Za-z0-9_$]*/g, '<anonymous>');
     }
-    // A frame's text with its URLs cleaned and its `:line:col` kept. The scan above takes the position as part of the URL
-    // and drops it; a native frame always has one (`at f (https://host/a.js:2:20674)`), and the parent of a challenge widget
-    // sends its own `new Error().stack` to the widget, which reads it: frames without positions are not a browser's.
+    // Strip proxy URLs while preserving `:line:col` suffixes, since deproxyURL's
+    // scan mode would otherwise consume the trailing position as part of the URL.
     function sanitizeFrameWithPositions(text) {
       const cleaned = String(text).replace(/(https?:\/\/[^\s()]*?)(:\d+(?::\d+)?)(?=[)\s]|$)/g, (_m, url, pos) => sanitizeFrameText(url) + pos);
       return cleaned.replace(/\b__zp_[A-Za-z0-9_$]*/g, '<anonymous>');
     }
-    // The membrane's own frames (`__zp_call`, `__zp_get`, …) sit between the page's in a stack: a real stack has none of
-    // them. They are the prelude's functions, so they come from the prelude's file.
+    // Identify frames originating from ZeroProxy prelude and bundle assets so
+    // they can be omitted from page-visible stack traces.
     function isMembraneFrame(f) {
       try {
         const file = String(f.getFileName() || '');
         return /\/zp\/assets\/(?:runtime-prelude|worker-prelude|zp-core|zp-page-bundle)\.js/.test(file);
       } catch { return false; }
     }
-    // An inline script runs here through the global `eval` with a sourceURL, so V8 sees eval code where the browser has a
-    // script: it names the top level and every anonymous function `eval` (`at eval (url:L:C)` for a browser's `at url:L:C`),
-    // a call on the window facade prints `Proxy.`, and two frames sit below the script — the `eval` builtin
-    // (`at eval (<anonymous>)`) and the document's bootstrap script that started it. A challenge VM keys its control flow on
-    // what it reads of the environment; Cloudflare's runs as such an inline script.
+    // Inline scripts execute via global eval with a sourceURL, which causes V8
+    // to label the top-level frame `eval` and insert the eval builtin and
+    // bootstrap script frames beneath it. Normalize these frames to match native
+    // inline script stacks.
     function isOwnEvalFrame(f) {
       try {
         if (!f.isEval()) return false;
@@ -121,13 +109,14 @@
     function isInlineBootstrapFrame(f) {
       try { return !f.isEval() && !f.getFunctionName() && /\/zp\/p\//.test(String(f.getFileName() || '')); } catch { return false; }
     }
-    // A frame as a browser prints a script's frame: an anonymous function is its location alone; a call on the window
-    // facade is a call on the global (no `Proxy.`); a method call keeps its receiver's type.
+    // Format a frame to match native browser script output: omit `eval` on top-level
+    // inline script frames, hide `Proxy.` receivers on window facade calls, and
+    // preserve receiver type names on method calls.
     function scriptFrameText(f) {
       const loc = sanitizeFrameWithPositions(String(f.getScriptNameOrSourceURL() || f.getFileName() || '<anonymous>') + ':' + f.getLineNumber() + ':' + f.getColumnNumber());
       let fn = f.getFunctionName();
       if (fn === 'eval' && isOwnEvalFrame(f)) fn = null;
-      // The membrane's own wrappers (`__zp_dyn__` around `new Function` code, …) are never a page function's name.
+      // Hide internal membrane wrapper names (`__zp_dyn__`, etc.).
       if (fn && /^__zp_/.test(fn)) fn = null;
       let type = null;
       try { type = f.getTypeName(); } catch {}
@@ -157,9 +146,9 @@
         }
       });
     }
-    // The frames a page sees: the membrane's own left out, and for an inline script the `eval` builtin and the bootstrap
-    // script below it (only when the builtin is followed, past membrane frames, by the bootstrap — a page's own `eval`
-    // keeps its builtin frame as a browser shows it).
+    // Filter out membrane frames and, for inline scripts, the synthetic `eval`
+    // builtin and bootstrap frames immediately beneath them (while keeping
+    // genuine page-initiated `eval` frames intact).
     function pageFrames(frames) {
       const out = [];
       for (let i = 0; i < frames.length; i++) {
@@ -174,12 +163,10 @@
       }
       return out;
     }
-    // ★게터는 늘 zpPrepare 를 주므로 페이지가 "이전 값" 으로 저장하는 것도
-    // zpPrepare 다. React 의 describeNativeComponentFrame 은 저장 → undefined →
-    // 복원을 하고, 복원이 `userPrepare = zpPrepare` 가 되면 그 뒤 모든 `.stack`
-    // 이 자기 자신을 불러 스택을 터뜨렸다(GitHub react-partial 6개, 2026-09-29).
-    // 그래서 세터는 우리 값을 "훅 없음" 으로 받고, 이전 값을 부르는 체이닝 훅이
-    // 되돌아오면(inUserPrepare) 기본 포맷으로 답한다.
+    // Because the getter always returns `zpPrepare`, saving and restoring
+    // `Error.prepareStackTrace` in page code would assign `zpPrepare` back into
+    // `userPrepare` and recurse indefinitely. Treat assigning `zpPrepare` as
+    // clearing the user hook, and guard re-entry with `inUserPrepare`.
     let inUserPrepare = false;
     const zpPrepare = function (error, frames) {
       const wrapped = pageFrames(frames).map(frameFacade);
@@ -193,8 +180,8 @@
       for (const f of wrapped) { try { out += '\n    at ' + f.toString(); } catch {} }
       return out;
     };
-    // What V8 reads is always zpPrepare; what the page assigned is kept for its own reads (pageStackHook, 00-head.js).
-    // An assignment makes the property enumerable as a native one would be, a `delete` hides it again.
+    // V8 always reads zpPrepare; the page's assigned hook is stored in pageStackHook
+    // (00-head.js). Assigning makes the property enumerable and deleting hides it again.
     const listHook = enumerable => { try { Object.defineProperty(E, 'prepareStackTrace', { enumerable }); } catch {} };
     try {
       defineMasked(E, 'prepareStackTrace', {

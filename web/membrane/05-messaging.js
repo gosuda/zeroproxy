@@ -12,12 +12,9 @@
       controller.postMessage(sealed, transfer ? [channel.port2, ...transfer] : [channel.port2]);
     });
   }
-  // ── BridgeAdapter (REFACTOR.md §3.3, R6) — page↔orchestrator 채널.
-  // 기본 구현은 위 postMessageToSW (SW controller + runtimeToken 봉인 +
-  // {ok,error} reply 계약). 임베더는 prelude 평가 전에
-  // `root.__zp_bridge_factory = ctx => ({ send, onMessage? })` 를 심어
-  // SW 없는 채널(MessagePort/인프로세스/CDP)로 교체한다 — 커스텀 브리지는
-  // 미봉인 메시지를 받고 자체 인증을 책임진다.
+  // Page-to-orchestrator messaging channel. Uses postMessageToSW by default;
+  // embedders can install `root.__zp_bridge_factory` before prelude evaluation
+  // to supply a custom transport.
   const bridge = (() => {
     try {
       const factory = root.__zp_bridge_factory;
@@ -29,16 +26,8 @@
     return { send: postMessageToSW };
   })();
   ctx.bridge = bridge;
-  // SW keepalive — the controller dies after ~30s idle, and a restarted SW
-  // comes back with EMPTY in-memory state (tabs/shareRoutes/clientContext).
-  // After that every /zp/api/* transport fetch fails `!tab` → 503
-  // SW_NOT_READY → dynamic import()s + membrane fetch/XHR all reject →
-  // hydration stalls (the "검색창만 뜨고 흰화면" symptom). The worst gap is the
-  // streamed document staying open ~60s while NAVER withholds END_STREAM: no
-  // fetch activity flows in that window, so the SW idles out mid-load exactly
-  // when the page still needs it. A bare ~15s postMessage resets the SW idle
-  // timer (any received event does) so its tab state survives the whole load.
-  // Bare post (no port / no runtimeToken) — we only need the wake, not a reply.
+  // Periodically ping the service worker controller so it does not idle out and
+  // lose in-memory tab routing state during long-lived or streaming document loads.
   let __zpKeepAliveTimer = null;
   function startSWKeepAlive() {
     if (__zpKeepAliveTimer) return;
@@ -49,9 +38,8 @@
     }, 15000);
   }
   startSWKeepAlive();
-  // ★2026-08-23 — 압축 크기 수신. SW 가 응답마다 **요청한 클라이언트에게만**
-  // 상류의 와이어 바이트 수를 보낸다. 이게 없으면 `encodedBodySize` 가 항상
-  // decoded 와 같아져 모든 응답이 비압축처럼 보인다(타이밍 축 참조).
+  // Record upstream wire body sizes pushed by the service worker for
+  // ResourceTiming encodedBodySize fidelity.
   const encodedSizes = newMap();
   const onBridgeMessage = (d) => {
     if (d && d.type === ZP.MSG.COOKIE_CHANGE) { applyCookieChanges(d.changes); return; }
@@ -64,14 +52,12 @@
       sw.addEventListener('message', (ev) => onBridgeMessage(ev && ev.data));
     }
   } catch {}
-  // 커스텀 브리지의 인바운드 채널 — SW 와 병행 구독 (기본 브리지에는 없음).
+  // Subscribe to custom bridge inbound messages when present.
   if (typeof bridge.onMessage === 'function') {
     try { bridge.onMessage(onBridgeMessage); } catch {}
   }
-  // ★문서는 밀려오지 않는다 — 내비게이션은 `resultingClientId` 라 SW 가
-  // 스트림이 끝나는 시점에 아직 클라이언트를 잡지 못한다(실측).
-  // 그래서 페이지가 **자기 URL 로** 물어본다 — 경쟁도 없고 새로 알려주는
-  // 정보도 없다(자기 URL 은 이미 안다).
+  // Query the document's own encoded wire size after boot since navigation
+  // responses complete before resultingClientId is bound.
   function askDocumentEncodedSize(attempt) {
     ctx.bridge.send({ type: ZP.MSG.ENCODED_SIZE_QUERY, url: virtualURL.href })
       .then(reply => {
@@ -82,23 +68,15 @@
       .catch(() => { if (attempt < 6) setTimeout(() => askDocumentEncodedSize(attempt + 1), 400); });
   }
   try { setTimeout(() => askDocumentEncodedSize(0), 300); } catch {}
-  // 2026-08-13 — 이 문서의 clientId 를 SW 의 탭 컨텍스트에 등록한다.
-  //
-  // 최상위 문서는 내비게이션 요청 자체가 바인딩을 만들어 주지만, `srcdoc` /
-  // `blob:` / `about:blank` 문서는 내비게이션이 없어 SW 가 그 클라이언트를
-  // 어느 탭 소속인지 알 수 없다. 그러면 **최상위에서는 잘 나가는 URL 이**
-  // 그 문서에서만 거절당한다. 프렐류드는 이런 문서에도 주입되므로 여기서
-  // 한 번 등록해 두면 그 계층 차이가 사라진다.
-  // controller 는 부팅 직후 아직 null 일 수 있으므로 몇 번 재시도한다 —
-  // 한 번 실패하고 마는 것과 달리, 여기서 놓치면 그 문서의 서브리소스가
-  // 전부 거절당하므로 조용한 실패의 대가가 크다.
+  // Register this client with the service worker's tab context so
+  // non-navigational realms (`about:srcdoc`, `blob:`, `about:blank`) can issue
+  // subresource fetches.
   (function bindClientToTab(attempt) {
     if (!boot.tabId) return;
     ctx.bridge.send({ type: ZP.MSG.BIND_CLIENT, tabId: boot.tabId, entryId: boot.entryId, env: ZP.clientEnvOf(root) })
       .catch(() => { if (attempt < 10) setTimeout(() => bindClientToTab(attempt + 1), 200); });
   })(0);
-  // SW 가 거절한 요청 목록. 서브리소스 실패는 페이지 콘솔에 아무 흔적을
-  // 남기지 않으므로, 프록시가 못 살려 준 것을 눈이 아니라 목록으로 본다.
+  // Expose the service worker's recorded subresource refusal log for diagnostics.
   define(root, '__zp_refusals', function __zp_refusals() {
     return new Promise((resolve) => {
       const controller = Native.serviceWorkerController || (Native.serviceWorker && Native.serviceWorker.controller);
@@ -121,19 +99,8 @@
       return baseURL;
     }
   }
-  // <meta name="referrer"> 를 SW 에 알린다.
-  //
-  // 문서의 참조 정책은 응답 헤더로도, 이 meta 로도 선언된다. 우리는 헤더만
-  // 보고 있었다 — 페이지가 부른 fetch 의 `Request.referrerPolicy` 는 빈
-  // 문자열이라(문서 정책은 요청 객체에 반영되지 않는다) meta 로만 정책을
-  // 선언한 페이지는 우리 쪽에서 기본값으로 떨어졌다. 브라우저가 직접 내는
-  // 요청(이미지/스크립트)은 정확한데 페이지 fetch 만 어긋나는 비대칭이었다.
-  //
-  // 파싱 중에 늦게 나타나거나 나중에 바뀔 수 있으므로 부팅 시 한 번 + 문서가
-  // 준비되면 한 번 더 읽는다. 마지막에 선언된 것이 이긴다(HTML 파싱 순서).
-  // 문서에 선언된 참조 정책(`<meta name=referrer>`). 마지막 선언이 이긴다.
-  // 요청마다 읽는다 — meta 는 파싱 도중 나타나거나 나중에 바뀔 수 있고,
-  // fetch 는 그렇게 잦은 호출이 아니다.
+  // Read the effective `<meta name="referrer">` policy (last declaration wins)
+  // and report changes to the service worker.
   function documentReferrerPolicy() {
     try {
       const metas = Native.querySelectorAll.call(document, 'meta[name="referrer" i]');
@@ -155,12 +122,9 @@
     } catch {}
   }
 
-  // Natively a message addressed to an origin the destination window does not
-  // have is dropped — silently. Every proxied window shares ONE physical origin,
-  // so the browser's own filter never fires (normalizePostMessageTargetOrigin
-  // turns every http(s) origin into the proxy's): a message meant for one site
-  // reached any other site's frame. Compare VIRTUAL origins here instead.
-  // Unknown destination (no membrane, no route): leave it to the browser.
+  // Filter outgoing postMessage calls by comparing the destination window's
+  // virtual origin against `targetOrigin`, since all proxied frames share one
+  // physical origin.
   function postMessageTargetAccepts(target, wanted) {
     if (wanted === undefined || wanted === null) return true;
     const s = String(wanted);
@@ -168,7 +132,7 @@
     let dest = '';
     try { dest = windowHandles ? windowHandles.originOf(target) : ''; } catch {}
     if (!dest) return true;
-    // "/" is the SENDER's own origin.
+    // "/" denotes the sender's own security origin.
     if (s === '/') return dest === securityOrigin() || notePostMessageDrop(s, dest, target);
     try {
       const u = new URL(s);
@@ -176,17 +140,13 @@
     } catch {}
     return true;
   }
-  // A dropped message leaves no trace in the page — natively too — so a site
-  // that loses one to a wrong origin is hard to see. Keep a bounded record where
-  // the other diagnostics live (the top document's `__zp_diagnostics`). Returns
-  // false so the caller can `return a || note(...)`.
+  // Record dropped postMessage calls in `__zp_diagnostics` and return false.
   function notePostMessageDrop(wanted, dest, target) {
     try {
       let dg = root.__zp_diagnostics;
       try { if (root.top && root.top.__zp_diagnostics) dg = root.top.__zp_diagnostics; } catch {}
       if (dg && dg.length < 200) {
         const entry = { t: 'pm-drop', wanted: String(wanted).slice(0, 80), dest: String(displayOrigin(dest)).slice(0, 80), from: String(displayOrigin(securityOrigin())).slice(0, 80) };
-        // Which window it was aimed at and who aimed it: the drop itself says neither.
         entry.to = postMessageTargetRole(target);
         try { entry.to += ' ' + String(target.location.href).slice(0, 100); } catch {}
         try { entry.at = String(new Error().stack).split('\n').slice(4, 7).map(l => l.trim()).join(' | ').slice(0, 300); } catch {}
@@ -215,26 +175,14 @@
     } catch {}
     return s;
   }
-  // 자식이 스스로 멤브레인을 깔기 전까지의 빈 구간을 메운다. `configurable:
-  // true` 로 두는 게 핵심 — 자식 prelude 가 자기 래퍼로 갈아끼울 수 있어야
-  // 한다(부모 래퍼는 부모 realm 의 함수라 자식의 incumbent realm 을 바꾼다).
-  // ★이 래퍼는 **부모 realm 함수**라, 붙어 있는 동안은 그 창을 거치는 모든
-  // postMessage 의 incumbent realm 이 부모가 된다(자식의 self-post 는 source 가
-  // 부모로, 손자→자식 메시지도 마찬가지). 그래서 **자식 prelude 가 뜨는 즉시
-  // 네이티브로 되돌린다** — 되돌릴 수 있도록 원본을 래퍼에 달아 둔다.
-  // 삭제로는 못 되돌린다: postMessage 는 Window **인스턴스의 소유 속성**이고
-  // (측정: `Window.prototype.postMessage` 는 undefined) 지우면 네이티브까지
-  // 같이 사라진다.
+  // Install a configurable postMessage wrapper on unbooted child windows and
+  // stash the native function on `earlyNativeKey` so the child prelude can
+  // restore native postMessage once its own membrane boots.
   const earlyNativeKey = '__zpEarlyNativePostMessage';
   function installEarlyPostMessage(childWin) {
     if (!childWin) return;
     try {
-      // 자식이 **이미 자기 멤브레인을 깔았으면 손대지 않는다.** 이 래퍼는 부모
-      // realm 함수라, 부팅이 끝난 창에 뒤늦게 덮으면 그 창의 self-post 와
-      // 손자→자식 메시지의 e.source 가 부모로 뒤집힌 채 영영 남는다 — 자식은
-      // 이미 복구 단계를 지났으므로 걷어 낼 사람이 없다. 실측(CNN): 프레임
-      // 25개 중 2개가 이 순서로 걸려 postMessage.length 가 3 으로 남았다.
-      // __zp_get 은 문자열 키 전역이라 교차 realm 에서도 보인다.
+      // Skip if the child window has already booted its own membrane.
       if (typeof childWin.__zp_get === "function") return;
       if (!Object.prototype.hasOwnProperty.call(childWin, '__zp_early_natives')) {
         const saved = Object.create(null);
@@ -259,8 +207,8 @@
       maskNativeFunction(wrapped, 'postMessage');
     } catch {}
   }
-  // 부모가 남긴 조기 래퍼를 걷어 낸다. 자기 realm 이 뜬 뒤에는 멤브레인 get
-  // 트랩이 targetOrigin 매핑을 맡으므로 창 자신은 네이티브여야 한다.
+  // Restore the native postMessage saved by installEarlyPostMessage so
+  // cross-realm calls preserve the caller's incumbent realm as `event.source`.
   function restoreNativePostMessage(w) {
     try {
       const cur = Object.getOwnPropertyDescriptor(w, 'postMessage');
@@ -272,28 +220,16 @@
   function postMessageWrapperFor(target) {
     if (!target || typeof target.postMessage !== 'function') return undefined;
     if (postMessageWrappers.has(target)) return postMessageWrappers.get(target);
-    // .bind() 가 BoundFunction 의 realm 을 install-time realm (parent) 으로
-    // 고정 → V8 의 message source 결정이 incumbent 가 아닌 bound function 의
-    // realm 사용 → child iframe 이 parent.postMessage 호출 시 `e.source` 가
-    // child 의 contentWindow 가 아닌 parent.window 가 됨. NAVER GFP SafeFrame
-    // SDK 는 source === iframe.contentWindow 비교로 어느 광고 iframe 에서
-    // resize 메시지 왔는지 식별 → 모든 광고 iframe height=0 으로 collapse.
-    // .bind 대신 Reflect.apply 로 native 직접 호출하면 caller realm (child) 이
-    // incumbent 로 보존되어 source 가 정확히 dispatched 됨.
+    // Invoke the native postMessage via Reflect.apply rather than .bind() so V8
+    // preserves the caller realm as the incumbent settings object and sets
+    // `event.source` to the sender's window.
     const originalPm = target.postMessage;
-    // mapped === '*' (caller 가 '*' 또는 변환 필요 없는 케이스) 면 source 보존을
-    // 위해 wrap 우회 — caller 가 native postMessage 직접 호출하도록 return
-    // origin pm 그대로. 단, mapped !== targetOrigin (virtual → real 변환됨)
-    // 케이스만 wrap 통해 변환 + native call.
     const wrapped = function postMessage(message, targetOrigin, transfer) {
-      // the browser checks the argument count before anything else (WebIDL: `message` is required)
+      // Validate required argument count per WebIDL before reading targetOrigin.
       if (arguments.length < 1) throw new TypeError("Failed to execute 'postMessage' on 'Window': 1 argument required, but only 0 present.");
-      // Two overloads: (message, targetOrigin, transfer) and (message, { targetOrigin,
-      // transfer }) — the options form used to reach the browser as the string
-      // "[object Object]" and throw a SyntaxError.
+      // Support both `postMessage(msg, targetOrigin, transfer)` and `postMessage(msg, options)` overloads.
       const optionsForm = arguments.length >= 2 && targetOrigin !== null && typeof targetOrigin === 'object';
       const wanted = optionsForm ? (targetOrigin.targetOrigin === undefined ? '/' : targetOrigin.targetOrigin) : (arguments.length < 2 ? '/' : targetOrigin);
-      // A message addressed to an origin the window does not have is not delivered.
       if (!postMessageTargetAccepts(target, wanted)) return undefined;
       if (optionsForm) {
         const opts = { targetOrigin: arguments.length < 2 ? proxyOrigin : normalizePostMessageTargetOrigin(wanted) };
@@ -303,8 +239,7 @@
       const mapped = arguments.length < 2 ? proxyOrigin : normalizePostMessageTargetOrigin(targetOrigin);
       return arguments.length > 2 ? Reflect.apply(originalPm, target, [message, mapped, transfer]) : Reflect.apply(originalPm, target, [message, mapped]);
     };
-    // Natively `postMessage.length` is 1 (the declared arity is 3 here), and the
-    // build minifies the declared name.
+    // Match native postMessage.length (1) and .name.
     try {
       Object.defineProperty(wrapped, 'length', { value: 1, configurable: true });
       Object.defineProperty(wrapped, 'name', { value: 'postMessage', configurable: true });
@@ -316,18 +251,12 @@
   }
   function virtualOriginForMessage(ev) {
     if (!ev || ev.origin !== proxyOrigin || !ev.source) return '';
-    // A window with a membrane of its own states its virtual origin itself, from
-    // any realm. The marker below is a per-realm Symbol, so a message from the
-    // PARENT (or a sibling, or a popup's opener) reached the page with the proxy's
-    // own origin as `e.origin`: widgets that check the embedder's origin rejected
-    // their parent's messages, and the proxy address leaked.
+    // Resolve the sender's virtual origin through windowHandles across realms.
     try {
       const o = windowHandles ? windowHandles.originOf(ev.source) : '';
       if (o) return displayOrigin(o);
     } catch {}
-    // A frame this realm routed: its current document path names the target.
-    // The marker below is per-realm, so a child that booted its own prelude is
-    // invisible to it — without this its messages arrived from the proxy origin.
+    // Fall back to the frame route table when the sender frame has not booted a prelude.
     try {
       const routed = frameRouteTarget(ev.source.location.pathname);
       if (routed) return new URL(routed).origin;
@@ -339,28 +268,17 @@
       return '';
     }
   }
-  // source 는 **엔진이 준 것을 그대로 쓴다.** 예전에는 sender 큐로 정정했는데,
-  // 그 정정이 필요했던 이유는 우리가 창의 postMessage 를 부모 realm 래퍼로
-  // 갈아끼워 incumbent realm 을 망가뜨렸기 때문이다. 그 원인을 없앴으므로
-  // (rewriter.md#postmessage-incumbent) 정정 장치도 함께 지운다 — 남겨 두면
-  // 다음 사람이 "이미 처리돼 있네" 로 오해한다. 여기서 하는 일은 오리진
-  // 가상화 하나뿐이다.
+  // Virtualize MessageEvent.origin and MessageEvent.source for messages
+  // arriving from the physical proxy origin.
   function virtualizeMessageEvent(ev) {
-    // Hot path fast-exit: 프록시 오리진이 아니면 virtualOriginForMessage 가
-    // 어차피 '' 를 준다. 함수 호출 + 객체 alloc 회피.
     if (ev.origin !== proxyOrigin) return ev;
     const origin = virtualOriginForMessage(ev);
     if (!origin) return ev;
-    // The sender is the very handle the page holds for that window: natively
-    // `e.source === iframe.contentWindow`. For another site's window that is the
-    // restricted stand-in, for an ancestor its own page-facing window.
+    // Map event.source to the membrane window handle so `e.source === iframe.contentWindow` holds.
     let handle = ev.source;
     try { if (windowHandles && ev.source && typeof ev.source === 'object') handle = windowHandles.forWindow(ev.source); } catch {}
-    // Decorate the REAL event rather than building a new one: a constructed
-    // MessageEvent is untrusted (`isTrusted` false), has no `target` /
-    // `currentTarget`, a new timestamp, and `stopImmediatePropagation` on it
-    // does nothing to the real dispatch. Own non-enumerable properties shadow the
-    // prototype getters, and `Object.keys(e)` stays what it is natively.
+    // Redefine `origin` and `source` on the native MessageEvent instance to
+    // preserve `isTrusted`, `target`, timestamps, and propagation methods.
     try {
       Object.defineProperty(ev, 'origin', { value: origin, enumerable: false, configurable: true });
       if (handle !== ev.source) Object.defineProperty(ev, 'source', { value: handle, enumerable: false, configurable: true });
@@ -368,8 +286,7 @@
     } catch {}
     try {
       if (handle !== ev.source) {
-        // `source` in MessageEventInit accepts only real windows and ports, so
-        // the handle goes on as an own property that shadows the getter.
+        // MessageEventInit rejects Proxy objects as `source`; attach the handle via Object.defineProperty instead.
         const e = new MessageEvent(ev.type, { data: ev.data, origin, lastEventId: ev.lastEventId || '', source: null, ports: ev.ports || [] });
         Object.defineProperty(e, 'source', { value: handle, enumerable: true, configurable: true });
         return e;
@@ -397,15 +314,9 @@
   }
   try { defineMasked(root, frameTargetOriginMarker, { get() { return displayOrigin(securityOrigin()); }, enumerable: false, configurable: false }); } catch {}
 
-  // ── virtual window.name ───────────────────────────────────────────────
-  // The real `window.name` persists across EVERY document this browsing
-  // context ever loads — cross-target and cross-proxy leaks in one slot.
-  // Page code sees a per-target virtual value instead: the root's is backed
-  // by native sessionStorage under the same tab+origin prefix as the
-  // session facade (name survives the target's own tab navigations, dies
-  // with the tab — native semantics). Child windows get in-memory names.
-  // NOTE: 이 블록은 install 시퀀스보다 먼저 있어야 한다 — scope 프록시의
-  // `name` 게터가 부팅 중에도 발사될 수 있어 `let` 을 아래로 내리면 TDZ.
+  // Virtualize `window.name` per target origin so values do not leak across
+  // cross-origin navigations in the same browsing context. Declared before
+  // install so early scope proxy accesses do not hit a temporal dead zone.
   const virtualFrameNames = newWeakMap();
   let rootWindowNameStore = null;
   function virtualWindowNameFor(win) {

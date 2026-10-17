@@ -1,24 +1,9 @@
-
   function installPhase2Membrane() {
-    // ★네이티브 **메서드**는 window 수신자가 필요하다 — 목록이 아니라 규칙으로.
-    //
-    // 예전에는 WINDOW_BOUND_METHODS 라는 손수 고른 목록만 바인딩했다. 목록에
-    // 없는 것은 스코프 프록시가 그대로 돌려주므로, 페이지가
-    // `globalThis.structuredClone(x)` 처럼 부르면 수신자가 **프록시**가 되어
-    // 브랜드 체크가 실패한다 → TypeError: Illegal invocation.
-    //
-    // GitHub 실측(2026-09-04): `sg-*.js` 의
-    //   let t = "function" == typeof globalThis.structuredClone
-    //         ? globalThis.structuredClone(e) : JSON.parse(JSON.stringify(e));
-    // 이 렌더 도중 던져 React 가 에러 경계로 떨어졌고, GitHub 홈이 통째로
-    // 자기 ErrorPage 를 그렸다. 목록에 없어서 뚫린 것이 structuredClone /
-    // 마이크로태스크 큐 API / reportError / getSelection 넷이었다(실측).
-    //
-    // 판별 규칙: **prototype 이 없는 네이티브 함수**만 바인딩한다.
-    //  - 네이티브 메서드(structuredClone, matchMedia, getSelection…)는 prototype 이 없다
-    //  - 생성자/클래스(URL, Promise, Worker…)는 prototype 이 있다 — 바인딩하면 new 가 깨진다
-    //  - 페이지가 window 에 얹은 자기 함수는 [native code] 가 아니므로 건드리지 않는다
-    //    (그걸 바인딩하면 `obj.f = window.f; obj.f()` 의 this 가 바뀐다)
+    // Native Window methods require the real `window` receiver to pass WebIDL
+    // brand checks; calling them on the `scope` proxy throws `Illegal invocation`.
+    // Bind only prototype-less native functions (`structuredClone`, `matchMedia`,
+    // `getSelection`, etc.) to `target`, leaving constructors (`URL`, `Promise`)
+    // and page-defined functions unbound.
     const NATIVE_CODE_RE = sealRegExp(/\{\s*\[native code\]\s*\}/);
     const STRICT_PROLOGUE_RE = sealRegExp(/^\s*['"]use strict['"]/);
     function needsWindowReceiver(fn) {
@@ -32,7 +17,7 @@
       if (windowMethodBindings.has(prop)) return windowMethodBindings.get(prop);
       const bound = fn.bind(target);
       maskNativeFunction(bound, prop);
-      // a bound function carries none of the function's own members: `globalThis.Proxy.revocable` was undefined (immer calls it)
+      // Copy own static properties (such as `Proxy.revocable`) that `Function.prototype.bind` omits.
       for (const key of nativeOwnKeys(fn)) {
         if (key === 'length' || key === 'name' || key === 'prototype') continue;
         try { nativeReflectDefineProperty(bound, key, nativeReflectGOPD(fn, key)); } catch {}
@@ -44,8 +29,7 @@
     const NativeAsyncFunction = (async function(){}).constructor;
     const NativeGeneratorFunction = (function*(){}).constructor;
     const NativeAsyncGeneratorFunction = (async function*(){}).constructor;
-    // Declared here, before any function that can reach them, so no install
-    // order can hit their TDZ (see callPageRewriter / timerHandler).
+    // Declare before functions that reference them so initialization order cannot hit a TDZ.
     const NativeSyntaxError = root.SyntaxError;
     const parseErrors = newWeakSet();
     function stringArgs(args) {
@@ -59,51 +43,30 @@
     function dynamicSource(kind, params, body) {
       return functionPrefix(kind) + ' anonymous(' + params.join(',') + '\n) {\n' + body + '\n}';
     }
-    // `withScope` 의 has 트랩은 **모든** 이름에 true 다 (해석되지 않은 식별자가
-    // 진짜 전역으로 새지 않게 하려고). 그 대가로 컴파일된 함수의 파라미터와
-    // `arguments` 까지 with 객체가 가려버린다: `new Function('x','return x')(1)`
-    // 이 undefined 였다. naver 메인 광고 safeframe 이 정확히 여기서 죽었다 —
-    // doT 템플릿 엔진의 `new Function('o,tmpl', "var _e=tmpl.encode…")` 에서
-    // tmpl 이 undefined 라 "Failed to create ad markup" 으로 광고 프레임 전체가
-    // 빈 채로 남았다 (프레임의 `window.onerror = () => true` 가 이걸 삼켜서
-    // 콘솔에는 아무것도 안 뜬다).
-    //
-    // 파라미터를 with **안쪽** 중첩 함수에 선언하면 이름 파싱 없이 정확히
-    // 해결된다 — 안쪽 함수 스코프가 with 객체보다 가깝다. 파라미터 텍스트를
-    // 그대로 다시 쓰므로 디스트럭처링/기본값도 자동으로 따라온다. `arguments`
-    // 와 body 안 `var` 의 스코프도 같이 제자리를 찾는다 (전에는 `var` 가
-    // window 로 샜다). 자유 식별자는 여전히 with 를 거치므로 격리는 그대로다.
-    //
-    // `new.target` 도 살린다: 바깥 래퍼는 Reflect.construct 로 newTarget 을
-    // 받을 수 있으므로, 그걸 그대로 안쪽 함수의 construct 호출에 전달한다.
-    // `new (new Function('return new.target'))()` 가 자기 자신을 돌려주는
-    // 네이티브 동작이 그대로 재현된다.
+    // `withScope`'s `has` trap returns `true` for every identifier so unresolved
+    // names do not escape to the physical global object, which would otherwise
+    // shadow parameters and `arguments` declared on the outer function. Declare
+    // parameters on an inner function nested inside `with(__zp_scope)` so
+    // parameters, `arguments`, and `var` bindings resolve before the `with` object,
+    // and forward `new.target` via `Reflect.construct`.
     function compileNested(params, body, kind) {
       try { zpTrace('compile', String(body || '').slice(0, 100)); } catch {}
       const inner = functionPrefix(kind) + ' __zp_dyn__(' + params.join(',') + '\n) {\n'
         + rewriteDynamicFunctionBody(params, body, kind) + '\n}';
-      // 안쪽 함수는 with **안에서** 만들어야 자유 식별자가 스코프 프록시를
-      // 거치고, `.apply` 는 with **바깥에서** 해야 한다: `__zp_args` 도 결국
-      // 이름이라 with 안에서는 has 트랩에 가려져 undefined 가 된다 (이 함정을
-      // 한 번 밟았다 — 파라미터는 살아났는데 arguments 가 비어 있었다).
-      // IIFE 가 클로저째로 with 스코프를 들고 나온다.
-      // `this` 는 파라미터로 전달한다 — 바깥 래퍼도 sloppy 라 apply(this=undefined)
-      // 하면 래퍼 경계에서 진짜 globalThis 로 강제변환되어 strict inner 까지
-      // 오염된다. 파라미터는 강제변환을 타지 않으므로 의도한 thisArg 가 그대로 간다.
+      // Define the inner function inside `with(__zp_scope)` so free identifiers
+      // route through the scope proxy, and invoke `.apply` outside `with` so
+      // `__zp_args` is not shadowed by the `has` trap. Pass `this` via `__zp_self`
+      // so a sloppy outer boundary does not coerce it to the raw global object.
       const src = 'var __zp_inner__ = (function(){\n' + 'with(__zp_scope){' + ZP_WITH_PROLOGUE + '\nreturn (' + inner + ');\n}\n})();\n'
         + 'if (new.target) return Reflect.construct(__zp_inner__, __zp_args, new.target);\n'
         + 'return __zp_inner__.apply(__zp_self, __zp_args);';
-      // `__zp_self`, not a helper's name: in a child frame booted into a reused window `Native.FunctionCtor` is the
-      // parent's facade, which rewrites this wrapper too, and the rewriter refuses a binding of a helper's name.
+      // Use `__zp_self` rather than a rewriter helper name because in a child frame sharing a reused
+      // window, `Native.FunctionCtor` may already be a parent facade that rewrites the wrapper.
       return Reflect.construct(Native.FunctionCtor, ['__zp_scope', '__zp_args', '__zp_self', src]);
     }
     function nestedCall(compiled, thisArg, callArgs, newTarget, sloppy) {
-      // Sloppy bodies coerce nullish `this` to the global object — here the
-      // REAL window, which is an escape. Substitute the scope facade so
-      // `this.location` virtualizes. `thisArg === root` counts as the global
-      // too: a page-visible `window` facade is never the real root, so root
-      // can only arrive from an unwrapped call site. Primitives still box
-      // natively inside.
+      // Sloppy functions coerce nullish `this` (or raw `root` from unwrapped callers)
+      // to the global object; substitute the `scope` facade so `this.location` virtualizes.
       const t = sloppy && (thisArg == null || thisArg === root) ? scope : thisArg;
       const argv = [withScope, callArgs, t];
       return newTarget ? Reflect.construct(compiled, argv, newTarget) : Reflect.apply(compiled, scope, argv);
@@ -113,20 +76,15 @@
       const body = parts.length ? parts[parts.length - 1] : '';
       const params = new Array(parts.length > 0 ? parts.length - 1 : 0);
       for (let i = 0; i < params.length; i++) params[i] = parts[i];
-      // 바깥 래퍼는 항상 plain function 이다 — 종류(async/generator)는 with
-      // 안쪽 중첩 함수가 들고 있고, 페이지에 노출되는 `fn` 이 같은 종류로
-      // 선언돼 있어 prototype 신원은 그대로 유지된다.
+      // Match the outer `fn` wrapper's function kind (`async`, `generator`, `asyncGenerator`)
+      // to the inner function to preserve prototype identity.
       const compiled = compileNested(params, body, kind);
-      // Directive prologue decides the inner function's this-coercion —
-      // sloppy nullish `this` must land on the scope facade, strict keeps
-      // whatever was passed (including undefined).
+      // Determine from the directive prologue whether nullish `this` should coerce
+      // to `scope` (sloppy) or remain untouched (strict).
       const sloppy = !/^\s*['"]use strict['"]/.test(body);
       let fn;
-      // ★바깥 래퍼는 반드시 strict 여야 한다 — sloppy 래퍼는 `fn.call(null)` 의
-      // this 를 **래퍼 경계에서** 진짜 globalThis 로 강제변환해, nestedCall 의
-      // nullish 판정을 무력화하고 strict body 에도 real window 를 밀어 넣는다
-      // (escape). strict 래퍼는 call-site thisArg 를 있는 그대로 전달한다.
-      // rest 파라미터가 있으면 'use strict' 지시어가 불법이라 `arguments` 를 쓴다.
+      // Declare the outer wrapper in strict mode so `fn.call(null)` does not coerce
+      // `this` to the physical `globalThis` at the wrapper boundary.
       if (kind === 'async') {
         fn = async function anonymous() { 'use strict'; return nestedCall(compiled, this, arguments, undefined, sloppy); };
       } else if (kind === 'generator') {
@@ -139,10 +97,8 @@
       toStringMap.set(fn, dynamicSource(kind, params, body));
       return fn;
     }
-    // What `eval` compiles: a string, or a TrustedScript's text — Chrome treats a TrustedScript as code whether or not
-    // Trusted Types are enforced (measured: `(0, eval)(policy.createScript('1 + 1'))` is 2 on a page with no CSP).
-    // Anything else is returned as it is. Cloudflare's Turnstile VM compiles its decoder this way; handed back unevaluated,
-    // the decoder was never defined and the VM died calling it (Glassdoor).
+    // Extract source text for `eval`: either a string or a TrustedScript instance,
+    // which Chrome evaluates even when Trusted Types are not enforced by CSP.
     function evalSource(x) {
       if (typeof x === 'string') return x;
       try {
@@ -157,24 +113,18 @@
     }
     const evalExpressionCache = newMap();
     function dynamicEval(source) {
-      // 네이티브 eval 은 생성자가 아니다 — `new eval()` 은 TypeError.
+      // Native `eval` is not a constructor (`new eval()` throws TypeError).
       if (new.target) throw new TypeError('eval is not a constructor');
       if (arguments.length === 0) return undefined;
-      // Native parity: a non-string is returned as-is, never evaluated
-      // (PerformEval step 1). `String(source)` used to evaluate eval`x` as the
-      // identifier x, and made `(0,eval)(obj)` call obj.toString() and run
-      // the result — code no real browser runs. ERRATA §E, 2026-09-29. (A TrustedScript is code: evalSource.)
+      // Per PerformEval step 1, non-string arguments (other than TrustedScript) are returned as-is without evaluation.
       const text = evalSource(source);
       if (text === null) return source;
       let expr = null;
       if (isEvalExpressionCandidate(text)) {
-        // 표현식도 리라이터를 거친다 — `with` 만 씌우면 computed member
-        // (`x['location']`) 같은 중재 경로가 통째로 빠진다. 리라이트가
-        // 실패하면 그대로 던져서 unrewritten 코드가 실행되지 않게 한다.
+        // Run expression candidates through the rewriter so computed member accesses (`x['location']`) are mediated.
         try {
           const rewritten = callPageRewriter(text, 'classic');
-          // Compiled once per rewritten source (the rewrite cache hands back the same string): `eval('this')` came dozens
-          // of times. The wrapper keeps nothing between calls — each evaluates its expression afresh.
+          // Cache compiled expression wrappers per rewritten source string.
           const cacheable = rewritten.length <= 65536;
           expr = cacheable ? evalExpressionCache.get(rewritten) : undefined;
           if (expr === undefined) {
@@ -188,34 +138,12 @@
           if (e && e.name === 'NotSupportedError') throw e;
         }
       }
-      // `this` of an expression eval is the global object: the page's `window`, the facade — not the real one (natively
-      // `(0, eval)('this') === window`; a bot-management VM checks it and stops when it is false).
+      // Evaluate expression candidates with `this` bound to the `scope` facade.
       if (expr) return Reflect.apply(expr, scope, [withScope]);
-      // 문(statement) 형태는 **전역 스코프**에서 실행해야 한다. indirect eval 의
-      // 최상위 `var`/`function` 선언은 전역 객체의 프로퍼티가 되는데, Function
-      // 래퍼 + `with` 로 감싸면 래퍼의 지역 선언이 되어 흔적 없이 사라진다.
-      //
-      // Cloudflare managed challenge 가 정확히 여기서 죽었다:
-      //   eval("function jcLw7(s){…XOR 디코더…}")   ← 전역 헬퍼를 심는 목적
-      // 뒤이어 난독화 VM 이 `window[<디코드된 이름>](…)` 로 그 헬퍼를 부르는데
-      // 우리 환경에서는 undefined 라 `undefined.call` TypeError 가 터졌다.
-      // 챌린지 스크립트가 죽으니 cf_clearance 를 영원히 못 받고 "Just a
-      // moment…" 만 반복 — 지문이 아니라 **eval 스코프 시맨틱**이 원인이었다.
-      //
-      // 리라이터는 그대로 통과시키므로 격리 posture 는 인라인 `<script>` 와
-      // 동일하다 (그쪽도 rewrite → globalEval 이다). `with` 스코프 프록시는
-      // 동적 Function body 경로에 그대로 남는다 — 거기선 본문이 진짜 함수
-      // 본문이라 전역 선언 시맨틱이 애초에 없다.
-      //
-      // ★실패는 그대로 던진다 — 폴백 없음. 예전엔 여기 `catch {}` + Function
-      // 본문 폴백이 있어서, 재작성된 코드가 **런타임에** 던지면 그 예외를
-      // 삼키고 같은 코드를 함수 본문으로 다시 컴파일해 **한 번 더 실행**했다
-      // (throw 전의 부작용이 두 번 일어남). `eval('return 1')` 이 SyntaxError
-      // 대신 1 을 돌려준 것도 이 폴백 때문이었다. 리라이트 실패는
-      // callPageRewriter 가 SyntaxError(파스 실패)/NotSupportedError 로 던진다.
+      // Statement-form indirect eval must bind top-level `var` and `function` declarations
+      // on the global object, so rewrite and execute via `execGlobalScript`.
       const globalCode = callPageRewriter(text, 'classic');
-      // R1: eval 의 let/const/class 는 eval 렉시컬 환경과 함께 버려진다 —
-      // 공유 zpLex 가 아닌 버리는 Map 에 등록한다.
+      // Isolate `let`, `const`, and `class` declarations inside `eval` to a disposable lexical Map.
       const prevLexEnv = __zp_lex_env;
       __zp_lex_env = newMap();
       try { return execGlobalScript(globalCode); }
@@ -238,31 +166,17 @@
     try { Object.defineProperty(dynamicEval, 'name', { value: 'eval', configurable: true }); } catch {}
     try { Object.defineProperty(dynamicEval, 'length', { value: 1, configurable: true }); } catch {}
     maskNativeFunction(dynamicEval, 'eval');
-    // ── R2: direct `eval(x)` 호출자 스코프 ──
-    // 리라이터가 `eval(x)` 를 `__zp_eval.call(this, src, desc)` 로 방출한다.
-    // 문제: direct eval 은 "eval 이라는 이름으로 intrinsic 을 호출" 해야만
-    // 호출자 환경을 본다 — `Native.globalEval(src)` 는 indirect(전역). prelude
-    // 는 strict 라 `const eval` 바인딩도 불법. 탈출구: Function ctor 로 만든
-    // sloppy 헬퍼의 **파라미터명** eval — `f(neval, src)` 안에서 `eval(src)`
-    // 는 파라미터가 intrinsic 이라 진짜 direct eval 이 되고, eval 은 호출
-    // 컨텍스트(헬퍼)의 this·lexenv 를 계승한다. with(desc)/with(scope) 가
-    // eval 소스 안에서 그 헬퍼 파라미터로 해석된다.
-    // desc 접근자 본문은 call-site 어휘 위치에서 실행되어 호출자 지역을
-    // 읽고 쓴다; 호출자가 없는 이름은 scope 프록시로 떨어진다.
-    // `var` — 부팅 중 get/set/has/del 이 선언문 도달 전에 호출돼도 TDZ 로
-    // 죽지 않게 한다.
+    // Caller-scope support for direct `eval(x)` rewritten to `__zp_eval.call(this, callee, [x], desc, ...)`.
+    // A sloppy helper constructed via `Function` with first parameter named `eval` makes `eval(__zp_src)`
+    // inside it act as a native direct eval over an environment combining caller local accessors (`desc`)
+    // and `withScope`. Declared with `var` to avoid a TDZ before initialization completes.
     var __zp_eval_desc = null;
     const zpDirectEvalRunner = Native.FunctionCtor(
       'eval', '__zp_env', '__zp_src',
       'return eval(__zp_src)');
-    // Strict code cannot hold a `with`, but it can sit inside one. A strict eval — a strict caller, or a "use strict"
-    // source — runs in a strict arrow function placed in a `with(env)` block, so the caller's locals are in its scope chain
-    // (it used to see none: every strict direct eval of a local was a ReferenceError). The block binds `eval` to the
-    // intrinsic, nearer than the object, which would otherwise answer for it with the facade's; the arrow has no
-    // `arguments` of its own, so the caller's come through the object.
-    // Made on first use, and tolerating a constructor that refuses: in a frame that reuses its initial window the
-    // "native" Function is the parent's facade, which rewrites what it compiles (the parameter names are the ones the
-    // rewriter lets a runtime wrapper bind). Such a realm keeps the old strict path.
+    // Strict direct eval cannot contain a `with` statement inside the evaluated source,
+    // so the runner wraps a strict arrow function inside an outer `with(__zp_env)` block.
+    // Built lazily and falls back to `null` if `Native.FunctionCtor` rejects `with`.
     let zpDirectEvalStrictRunner;
     const strictRunnerOrNull = () => {
       if (zpDirectEvalStrictRunner === undefined) {
@@ -275,27 +189,22 @@
       return zpDirectEvalStrictRunner;
     };
     function zpDirectEval(callee, args, desc, callerStrict, globalSite) {
-      // 네이티브 eval 은 생성자가 아니다.
+      // Native `eval` is not a constructor.
       if (new.target) throw new TypeError('eval is not a constructor');
-      // `var eval = f` 등으로 eval 이름이 재바인딩됐으면 네이티브는 그 값을
-      // 호출한다 — intrinsic 이 아닌 callee 는 ordinary call 로 위임
-      // (thisValue undefined → sloppy 는 전역, strict 는 undefined).
+      // If `eval` was rebound to another function, invoke it as an ordinary call.
       if (callee !== dynamicEval) {
         return nativeApply(callee, undefined, Array.isArray(args) ? args : []);
       }
       const arg = args && args.length ? args[0] : undefined;
-      // 네이티브 parity: 비문자열 인자는 평가 없이 그대로 반환 — TrustedScript 만은 코드다(evalSource).
+      // Return non-string arguments (other than TrustedScript) unchanged without evaluation.
       const src = evalSource(arg);
       if (src === null) return arg;
-      // Run as global code, the eval's top-level `this` is the global object (the facade); inside a function it is the
-      // caller's `this`, which the helper below hands over — the rewriter has to leave it alone there.
+      // Top-level sloppy direct eval runs as global code so `this` is the global facade;
+      // inside a function, preserve the caller's `this`.
       const asGlobal = globalSite === 1 && !callerStrict && !STRICT_PROLOGUE_RE.test(src);
       const rewritten = callPageRewriter(src, asGlobal ? 'classic' : 'classic-local');
-      // A sloppy eval in the top level of a classic script declares its `var`s and functions on the global object. Inside
-      // the helper below they would be the helper's locals and vanish with it — a challenge's bootstrap defines its global
-      // decoder with `eval("function name(…){…}")` and calls it by name later. There are no caller locals to expose here
-      // (top-level bindings are globals, lexical ones are in the shared scope), so it runs as global code: the same
-      // path an indirect eval and an inline script take.
+      // Sloppy direct eval at the top level of a classic script declares `var` and `function`
+      // bindings on the global object, so execute it via `execGlobalScript`.
       if (asGlobal) {
         const prevLexEnv = __zp_lex_env;
         __zp_lex_env = newMap();
@@ -303,30 +212,24 @@
       }
       let d = {};
       if (desc && typeof desc === 'object') {
-        // `delete x` 가 호출자 바인딩을 지우면 안 된다 — 접근자를
-        // non-configurable 로 재정의해 네이티브의 false 반환을 흉낸다.
+        // Mark caller local binding accessors non-configurable so `delete` on a local returns `false`.
         const dd = Object.getOwnPropertyDescriptors(desc);
         for (const k of Object.keys(dd)) { dd[k].configurable = false; dd[k].enumerable = true; }
         d = Object.defineProperties({}, dd);
       }
       const prev = __zp_eval_desc;
       __zp_eval_desc = d;
-      // R1: eval 의 let/const/class 는 eval 자체의 렉시컬 환경에 살고 함께
-      // 버려진다 — 공유 zpLex 에 새지 않게 eval 마다 버리는 Map 을 둔다.
+      // Isolate `let`, `const`, and `class` declarations inside `eval` to a disposable Map rather than `zpLex`.
       const prevLexEnv = __zp_lex_env;
       __zp_lex_env = newMap();
       try {
-        // A strict eval (a strict caller, or a "use strict" source) takes the strict runner: it cannot hold a `with`, so the
-        // runner holds it instead, and the caller's locals reach the code through the scope chain.
+        // Use the strict runner when either the caller or the evaluated source is strict.
         const strictSrc = !!callerStrict || STRICT_PROLOGUE_RE.test(src);
-        // 단일 합성 with: 스코프 프록시의 has 가 모든 이름에 true 라
-        // `with(__zp_desc)` 같은 이중 래핑은 파라미터명까지 삼켜버린다.
-        // desc 우선 → withScope 폴백을 한 프록시로 합성한다.
+        // Single proxy that checks caller locals (`d`) first and falls back to `withScope`.
         const env = new Proxy(d, Object.assign(Object.create(null), {
-          // The strict runner's own names are read from inside the `with`: they are its parameters, not the page's.
-          // Sloppy code answers for every name, so an unresolved one cannot fall through to the real global scope (and an
-          // assignment to it makes a global, as a sloppy one does). Strict code must throw for an undeclared name, so it is
-          // answered only what exists: the caller's locals, the scripts' lexical bindings, the window's own names.
+          // Exclude internal runner parameter names from `has`. Sloppy mode claims all other
+          // names to prevent global escapes; strict mode claims only existing bindings so
+          // undeclared reads throw ReferenceError.
           has(_t, p) {
             if (p === Symbol.unscopables || p === '__zp_self' || p === '__zp_src' || p === '__zp_env') return false;
             if (!strictSrc) return true;
@@ -341,11 +244,9 @@
             return nativeReflectSet(withScope, p, v);
           },
         }));
-        // sourceURL — eval 소스의 에러 filename 이 호출자 스크립트(가상
-        // 문서 URL)를 가리키게 — 네이티브는 eval 소스 에러도 호출 스크립트
-        // URL 을 reporting 한다.
+        // Append `sourceURL` so stack frames attribute evaluated code to the virtual document URL.
         const tag = '\n//# sourceURL=' + virtualURL.href;
-        // The caller's `this`, with the real global object (what a sloppy function called plainly gets) shown as the facade.
+        // Coerce raw `root` receiver to the `scope` facade.
         const that = this === root ? scope : this;
         if (strictSrc) {
           const strictRunner = strictRunnerOrNull();
@@ -379,11 +280,7 @@
       if (name === 'navigation') return virtualNavigationFor(root);
       return null;
     }
-    // Inherit Location.prototype so `virtualLocation instanceof Location`
-    // returns true. Without this, GitHub's React-Lib `instanceof Location`
-    // check during hydration fails → React error #519 (multiple hydration
-    // diffs in a pass) → ErrorPage fallback render. Other sites (Wikipedia,
-    // NAVER) don't notice because they don't do this specific check.
+    // Inherit from `Location.prototype` so `virtualLocation instanceof Location` holds.
     const LocationProtoBase = (root.Location && root.Location.prototype) || null;
     const virtualLocation = LocationProtoBase ? Object.create(LocationProtoBase) : {};
     definePropertiesMasked(virtualLocation, {
@@ -406,41 +303,22 @@
     });
     Object.freeze(virtualLocation);
     maskMethods(virtualLocation, ['assign','replace','reload','toString','valueOf']);
-    // Cache Proxy per native Location instance. Proxy preserves native
-    // [[Class]] / instanceof Location identity (target is native Location)
-    // while virtualizing path-level URL reads — required because the
-    // foreground OXC rewriter wraps `o.pathname` member access only when
-    // the prop name is in MEMBER_HELPER_PROPS; we narrow virtualization
-    // to pathname/search/hash (what React Router needs) to avoid
-    // breaking schema validators (zod) that compare href/origin to
-    // SSR'd expected values.
+    // Cache a Proxy per native Location instance to preserve `instanceof Location`
+    // and brand identity while virtualizing URL properties and navigation methods.
     const wrappedLocationCache = newWeakMap();
-    // The facades themselves: they answer `[object Location]` and are not Locations, so asking the browser's getter whether
-    // one is real throws — once per `location.href` read (8 µs, 20× the native read).
+    // Track Location facade proxies so `isNativeLocation` can reject them without invoking native brand checks.
     const wrappedLocationProxies = newWeakSet();
-    // Every URL component on a wrapped Location proxy must return the
-    // virtual (target) value, not the proxy origin. The original Phase-2
-    // set covered only `pathname / search / hash`, which left target
-    // code reading `location.href`, `location.host`, `location.origin`,
-    // etc. seeing `proxy.localhost:18080` — domain checks
-    // (`if (location.host === 'naver.com')`), anti-bot scripts comparing
-    // `location.href` against a marker, and OXC-bypassed inline reads
-    // all leaked the proxy origin into the page. Bisected 2026-06-03
-    // against Wikipedia anchor clicks: extending this set does NOT
-    // affect anchor click navigation (the earlier suspicion was a flaky
-    // test selector that hit `/wiki/Main_Page` self-link).
+    // Virtualize all URL component properties on wrapped Location proxies so target code
+    // never observes the physical proxy origin.
     const LOC_VIRT_PROPS = newSet(['href','protocol','host','hostname','port','pathname','search','hash','origin']);
     const LOC_ALL_URL_PROPS = newSet(['href','protocol','host','hostname','port','pathname','search','hash','origin']);
-    // Hoist the 4 fixed Location methods outside wrappedLocationFor so each
-    // call doesn't allocate a fresh closure set. They only capture
-    // virtualURL/setVirtualLocation/Native (closure-scope invariants).
+    // Reuse shared Location method closures across `wrappedLocationFor` instances.
     const locToString = virtualLocation.toString;
     const locAssign = virtualLocation.assign;
     const locReplace = virtualLocation.replace;
     const locReload = virtualLocation.reload;
-    // `location.ancestorOrigins` — a DOMStringList of every ancestor frame's
-    // origin. The real one hands out PROXY origins (the actual ancestors).
-    // Root → empty list; a contained frame → its embedder's target origin.
+    // Build a virtual `DOMStringList` for `location.ancestorOrigins` using virtual origins
+    // instead of the physical proxy origins reported by the browser.
     function ancestorOriginsList(local) {
       const origins = local ? embedderOrigins() : [displayOrigin(securityOrigin())];
       const proto = (root.DOMStringList && root.DOMStringList.prototype) || null;
@@ -458,8 +336,8 @@
     function wrappedLocationFor(nativeLoc) {
       const cached = wrappedLocationCache.get(nativeLoc);
       if (cached) return cached;
-      // about:blank children share these helpers until their own prelude runs,
-      // but their navigation must still target the child's native Location.
+      // Child frames at `about:blank` share these helpers before their own prelude runs,
+      // but their navigation methods must still act on the child's native Location.
       const local = nativeLoc === root.location;
       const recordForeignTarget = value => {
         try {
@@ -487,11 +365,9 @@
         maskNativeFunction(replaceLocation, 'replace');
         maskNativeFunction(reloadLocation, 'reload');
       }
-      // 자식 프레임의 Location 은 자기 URL 을 가져야 한다 — 부모 virtualURL 을
-      // 그대로 돌려주면 `iframe.contentDocument.location.href` 가 부모 주소로
-      // 보인다. `/zp/p/<token>` 은 클라이언트에서 못 푸니 프레임 엘리먼트에
-      // 붙들어 둔 타깃(urlMeta/data-zp-target-url)을 역조회하고, `?via=` 같은
-      // 평문 경로는 deproxy 로 복원한다. about:*/알 수 없는 것은 부모 계약 유지.
+      // Resolve a child frame's Location to its own virtual target URL via the frame route table,
+      // frame element metadata (`urlMeta` or `data-zp-target-url`), or `deproxyURL`, falling back
+      // to `null` (and then `virtualURL`) for `about:blank` or `srcdoc`.
       function foreignVirtualURL() {
         try {
           const routed = frameRouteTarget(nativeLoc.pathname);
@@ -519,8 +395,7 @@
       const handler = {
         get(target, prop) {
           if (typeof prop === 'string' && LOC_VIRT_PROPS.has(prop)) {
-            // about:blank/srcdoc 자식은 네이티브처럼 자기 주소가 아니라
-            // 삽입자의 가상 URL 을 보여 주는 기존 계약을 유지한다.
+            // Fall back to the embedder's `virtualURL` for `about:blank` and `srcdoc` child frames.
             if (local) return virtualURL[prop];
             const fv = foreignVirtualURL();
             return (fv || virtualURL)[prop];
@@ -554,38 +429,28 @@
         has(_t, prop) { return Reflect.has(nativeLoc, prop); },
         ownKeys() { return Reflect.ownKeys(nativeLoc); },
         getOwnPropertyDescriptor(t, prop) {
-          // Virtualized URL props: the native shape — an own, non-configurable accessor whose getter and setter read as
-          // native code (`function get href() { [native code] }`; `origin` has no setter). They live on the target (see
-          // `defineLocationAccessors`), which the Proxy invariant requires for a non-configurable report. The old answer,
-          // a writable data property, made `Object.getOwnPropertyDescriptor(location, 'href').get` undefined.
+          // Report virtualized URL properties using the non-configurable native-shaped accessors
+          // defined on `locTarget` to satisfy Proxy descriptor invariants.
           if (typeof prop === 'string' && LOC_VIRT_PROPS.has(prop)) return Reflect.getOwnPropertyDescriptor(t, prop);
           const d = Reflect.getOwnPropertyDescriptor(nativeLoc, prop);
-          // Target is Object.create(nativeLoc) with NO own props, so the proxy
-          // invariant forbids reporting a non-configurable descriptor that the
-          // target doesn't actually have — force configurable so enumeration of
-          // the real Location's keys still works.
+          // `locTarget` has no other own properties, so mark forwarded descriptors configurable
+          // to satisfy Proxy invariants during property enumeration.
           if (d) d.configurable = true;
           return d;
         },
         getPrototypeOf() { return Reflect.getPrototypeOf(nativeLoc); },
       };
-      // Target is `Object.create(nativeLoc)`, NOT nativeLoc itself. The
-      // unforgeable Location methods (reload/assign/replace) are OWN,
-      // non-configurable, non-writable data properties on the real location, so
-      // with nativeLoc as the proxy target the get-invariant ("must return the
-      // property's actual value") makes returning our virtualized versions throw
-      // `TypeError: 'get' on proxy: property 'reload'...` — which crashed NAVER
-      // main.js during React render. Putting the real location one level up the
-      // prototype chain leaves the target with no own props, so the invariant
-      // never applies; instanceof Location and reflection still resolve through
-      // the proto (forwarded to nativeLoc explicitly in every trap).
+      // Use `Object.create(nativeLoc)` as the Proxy target instead of `nativeLoc` directly.
+      // Native Location methods (`reload`, `assign`, `replace`) and URL accessors are own,
+      // non-configurable properties on `nativeLoc`, which would cause Proxy `get` traps
+      // returning virtualized replacements to throw a Proxy invariant TypeError.
       const locTarget = Object.create(nativeLoc);
       const proxy = new Proxy(locTarget, handler);
-      // The virtual URL props as own accessors of the target (see getOwnPropertyDescriptor). They answer through the facade
-      // and are only ever reached by descriptor reflection — `get`/`set` traps handle ordinary access.
+      // Install non-configurable accessors on `locTarget` for `LOC_VIRT_PROPS` so
+      // `getOwnPropertyDescriptor` can report native-shaped descriptors without violating Proxy invariants.
       for (const prop of LOC_VIRT_PROPS) {
         const nd = Reflect.getOwnPropertyDescriptor(nativeLoc, prop);
-        // Real accessor functions (from an object literal): named `get href`, no `prototype`, not constructors — as native ones.
+        // Use object-literal accessors so getters/setters have no `prototype` and are not constructors.
         const pair = Object.getOwnPropertyDescriptor({ get [prop]() { return proxy[prop]; }, set [prop](v) { proxy[prop] = v; } }, prop);
         defineMasked(locTarget, prop, { get: pair.get, set: !nd || nd.set ? pair.set : undefined, enumerable: nd ? nd.enumerable : true, configurable: false });
       }
@@ -595,10 +460,9 @@
     }
     const crossWindowTargets = newWeakMap();
     const crossOriginLocations = newWeakMap();
-    // May a script in this document navigate `win`? Itself and its descendants always; an
-    // ancestor never, but for the top window with allow-top-navigation (or, during user
-    // activation, allow-top-navigation-by-user-activation). Otherwise the browser's own
-    // SecurityError, which `prefix` begins.
+    // Check whether sandbox flags on this document forbid navigating `win`.
+    // A frame may always navigate itself and its descendants, and may navigate `top`
+    // only with `allow-top-navigation` (or `allow-top-navigation-by-user-activation` when active).
     function sandboxNavigationDenied(win, prefix) {
       const flags = opaqueDocument ? sandboxFlags() : null;
       if (!flags) return null;
@@ -617,8 +481,7 @@
       return opaqueDenied(prefix, text);
     }
     function crossWindowLocation(targetWindow) {
-      // Location belongs to the destination realm: using this frame's facade
-      // turns top.location writes into self-navigation (notably in srcdoc).
+      // Delegate to the target window's own Location facade so cross-frame writes navigate the target frame.
       const ownerGet = targetWindow.__zp_get;
       if (ownerGet === get && (virtualOriginOfWindow(targetWindow) || securityOrigin()) === securityOrigin()) {
         return wrappedLocationFor(targetWindow.location);
@@ -627,12 +490,11 @@
         const location = ownerGet(targetWindow, 'location');
         if (virtualOriginOfWindow(targetWindow) === securityOrigin()) return location;
       } else if (virtualOriginOfWindow(targetWindow) === securityOrigin()) {
-        // A same-site document that never booted a membrane (text, an image):
-        // the route map names its URL.
+        // Same-origin document without a booted membrane (such as a text or image document).
         return wrappedLocationFor(targetWindow.location);
       }
-      // Same physical proxy origin is not permission to read another site's
-      // Location. Cross-origin href writes/replace remain usable for navigation.
+      // Cross-origin windows expose a restricted Location facade that permits `href` writes
+      // and `replace()` for navigation while throwing `SecurityError` on reads.
       let restricted = crossOriginLocations.get(targetWindow);
       if (!restricted) {
         const navigate = (value, replace) => {
@@ -647,7 +509,7 @@
             else owner.href = absolute;
             return;
           }
-          // No membrane behind that window: take the frame route ourselves.
+          // Target window has no membrane; route frame navigation directly.
           activatedFrameURL(absolute, undefined, () => windowIsOpaque(targetWindow)).then(u => {
             if (replace) targetWindow.location.replace(u);
             else targetWindow.location.assign(u);
@@ -662,7 +524,7 @@
           maskAccessorFn(s, 'set', 'href');
           return { get: undefined, set: s, enumerable: false, configurable: true };
         };
-        // Names measured on a Chrome cross-origin Location: href, replace, then.
+        // Match Chrome's cross-origin Location property surface (`href`, `replace`, `then`, and cross-origin symbols).
         restricted = new Proxy(Object.create(null), {
           get(_target, prop) {
             if (prop === 'replace') return replace;
@@ -693,22 +555,13 @@
       }
       return restricted;
     }
-    // ── VirtualNavigation facade ─────────────────────────────────────────
-    // `window.navigation` is a live Navigation object: `currentEntry.url` and
-    // `entries()` carry REAL proxy-origin URLs, and `navigate()` walks the
-    // real session directly — a read leak AND a navigation escape in one
-    // object. The facade reports virtualURL for every entry URL (real proxy
-    // URLs can't be decrypted synchronously, and no target URL is lost that
-    // way), routes navigate/reload through the virtual-location pipeline,
-    // delegates back/forward/traverseTo to native (real session entries are
-    // all proxy pages → contained), and wraps listener events so
-    // `event.destination.url` can't leak the real URL either.
+    // Virtualize `window.navigation`: report `virtualURL.href` for entry and destination
+    // URLs, route `navigate()` and `reload()` through the virtual Location facade, and
+    // delegate history traversal (`back`, `forward`, `traverseTo`) to native session entries.
     const navFacadeCache = newWeakMap();
     function virtualNavigationFor(win) {
       if (!win) return null;
-      // A prelude-booted child builds its own facade against ITS virtualURL —
-      // delegate so `childWin.navigation.currentEntry.url` reports the
-      // child's target, not ours.
+      // Delegate to a prelude-booted child's own Navigation facade so entry URLs reflect the child's target.
       if (win !== root) {
         const ownerGet = win.__zp_get;
         if (typeof ownerGet === 'function' && ownerGet !== get) {
@@ -724,8 +577,7 @@
       const entryFacades = newWeakMap();
       const listenerWrappers = newWeakMap();
       const handlerStore = Object.create(null);
-      // All props non-enumerable: IDL attributes live on the prototype, so a
-      // native `Object.keys(navigation)` is empty — ours must match.
+      // Keep properties non-enumerable so `Object.keys(navigation)` is empty, matching native IDL attributes.
       function facadeEntry(real) {
         if (!real) return null;
         let e = entryFacades.get(real);
@@ -752,8 +604,7 @@
       function navigate(raw, opts) {
         const url = targetURL(String(raw), baseURL);
         if (!isHTTPURL(url)) throw normalizedError('NotSupportedError');
-        // href-write on the location facade: root → setVirtualLocation,
-        // child → activatedFrameURL → proxied frame navigation.
+        // Route navigation through the Location facade (`setVirtualLocation` for root, `activatedFrameURL` for child frames).
         wrappedLocationFor(win.location).href = url;
         if (opts && typeof opts === 'object' && 'state' in opts && native.updateCurrentEntry) {
           try { native.updateCurrentEntry({ state: opts.state }); } catch {}
@@ -847,32 +698,25 @@
       navFacadeCache.set(win, facade);
       return facade;
     }
-    // 사슬 한 칸 위로. 못 읽거나 자기 자신이면 제자리에 머문다(끝에 도달한 것).
+    // Step up the frame hierarchy (`parent` or `top`), returning `fallback` on failure or at the top.
     function climbCrossWindow(targetWindow, prop, fallback) {
       try {
-        // the browser's own answer (the real ancestor), never the child's hooked accessor: a child with a membrane of its own
-        // answers with ITS stand-in for its parent, and wrapping that again handed the page a window that is not its own —
-        // `iframe.contentWindow.parent === window` and `.top === window` read false.
+        // Read the native ancestor via `winGet` rather than a child membrane's hooked accessor
+        // so `iframe.contentWindow.parent === window` and `.top === window` preserve identity.
         const next = winGet(targetWindow, prop);
         if (next && next !== targetWindow) return windowHandleFor(next, 'ancestor');
       } catch {}
       return fallback;
     }
-    // cross-window 파사드에 쓰기/읽기를 진짜 창으로 넘겨도 되는 이름인가.
-    // 네이티브 같은-오리진 expando 의미를 복원하되 세 부류는 절대 진짜 창에
-    // 심지 않는다: (1) __zp_* 내부명 — 부모 scopeGet 이 root[prop] 으로
-    // 떨어지므로 `parent.__zp_set = evil` 이 헬퍼 탈취 통로, (2) MEMBER_DANGER
-    // — 가상화 표면을 expando 로 덮어쓰는 우회, (3) 문자열 on* 핸들러 —
-    // 브라우저가 미리라이트 코드로 컴파일한다.
+    // Check whether `prop` is a safe expando property to forward to a same-origin window,
+    // excluding `__zp_*` helpers, `MEMBER_DANGER` properties, and string `on*` handlers.
     function crossExpandoProp(prop, value) {
       return typeof prop !== 'string'
         || (!ZP_HIDDEN_RE.test(prop) && !MEMBER_DANGER.has(prop)
             && !(prop.startsWith('on') && typeof value === 'string'));
     }
-    // The page-facing window of another realm's booted membrane — what that
-    // realm's own code calls `window`. Asking it is how a same-origin ancestor's
-    // document, storage and timers become reachable, each already virtualized by
-    // the realm that owns it.
+    // Return the page-facing `window` facade of another realm's booted membrane so same-origin
+    // ancestor properties (`document`, storage, timers) resolve through that realm's virtualization.
     function ownerScopeOf(win) {
       try {
         const g = win.__zp_get;
@@ -884,23 +728,17 @@
       if (!targetWindow || targetWindow === root) return scope;
       if (crossWindowProxyCache.has(targetWindow)) return crossWindowProxyCache.get(targetWindow);
       const proxyTarget = {};
-      // ★이 파사드는 **진짜 Proxy** 여야 한다 — 리라이터가 멤버 대입을
-      // `__zp_get(parent).x = v` 같은 **날것의 프로퍼티 쓰기**로 방출한다
-      // (__zp_set 을 거치지 않는다). plain 객체이면 쓰기가 더미에 흡수돼
-      // `parent.__childSW = v` 류의 cross-frame 전달이 조용히 죽는다 — 실측:
-      // srcdoc 자식의 SharedWorker 회신이 silent 였다(요청은 정상 송신).
+      // Wrap the cross-window facade in a Proxy so property reads and assignments
+      // emitted by the rewriter (`__zp_get(parent).x = v`) forward to `targetWindow`.
       const proxy = new Proxy(proxyTarget, {
         get(t, prop) {
           if (Reflect.getOwnPropertyDescriptor(t, prop)) return Reflect.get(t, prop);
-          // A same-origin ancestor: whatever its own code sees on `window` (document,
-          // storage, timers, expandos) — `parent.document` is how legacy frames
-          // resize themselves, and it used to read undefined.
+          // Forward reads on a same-origin ancestor to its own `window` facade.
           if (typeof prop !== 'string' || !ZP_HIDDEN_RE.test(prop)) {
             const owner = ownerScopeOf(targetWindow);
             if (owner) return Reflect.get(owner, prop);
           }
-          // own expando 만 넘긴다 — 프로토타입 멤버(eval/Function/fetch 같은
-          // 진짜 네이티브)를 돌려주면 자식에 미리라이트 실행 경로가 열린다.
+          // Forward only own expando properties so unpatched prototype builtins (`eval`, `Function`, `fetch`) are not exposed.
           if (crossExpandoProp(prop)) {
             try {
               if (Reflect.getOwnPropertyDescriptor(targetWindow, prop)) return Reflect.get(targetWindow, prop);
@@ -940,24 +778,8 @@
         window: { get() { return proxy; }, enumerable: true },
         self: { get() { return proxy; }, enumerable: true },
         globalThis: { get() { return proxy; }, enumerable: true },
-        // ★`top`/`parent` 가 **자기 자신**을 돌려주면 프레임 사슬이 끊긴다
-        // (2026-08-24). 광고/동의(CMP) 코드는 거의 예외 없이 이렇게 올라간다:
-        //
-        //   while (!found) {
-        //     try { if (w.frames.__cmpLocator) found = w; } catch {}
-        //     if (w === window.top) break;      // ← 유일한 탈출구
-        //     w = w.parent;
-        //   }
-        //
-        // 손자 프레임(깊이 2 이상)에서는 `window.top` 과 `window.parent` 가
-        // **서로 다른** 프록시다. 그런데 부모 프록시의 `.parent` 가 자기 자신을
-        // 돌려주니 `w` 는 거기서 영원히 멈추고, `w === window.top` 은 영원히
-        // false 다 — **무한 루프**. CNN 에서 렌더러가 통째로 멎은 원인이 이것이다
-        // (CPU 샘플 실측: `get top` 4,181 / 우리 접근자 5,682).
-        //
-        // 진짜 사슬을 따라간다. `top`/`parent` 는 교차 출처에서도 읽을 수 있는
-        // 몇 안 되는 속성이라 이 접근 자체는 막히지 않는다. 캐시가 실제 창을
-        // 키로 쓰므로 위로 올라가면 결국 `window.top` 과 **같은 객체**에 닿는다.
+        // Resolve `top` and `parent` along the actual ancestor chain via `climbCrossWindow`
+        // so frame-tree traversals (`while (w !== w.top) w = w.parent`) terminate normally.
         top: { get() { return climbCrossWindow(targetWindow, 'top', proxy); }, enumerable: true },
         parent: { get() { return climbCrossWindow(targetWindow, 'parent', proxy); }, enumerable: true },
         frames: { get() { return proxy; }, enumerable: true },
@@ -968,33 +790,23 @@
       crossWindowTargets.set(proxy, targetWindow);
       return proxy;
     }
-    // ── which windows a page may hold, and in what form ────────────────────
-    // Every proxied frame shares ONE physical origin, so the browser's own
-    // same-origin policy cannot tell two sites' windows apart: the membrane does
-    // it. A window whose VIRTUAL origin differs from ours is handed out only as
-    // a stand-in that follows the HTML cross-origin window rules — a short fixed
-    // property list, SecurityError for everything else — never as the real
-    // window, whose document, storage and globals would be wide open. A
-    // same-origin ancestor is handed out as its own page-facing window (so
-    // `parent.document` works and `parent === top` holds). Any other same-origin
-    // window is handed out as it is.
-    //
-    // Measured against Chrome 148, a cross-origin window: every read off the list
-    // throws SecurityError — `then` in `in`, indices past the last child and every
-    // mutation (delete / defineProperty / setPrototypeOf / preventExtensions)
-    // included; `Object.keys` is empty, `getPrototypeOf` is null, `String(w)` and
-    // `JSON.stringify(w)` throw, `Object.prototype.toString` says "[object Object]".
+    // ── which windows a page may hold, and in what form
+    // Because all proxied frames share one physical origin, the membrane enforces
+    // cross-origin window isolation based on virtual origins. Windows with a different
+    // virtual origin are wrapped in a restricted Proxy matching HTML cross-origin window
+    // semantics (exposing only `CROSS_ORIGIN_WINDOW_NAMES` and throwing `SecurityError`
+    // on all other reads, writes, prototype lookups, and descriptor mutations).
+    // Same-origin ancestors resolve to their own page-facing window facade.
     const CROSS_ORIGIN_WINDOW_NAMES = ['window', 'self', 'location', 'closed', 'frames', 'length', 'top', 'opener', 'parent', 'blur', 'close', 'focus', 'postMessage'];
     const CROSS_ORIGIN_WINDOW_NAME_SET = newSet(CROSS_ORIGIN_WINDOW_NAMES);
     const CROSS_ORIGIN_SYMBOLS = [Symbol.toStringTag, Symbol.hasInstance, Symbol.isConcatSpreadable];
     const crossOriginFacadeSet = newWeakSet();
     const crossOriginFacades = newWeakMap();
     const crossOriginMethods = newWeakMap();
-    // The origin a window reports from its OWN membrane ('' when it has none).
+    // Return the virtual security origin reported by `win`'s own membrane, or `''` if none is booted.
     function ownMembraneOrigin(win) {
       try {
-        // The realm's SECURITY origin — a token of its own for an opaque document, whose
-        // `location.origin` is still its URL's.
+        // Prefer `__zp_origin` so sandboxed opaque documents report their unique security origin token.
         const stated = win.__zp_origin;
         if (typeof stated === 'function') {
           const o = stated();
@@ -1012,8 +824,7 @@
       if (win === root) return securityOrigin();
       const own = ownMembraneOrigin(win);
       if (own) return own;
-      // No membrane of its own yet: a frame element's intended origin (or opaque mark) speaks
-      // even when the initial about:blank window was previously contained by us.
+      // Before a child frame boots its own membrane, check its host frame element's intended origin.
       try {
         const fe = winGet(win, 'frameElement');
         if (fe) {
@@ -1021,18 +832,15 @@
           if (intended) return intended;
         }
       } catch {}
-      // Contained by us (a blank, srcdoc or document.write'd page): it inherits ours.
+      // Inherit this realm's security origin for blank, `srcdoc`, or `document.write` frames contained by this realm.
       try { if (win.__zp_get === get) return securityOrigin(); } catch {}
-      // ...else the route we opened it with, if any.
+      // Fall back to the target URL recorded in the frame route table.
       try { const routed = frameRouteTarget(win.location.pathname); if (routed) return new URL(routed).origin; } catch {}
       return '';
     }
-    // Where a frame was SENT (not what it shows right now): a window that has not
-    // booted its own membrane yet — the blank page in front of a pending route, a
-    // routed text or image document — is still that site's.
+    // Determine the intended target origin of a frame element before its document finishes booting.
     function frameIntendedOrigin(frame) {
-      // Sandboxed without allow-same-origin — or inside a document that is: whatever it shows, it
-      // has an opaque origin of its own.
+      // Frames marked opaque (sandboxed without `allow-same-origin`) have a unique opaque origin.
       try { if (Native.hasAttribute.call(frame, OPAQUE_FRAME_ATTR)) return OPAQUE_PENDING_ORIGIN; } catch {}
       try {
         const t = urlMeta.get(frame) || Native.getAttribute.call(frame, 'data-zp-target-url');
@@ -1066,8 +874,7 @@
         else if (!raw[networkContainmentMarker]) installNetworkContainment(raw);
       } catch {}
     }
-    // `hint`: a frame element whose intended origin speaks for a window that has
-    // no membrane of its own yet, or 'ancestor' for parent / top / opener.
+    // Resolve `win` to the appropriate facade (`scope`, `sameOriginAncestor`, or `crossOriginWindow`).
     function windowHandleFor(win, hint) {
       if (!win || typeof win !== 'object') return win;
       if (win === root || isScopeProxy(win)) return scope;
@@ -1082,16 +889,12 @@
       containSameOriginChildWindow(raw);
       return win;
     }
-    // The browser's sentences, word for word (measured on Chrome 154, a window and a Location of another origin). A read names
-    // the property — an index by its number, a symbol not at all — and says "from"; a write says "on"; every other refusal
-    // (in, delete, define, setPrototypeOf, preventExtensions) is only the closing sentence. Ours said "on 'Window'" for all of
-    // them, "Failed to check a named property…" for 'in', and "Blocked by ZeroProxy policy" for every Location.
+    // Construct a `SecurityError` DOMException matching Chrome's cross-origin Window and Location error messages.
     const INDEX_NAME_RE = /^(?:0|[1-9]\d*)$/;
     function crossOriginDenied(verb, prop, iface) {
       const face = iface || 'Window';
       const indexed = typeof prop === 'string' && INDEX_NAME_RE.test(prop);
-      // a symbol is named by its description in brackets — except the one the engine looks up itself when it converts the
-      // window to a primitive (Symbol.toPrimitive), and a symbol without a description: those name nothing
+      // Format symbol names in brackets, omitting `Symbol.toPrimitive` and descriptionless symbols.
       const nameText = typeof prop === 'symbol'
         ? (prop === Symbol.toPrimitive || !prop.description ? '' : " '[" + prop.description + "]'")
         : " '" + String(prop) + "'";
@@ -1107,7 +910,7 @@
         return new Native.DOMException(lead + 'Blocked a frame with origin "' + displayOrigin(securityOrigin()) + '" from accessing a cross-origin frame.', 'SecurityError');
       } catch { return normalizedError('SecurityError'); }
     }
-    // close / focus / blur: one stable function per window, as natively.
+    // Cache one stable wrapper per cross-origin window method (`close`, `focus`, `blur`).
     function crossOriginMethod(win, name) {
       let m = crossOriginMethods.get(win);
       if (!m) { m = Object.create(null); crossOriginMethods.set(win, m); }
@@ -1127,10 +930,8 @@
       if (facade) return facade;
       const childCount = () => { try { return winGet(win, 'length') >>> 0; } catch { return 0; } };
       const isIndex = p => typeof p === 'string' && /^(?:0|[1-9]\d*)$/.test(p) && Number(p) < childCount();
-      // A cross-origin window still answers for the NAMES of its child frames (HTML: a document-tree child navigable's target
-      // name is a property of the window, after the allowed names and the indices): `parent['anchor']` is the sibling frame.
-      // reCAPTCHA's challenge frame finds its anchor frame that way. Only `get` and the descriptor do; `in` still throws,
-      // as natively (measured). The first child of that name in tree order; the page's own globals are never read through this.
+      // Expose named child frames on cross-origin windows via `get` and `getOwnPropertyDescriptor`
+      // (while still throwing on `in`), matching HTML cross-origin named access semantics.
       const namedChild = p => {
         if (typeof p !== 'string' || p === '') return null;
         try {
@@ -1160,7 +961,7 @@
         return { get: g, set: s, enumerable: false, configurable: true };
       };
       const denyMutation = (verb, prop) => { throw crossOriginDenied(verb, prop); };
-      // An extensible, empty target: no invariant can bind the traps below.
+      // Use an extensible null-prototype target so Proxy traps are unconstrained by target invariants.
       facade = new Proxy(Object.create(null), {
         get(_t, prop) {
           if (typeof prop === 'symbol') {
@@ -1217,10 +1018,8 @@
       crossWindowTargets.set(facade, win);
       return facade;
     }
-    // Natively null when the embedding document is another origin. Every proxied frame
-    // shares one physical origin, so the real element is always there — and it leads
-    // straight into the embedder's DOM. Read as `window.frameElement` (through `get`) and
-    // as a bare `frameElement` (through `scopeGet`).
+    // Return `null` for `frameElement` when the embedding parent has a different virtual origin,
+    // preventing cross-origin traversal into the embedder's DOM.
     function virtualFrameElement(w) {
       let el = null;
       try { el = winGet(w, 'frameElement'); } catch {}
@@ -1247,22 +1046,9 @@
       return scope;
     }
     maskNativeFunction(virtualLocation[Symbol.toPrimitive], Symbol.toPrimitive);
-    // 2026-08-13 — `has` 를 정직하게 만들었다. 예전에는 **모든 이름에 true** 를
-    // 돌려줬다. 그건 아래 `withScope` 의 요구사항이지 페이지에 보여 줄 `window`
-    // 의 동작이 아니다. 같은 프록시를 window/globalThis/self/frames 로 노출하고
-    // 있었으므로, 페이지 입장에서 `'아무거나' in window` 가 항상 true 였다.
-    //
-    // 실제 피해: NAVER 장바구니가 통째로 안 뜬다. 번들의 싱글턴 초기화가
-    //   var t = globalThis;
-    //   KEY in t || (t[KEY] = new Beacon());
-    //   return t[KEY];
-    // 인데, `KEY in t` 가 늘 true 라 **대입이 아예 실행되지 않고** 되읽기는
-    // undefined → `getInstance().recordExport` 에서 TypeError → 모듈 초기화가
-    // 끊겨 스켈레톤만 남았다. `A in obj || (obj[A]=…)` 는 흔한 관용구다.
-    // 부수적으로 `'__아무거나__' in window === true` 는 그 자체로 지문이었다.
-    // A native Window's unforgeable location accessor cannot be replaced by a
-    // Proxy descriptor trap. Keep the virtual accessor on the actual shadow
-    // target, with the native flags; all other properties still live on root.
+    // Install a virtual `location` accessor on `scopeTarget` because `window.location` is
+    // unforgeable (`configurable: false`) on the native Window and cannot be overridden
+    // solely by a Proxy trap without matching the shadow target descriptor.
     const scopeTarget = Object.create(nativeReflectGetPrototypeOf(root));
     const nativeWindowLocation = nativeReflectGOPD(root, 'location');
     const scopeLocationGet = function () {
@@ -1280,15 +1066,9 @@
       enumerable: nativeWindowLocation.enumerable,
       configurable: nativeWindowLocation.configurable
     });
-    // `hide` = 페이지-facing scope 프록시용 내부 이름 차단. `with(__zp_scope)`
-    // 는 has 가 모든 이름을 잡으므로 `__zp_get` 같은 헬퍼까지 undefined 를
-    // 돌리면 리라이트된 코드가 전부 죽는다 — withScope 는 hide=false.
-    // Boot snapshot of native own accessors. Chrome keeps several built-ins
-    // (`performance`, `crypto`, `indexedDB`, ...) as OWN configurable getters
-    // on window — invoking them with the facade receiver throws
-    // Illegal invocation. Only accessors the PAGE installs later
-    // (defineProperty / __defineGetter__) run with `this` = scope, so
-    // `this.location` inside the getter virtualizes.
+    // Snapshot native configurable own accessors on `window` (`performance`, `crypto`, `indexedDB`, etc.)
+    // at boot so they continue to run with the real `root` receiver (passing WebIDL brand checks),
+    // while accessors installed later by page code run with `scope` as `this`.
     const bootOwnAccessors = newMap();
     for (const name of nativeOwnKeys(root)) {
       const d = nativeReflectGOPD(root, name);
@@ -1307,12 +1087,9 @@
       }
       return false;
     }
-    // The window attributes the membrane answers for itself — the frame it sits in, its parent, its opener, its name — are
-    // the PAGE's to redefine, as any property of its own window is: `Object.defineProperty(window, 'frameElement', { get })`
-    // (Cloudflare's challenge does exactly that, then reads it back), a getter for `parent`, an assignment `window.self = x`
-    // (a [Replaceable] attribute becomes a plain data property). The page's definition answers, and its descriptor reads
-    // back as it wrote it. Before this the membrane answered from its own state whatever the page had done — the redefinition
-    // "succeeded" and was never seen. The page's getter runs with the facade as `this`, never the real window.
+    // Allow page code to redefine replaceable or configurable window properties (`self`, `frames`,
+    // `parent`, `opener`, `frameElement`, `name`, `navigation`, `history`) and observe its own
+    // definitions and descriptors, running page-supplied getters with `scope` as `this`.
     const PAGE_DEFINABLE = newSet(['self', 'frames', 'parent', 'opener', 'frameElement', 'name', 'navigation', 'history']);
     const bootDefinable = newMap();
     for (const name of ['self', 'frames', 'parent', 'opener', 'frameElement', 'name', 'navigation', 'history']) {
@@ -1326,7 +1103,7 @@
       const own = nativeReflectGOPD(root, prop);
       if (!own) return null;
       if (own.get === boot.get && own.set === boot.set && own.value === boot.value) return null;
-      // only the setter changed: reads are still the browser's own getter, which the membrane answers for
+      // If only the setter was replaced, continue answering reads through the membrane.
       if (own.get && own.get === boot.get) return null;
       return own;
     }
@@ -1335,17 +1112,11 @@
       if (!own) return NO_PAGE_DEFINITION;
       return own.get ? nativeApply(own.get, scope, []) : own.value;
     }
-    // R1: classic script 의 top-level let/const/class 는 **스크립트를 넘어
-    // 지속되는 공유 전역 렉시컬 환경**에 산다. 각 스크립트가 별도 indirect
-    // eval 로 실행되면 그 렉시컬 환경은 버려지므로, 리라이터가 심은
-    // `__zp_lex_decl`(등록+충돌검사)/`__zp_lex_bind`(accessor 클로저) 가
-    // 살아있는 바인딩을 여기 보존한다.
-    //   entry = { kind:'let'|'const'|'class', get, set } — set=null 이면
-    //   const 의미(쓰기 시 TypeError), get=null 이면 선언만 되고 bind 가
-    //   안 된 상태(초기화 throw 등) → 읽기 시 ReferenceError(TDZ parity).
+    // Shared global lexical environment preserving top-level `let`, `const`, and `class`
+    // bindings across classic scripts executed via separate indirect `eval` calls (`set === null`
+    // indicates `const`; `get === null` indicates TDZ before initialization).
     const zpLex = newMap();
-    // 현재 렉시컬 환경 — 스크립트 실행 중엔 zpLex, eval/동적 코드 안에선
-    // 그 eval 의 버려지는 환경(네이티브 eval 렉시컬 환경 의미 그대로).
+    // Active lexical environment (`zpLex` for top-level scripts, or a disposable Map inside `eval`).
     var __zp_lex_env = null;
     __zp_lex_env = zpLex;
     function zpLexGetEntry(prop) {
@@ -1375,19 +1146,14 @@
       if (prop === 'name') return virtualWindowNameFor(root);
       const dynamic = typeof prop === 'symbol' ? null : dynamicGlobal(String(prop));
       if (dynamic) return dynamic;
-      // Page-installed own accessor (or prototype accessor) → run it with the facade as `this`:
-      // `this.location` inside the getter must virtualize, and
-      // `this === root` would hand the real Location straight back to
-      // page code. Native own accessors (unchanged since boot) fall
-      // through to `root[prop]` — they brand-check `this`.
+      // Invoke page-installed own accessors and prototype accessors with `scope` as `this`
+      // so `this.location` inside the getter is virtualized; native boot accessors read from `root`.
       const own = nativeReflectGOPD(root, prop);
       if (isPageInstalledAccessor(prop, own) || (!own && isPrototypeAccessor(prop))) return nativeReflectGet(root, prop, scope);
       const value = root[prop];
       if (WINDOW_BOUND_METHODS.has(prop) || needsWindowReceiver(value)) return boundWindowMethod(root, prop);
-      // A frame reached by NAME (`window.frames.x`, `window.x`, a bare `x`): the
-      // rewriter emits those as plain reads, so they land here and not in `get`.
-      // Named frames are not own properties of the window — page globals are —
-      // which keeps this check off the hot path and away from page objects.
+      // Wrap named child frame windows accessed via `window[name]` or bare identifiers,
+      // which exist as non-own properties on the Window.
       if (!own && typeof prop === 'string' && value !== null && typeof value === 'object') {
         let isWindow = false;
         try { isWindow = value.window === value; } catch {}
@@ -1398,22 +1164,17 @@
     const scopeTraps = Object.assign(Object.create(null), {
       has(_target, prop) {
         if (prop === Symbol.unscopables) return false;
-        // Runtime internals (__zp_*/ZP*) are own props of the real window —
-        // `'__zp_trace' in window` must not answer true for page code.
+        // Hide `__zp_*` and `ZP*` runtime internals from `'prop' in window` checks.
         if (typeof prop === 'string' && ZP_HIDDEN_RE.test(prop)) return false;
         return nativeReflectHas(root, prop);
       },
       get(_target, prop) { return scopeGet(prop, true); },
       set(_target, prop, value) {
         if (prop === 'location') { setVirtualLocation(value); return true; }
-        // `window.__zp_get = f` would replace the helper every rewritten access calls with the real global object. The
-        // write is dropped (the name already reads as absent).
+        // Ignore writes to reserved `__zp_*` helper names on the window facade.
         if (typeof prop === 'string' && ZP_RESERVED_NAME_RE.test(prop)) return true;
         if (prop === 'name') { setVirtualWindowName(root, value); return true; }
-        // `window.onload = 'code'` falls through to the native setter, which
-        // turns a string into null — no real browser compiles it (see the
-        // element on* note in 09-nav-net.js).
-        // Page-installed accessor setters likewise run with `this` = scope.
+        // Run page-installed and prototype accessor setters with `scope` as `this`.
         const own = nativeReflectGOPD(root, prop);
         if (isPageInstalledAccessor(prop, own) || (!own && isPrototypeAccessor(prop))) {
           return nativeReflectSet(root, prop, value, scope);
@@ -1424,15 +1185,14 @@
         if (prop === 'location') return nativeReflectGOPD(target, prop);
         if (typeof prop === 'string' && ZP_HIDDEN_RE.test(prop)) return undefined;
         if (typeof prop === 'string' && MEMBER_DANGER.has(prop) && !(PAGE_DEFINABLE.has(prop) && pageDefined(prop))) {
-          // A property reported non-configurable must exist, with this very descriptor, on the proxy's target (Proxy
-          // invariant). `window`, `document`, `top`… are [LegacyUnforgeable]: the report threw "trap reported
-          // non-configurability" and `Object.keys(window)` — any enumeration of the window — threw with it.
+          // Mirror non-configurable (`[LegacyUnforgeable]`) descriptors onto `target` before
+          // returning them so Proxy descriptor invariants hold during `Object.keys(window)`.
           const locked = nativeReflectGOPD(target, prop);
           if (locked) return locked;
           const native = nativeReflectGOPD(root, prop);
           const d = {
             get: membraneGetter(scope, prop),
-            // a read-only attribute (frameElement, history, top, window, document) has no setter natively
+            // Omit `set` for natively read-only attributes (`frameElement`, `history`, `top`, `window`, `document`).
             set: native && !native.set ? undefined : membraneSetter(scope, prop),
             enumerable: native ? native.enumerable : true,
             configurable: native ? native.configurable : false,
@@ -1441,7 +1201,7 @@
           return d;
         }
         const desc = nativeReflectGOPD(root, prop);
-        // Preserve locked descriptors, not a blanket configurable:true mask.
+        // Mirror non-configurable descriptors onto `target` to satisfy Proxy invariants.
         if (desc && !desc.configurable) nativeReflectDefineProperty(target, prop, desc);
         return desc;
       },
@@ -1461,30 +1221,22 @@
         return nativeReflectDeleteProperty(target, prop);
       },
       getPrototypeOf() { return nativeReflectGetPrototypeOf(root); },
-      // Window is an immutable-prototype exotic object: natively
-      // `Reflect.setPrototypeOf(window, x)` is true only when x already IS the
-      // prototype, false otherwise (`Object.setPrototypeOf` then throws
-      // TypeError) — measured Chrome 152. The old trap recorded an override on
-      // the facade and returned true: the real window stayed safe, but the
-      // facade "succeeded" where every browser refuses — a one-line detector.
+      // Window is an immutable-prototype exotic object: `setPrototypeOf` succeeds only when
+      // `proto` is already the current prototype, and returns `false` otherwise.
       setPrototypeOf(_target, proto) {
         return proto === nativeReflectGetPrototypeOf(root);
       },
       preventExtensions() { return false; }
     });
-    // 페이지에 window/globalThis/self/frames 로 노출되는 프록시.
+    // Page-facing proxy exposed as `window`, `globalThis`, `self`, and `frames`.
     const scope = new Proxy(scopeTarget, scopeTraps);
-    // `with(__zp_scope){…}` 의 피연산자 전용. 여기서는 has 가 **반드시** 모든
-    // 이름에 true 여야 한다 — 그래야 블록 안의 모든 식별자가 이 객체를 거치고,
-    // 해석되지 않은 이름이 진짜 전역 스코프로 새어나가 멤브레인을 우회하지
-    // 못한다. 페이지 코드에 이 객체가 직접 새지는 않는다: get 트랩이
-    // window/globalThis/self/frames 에 대해 `scope` 를 돌려주기 때문이다.
+    // Operand proxy for `with(__zp_scope){...}`. `has` returns `true` for every identifier
+    // so all names inside the block route through this proxy rather than escaping to the
+    // physical global scope (`get` still returns `scope` for `window`/`globalThis`/`self`/`frames`).
     const withScope = new Proxy(scopeTarget, Object.assign(Object.create(null), scopeTraps, {
       has(_target, prop) { return prop !== Symbol.unscopables; },
-      // has=true 와 짝을 이뤄야 하는 get — `__zp_*` 헬퍼가 with 본문에서
-      // 반드시 해석되어야 한다 (페이지-facing scope 와 달리 숨기지 않는다).
-      // R1: 전역 렉시컬 바인딩은 전역 객체 프로퍼티보다 **먼저** 보인다 —
-      // 동적 코드의 bare 식별자도 다른 스크립트의 let/const 를 읽는다.
+      // Expose `__zp_*` helpers inside `with` bodies and check global lexical bindings (`zpLex`)
+      // before global object properties.
       get(_target, prop) {
         const le = zpLexGetEntry(prop);
         if (le) return zpLexRead(le, prop);
@@ -1497,8 +1249,7 @@
       },
     }));
     function isScopeProxy(value) { return value === scope || value === withScope; }
-    // Names the rewriter marks as dangerous members. `Reflect.get/set` route
-    // these through the membrane; any other name keeps native semantics.
+    // Property names mediated by the membrane during `Reflect.get`, `Reflect.set`, and descriptor lookups.
     const MEMBER_DANGER = newSet([
       'location', 'contentWindow', 'contentDocument', 'defaultView',
       'frameElement', 'parent', 'top', 'opener', 'frames',
@@ -1518,18 +1269,10 @@
       }
       return null;
     }
-    // 진짜 native Location 인스턴스인가. `instanceof` 로 보면 페이지가
-    // `Symbol.hasInstance` 를 갈아 끼워 속일 수 있으므로, **네이티브 게터를
-    // 직접 불러 보는 브랜드 체크**를 쓴다(Location 이 아니면 던진다).
-    // ★1차 판정은 **던지지 않아야 한다.** 처음엔 네이티브 게터를 바로 불러
-    // 성공/예외로 갈랐는데, 그러면 Location 이 **아닌** base 마다 예외가 하나씩
-    // 난다. `href`/`origin`/`host`/… 는 앵커·URL·설정객체에서 흔한 이름이라
-    // 이 경로가 통째로 뜨거워진다. 실측(200k 회): 진짜 Location 34ms vs
-    // 앵커 734ms / 평범한 객체 796ms — 호출당 ~3.7µs. CNN 광고 스택에서
-    // 렌더러가 굳었다.
-    // 그래서 위조 불가능한 [[Class]] 태그로 먼저 값싸게 거른 뒤, 통과한 것만
-    // 네이티브 게터로 확증한다. 페이지가 `Symbol.toStringTag` 로 태그를
-    // 위조하면 확증 단계에서 걸러진다(그 경우에만 예외 비용을 낸다).
+    // Check whether `value` is a genuine native `Location` instance. Filter by
+    // `Object.prototype.toString` tag first to avoid throwing on ordinary objects,
+    // then verify brand identity via the native `location.href` getter so
+    // `Symbol.hasInstance` spoofing cannot bypass the check.
     const nativeObjToString = Object.prototype.toString;
     const knownLocations = newWeakSet();
     function isNativeLocation(value) {
@@ -1544,16 +1287,10 @@
       if (!d || !d.get) return false;
       try { d.get.call(value); knownLocations.add(value); return true; } catch { return false; }
     }
-    // ★null/undefined 수신자는 네이티브처럼 TypeError 를 던진다. 이전에는 `Reflect.get(Object(base), …)` 가
-    // `Object(null)` 을 `{}` 로 바꿔 **조용히 undefined** 를 돌려줬다 — `w.location.href` (차단된 `open()` 의
-    // null), `e.target.href` 같은 재작성된 모든 멤버 읽기가 던지지 않았고, 그 TypeError 를 잡아 분기하는
-    // 코드(`try { w.document } catch`)가 다르게 움직였다.
-    //
-    // 던지는 자리가 중요하다: prelude 안에서 `throw` 하면 처리 안 된 에러의 `ErrorEvent.filename` 이 프록시
-    // 자산 URL 이 된다(함정노트 에러-filename-누출). 그래서 엔진이 직접 던지게 한다 — 가상 문서 URL 로 태그한
-    // eval 코드에서 **진짜 연산**(`b[p]`, `b[p] = v`, `p in b`, `delete b[p]`, `Object.keys(b)`)을 수행하면
-    // V8 이 네이티브와 같은 메시지("Cannot read properties of null (reading 'x')")의 TypeError 를 낸다.
-    // 던지는 쪽만 이 경로를 타므로 비용은 던질 때뿐이다.
+    // Throw a native-matching `TypeError` when a property or key operation is performed
+    // on a `null` or `undefined` receiver. Execute the failing operation inside an `eval`
+    // helper tagged with `virtualURL.href` so `ErrorEvent.filename` reports the virtual
+    // document URL rather than the prelude asset.
     let nullishOps = null;
     function nullishFail(op, base, prop) {
       try {
@@ -1566,30 +1303,22 @@
         } catch { nullishOps = false; }
       }
       if (nullishOps && nullishOps[op]) nullishOps[op](base, prop);
-      // Only reached if the eval'd operation somehow did not throw (or eval is unavailable).
+      // Fallback if the eval helper is unavailable.
       throw new TypeError(op === 'set' ? "Cannot set properties of " + base + " (setting '" + String(prop) + "')"
         : op === 'get' ? "Cannot read properties of " + base + " (reading '" + String(prop) + "')"
         : op === 'has' || op === 'rget' || op === 'rset' || op === 'own' ? 'Reflect.' + (op === 'own' ? 'ownKeys' : op === 'has' ? 'has' : op.slice(1)) + ' called on non-object'
         : "Cannot convert undefined or null to object");
     }
-    // `Reflect.*` throws for any non-object target (a primitive too), `Object.*` only for null and undefined.
+    // `Reflect.*` requires an object target (throwing on primitives), whereas `Object.*` throws only on nullish values.
     function isObjectLike(v) { return (typeof v === 'object' && v !== null) || typeof v === 'function'; }
-    // `Error.prepareStackTrace` as the page sees it (pageStackHook, 00-head.js) — V8 keeps reading the sanitizer.
+    // Check whether a property access targets `Error.prepareStackTrace`.
     const isStackHook = (base, prop) => prop === 'prepareStackTrace' && base === pageStackHook.ctor && base != null;
-    // Fast path (2026-10-13). A challenge VM reads its own data — register and bytecode arrays, typed arrays, strings,
-    // its functions — through computed members: Turnstile's widget made 15.1 million `__zp_get` calls in 15 s (61% an
-    // array indexed by a number), and the full path below spent 2 s of them converting each index to a string, hashing it
-    // against the Location names, probing `.window` and the cross-window table. None of that can apply to such a base —
-    // an array, a typed array, a string or a function is never a window, a document, a Location or a facade — except the
-    // few names the full path answers for any base. `Array.isArray`, `ArrayBuffer.isView` and `typeof` run no trap of a
-    // page's Proxy. (A renderer this busy fails Cloudflare's interactive check natively too: ERRATA 85.)
-    // Taken now: the page can replace `Array.isArray`, and one answering true would send every base down this path.
+    // Fast path for non-DOM data carriers (strings, functions, arrays, typed arrays, and plain objects),
+    // which are never Window, Document, Location, or cross-window facade instances.
+    // Capture `Array.isArray` and `ArrayBuffer.isView` at boot so page overrides cannot spoof the check.
     const nativeIsArray = Array.isArray, nativeIsView = ArrayBuffer.isView;
-    // A plain object — a literal, `Object.create(null)`, a built-in namespace such as `Reflect` or `Math`: a VM's dispatch
-    // tables and the code that reads `Reflect.apply` are all of these (the widget made 11 M membrane calls in 22 s, 1.5 M of them
-    // `Reflect.apply`, most of the rest member calls on such tables, none of them fast). Its [[Prototype]] is this realm's
-    // Object.prototype or null; the facades that stand for another window are Proxies over `{}` and are told apart by the
-    // table they are in. A window, a document, a Location, an element has a prototype of its own.
+    // Identify plain objects (whose prototype is `Object.prototype` or `null` and which are not
+    // cross-window facades or Window-like objects) for the property-access fast path.
     const BOOT_OBJECT_PROTO = Object.prototype, nativeGetPrototypeOf = Object.getPrototypeOf;
     function isPlainData(base) {
       if (typeof base !== 'object' || base === null) return false;
@@ -1601,8 +1330,7 @@
     function fastDataBase(base) {
       return typeof base === 'string' || typeof base === 'function' || nativeIsArray(base) || nativeIsView(base) || isPlainData(base);
     }
-    // Writes: into a VM's own arrays, typed arrays and plain objects (a string is immutable and a function's own data is the
-    // page's: both keep the full path).
+    // Fast path for writes to arrays, typed arrays, and plain objects on non-mediated keys.
     function fastSet(base, prop) {
       return base != null && (nativeIsArray(base) || nativeIsView(base) || isPlainData(base))
         && (typeof prop === 'number' || (typeof prop === 'string' && prop !== 'location' && prop !== 'name'));
@@ -1613,48 +1341,18 @@
     }
     function get(base, prop) {
       if (base != null && fastDataKey(prop) && fastDataBase(base)) return base[prop];
-      // `document` is the window's unforgeable attribute: no lexical binding, no page definition can stand in front of it, so
-      // the long path below always ended at the real document (240 ns a read, native 4). Only a direct eval's caller scope
-      // (a local named `document`) can come first.
+      // Fast-path `window.document` reads when no direct-eval local scope (`__zp_eval_desc`) is active.
       if (prop === 'document' && __zp_eval_desc === null && (base === root || base === scope || base === withScope)) return document;
       if (base == null) return nullishFail('get', base, prop);
       if (typeof prop !== 'symbol') prop = String(prop);
       if (isStackHook(base, prop)) return pageStackHook.value;
-      // ★base 가 **진짜 Location** 이면 URL 성분은 가상값을 준다.
-      // 리라이터는 `n.location.protocol` 에서 바깥 `.protocol` 만 감싸고
-      // 안쪽 `n.location` 은 (수신자가 지역 변수라) 그대로 두므로, 멤브레인이
-      // **진짜 Location 을 base 로** 받는 경로가 실제로 존재한다. 그때
-      // Reflect.get 으로 떨어지면 own + non-configurable(unforgeable) 접근자가
-      // 프록시 주소를 그대로 돌려준다 — 마스킹으로는 절대 못 막는 자리다.
-      // CNN 실측(2026-08-25): 벤더 코드
-      // `(n.location.protocol === "https:" ? "https://" : "http://") + host`
-      // 가 `http:` 를 받아 `http://www.ugdturner.com/xd.sjs` 를 요청 → 502 →
-      // 그 스크립트가 정의하는 `turner_getGuid` 부재 → FAVE/APS 체인 중단 →
-      // 광고 프레임 다수 미생성. 기능 파손이자 격리 위반이다.
+      // Return virtual URL components when `base` is a raw native `Location` instance
+      // so unforgeable native accessors cannot expose the physical proxy URL.
       if (typeof prop === 'string' && LOC_ALL_URL_PROPS.has(prop) && isNativeLocation(base)) return virtualURL[prop];
-      // ★`document.location` 은 **실제 객체에 마스킹이 안 걸린다.** 측정(2026-08-25):
-      // `document` 의 own `location` 접근자와 Location 인스턴스의 own
-      // `href/protocol/host/…` 접근자가 전부 `configurable: false`(unforgeable)라
-      // 프로토타입을 아무리 덮어도 인스턴스 own 이 그걸 가린다. 그래서 페이지가
-      // `document.location.href` 한 줄만 읽으면 **프록시 주소·오리진·스킴이
-      // 그대로 나갔다** — 격리 위반이면서 동시에 기능 파손이다.
-      // CNN 실측: 벤더 코드가
-      // `(document.location.protocol === "https:" ? "https://" : "http://") + host`
-      // 로 URL 을 만든다. 우리가 `http:` 를 흘려서 `http://www.ugdturner.com/xd.sjs`
-      // 를 받아 502 가 났고, 그 스크립트가 정의하는 `turner_getGuid` 가 없어져
-      // FAVE/APS 체인이 통째로 끊겼다(광고 프레임 다수 미생성).
-      // `URL`/`documentURI`/`baseURI`/`referrer` 는 이미 여기 있었는데
-      // `location` 만 빠져 있었다 — 형제 표면 하나를 빠뜨린 전형이다.
-      // Any Document, not just the root one: `iframe.contentDocument.location`,
-      // DOMParser/implementation documents all hand out a raw native Location
-      // otherwise — `childDoc.location.href = x` would navigate the frame
-      // straight to the target off-proxy. wrappedLocationFor routes
-      // assign/replace/href through activatedFrameURL.
+      // Wrap `document.location` and child/DOMParser document `location` values via `wrappedLocationFor`
+      // to prevent physical proxy URL leaks and unproxied navigations.
       if (prop === 'location' && isDocumentLike(base)) {
-        // Native invariant: `location === document.location`. Both must be
-        // the same wrapped proxy instance (WeakMap-cached), not the internal
-        // `virtualLocation` data object — React hydration checks and
-        // fingerprint comparisons observe the identity.
+        // Preserve the `window.location === document.location` identity invariant via `wrappedLocationFor`.
         if (base === document) return wrappedLocationFor(root.location);
         try { const loc = Reflect.get(base, 'location'); return loc ? wrappedLocationFor(loc) : loc; } catch { return virtualLocation; }
       }
@@ -1662,20 +1360,17 @@
       if (base === document && prop === 'baseURI') return baseURL;
       if (base === document && prop === 'referrer') return virtualReferrer();
       if (isWindowLike(base)) {
-        // A window of another site answers by the HTML cross-origin rules only.
+        // Enforce HTML cross-origin window access rules for windows from another virtual origin.
         const cross = crossOriginHandle(base);
         if (cross) return nativeReflectGet(cross, prop);
-        // R2: direct-eval 실행 중 desc(호출자 스코프)는 가상 전역보다
-        // 우선한다 — eval'd 코드의 `__zp_get(g,'x')` 도 호출자 지역을 본다.
+        // During direct `eval`, check the caller's local scope (`__zp_eval_desc`) before the global object.
         {
           const d = __zp_eval_desc;
           if (d && (base === root || isScopeProxy(base)) && typeof prop === 'string'
               && nativeHasOwn.call(d, prop)) return d[prop];
         }
-        // R1: bare 식별자(`__zp_get(globalThis,"x")` — with 안에서
-        // `globalThis` 가 진짜 root 로 해석된다)는 전역 렉시컬 환경이 전역
-        // 객체보다 먼저다. 멤버 경로(base===scope 프록시)는 건너뛴다 —
-        // `window.x` 는 렉시컬 바인딩을 보지 않는다(네이티브 의미).
+        // Bare identifier reads (`base === root`) check the shared global lexical environment (`zpLex`)
+        // before global object properties (explicit member reads like `window.x` pass `base === scope`).
         if (base === root) {
           const le = zpLexGetEntry(prop);
           if (le) return zpLexRead(le, prop);
@@ -1694,10 +1389,8 @@
         if (prop === 'frameElement') return virtualFrameElement(crossWindowTargets.get(base) || (isScopeProxy(base) ? root : base));
         const dynamic = dynamicGlobal(prop);
         if (dynamic) {
-          // Another realm's `eval` and `Function` compile in THAT realm. Code a child frame runs — `(0, eval)("Object")`,
-          // `Function("return this")()` inside it — asked here for `eval` and was handed OURS: it ran in the parent's realm
-          // (natively `(0, eval)("Object") === Object` in the frame; here it was the parent's Object, and `Function("return
-          // this")()` the parent's window). The child's own facades (made when it was contained) answer for it.
+          // Return a same-origin child window's own `eval` or `Function` wrapper so code compiled
+          // through it executes in the child's realm rather than the parent's.
           if ((prop === 'eval' || prop === 'Function') && typeof prop === 'string') {
             const owner = crossWindowTargets.get(base) || (isScopeProxy(base) ? root : base);
             if (owner !== root) {
@@ -1727,12 +1420,8 @@
         const ctor = nativeReflectGet(Object(base), prop);
         return dynamicWrapperFor(ctor) || ctor;
       }
-      // ★cross-window 파사드의 own expando 읽기. `safeCrossWindow` 가 돌려주는
-      // 건 더미 객체이므로, 부모가 `window.data = …` 로 심어 둔 공유값을 자식이
-      // `parent.data` 로 못 읽는 역파손이 있었다(네이티브는 같은 오리진이라
-      // 당연히 보인다). own 프로퍼티만 넘긴다 — 프로토타입 멤버(eval/Function/
-      // fetch 같은 진짜 네이티브)를 넘기면 자식에 미리라이트 실행 경로가
-      // 열린다. 내부명(__zp_*)·위험명(MEMBER_DANGER)도 절대 넘기지 않는다.
+      // Forward own expando property reads on a same-origin cross-window facade,
+      // excluding prototype builtins (`eval`, `Function`, `fetch`), `__zp_*` names, and `MEMBER_DANGER`.
       {
         const crossWin = crossWindowTargets.get(base);
         if (crossWin && (typeof prop !== 'string' || (!ZP_HIDDEN_RE.test(prop) && !MEMBER_DANGER.has(prop)))) {
@@ -1742,9 +1431,7 @@
         }
       }
       const value = nativeReflectGet(Object(base), prop);
-      // A child window reached through the window object — `frames[i]`,
-      // `window[i]`, `window.someFrameName` — takes the same handle policy as
-      // `iframe.contentWindow`.
+      // Wrap child windows accessed via `frames[i]`, `window[i]`, or named frame properties.
       if (value !== null && typeof value === 'object' && value !== base && isWindowLike(base)) {
         let isWindow = false;
         try { isWindow = value.window === value; } catch {}
@@ -1753,26 +1440,23 @@
       return value;
     }
     function set(base, prop, value) {
-      // the same fast path for writes into a VM's own arrays (a string is immutable and a function's own data is the
-      // page's: both keep the full path)
+      // Fast path for writes to arrays, typed arrays, and plain objects.
       if (fastSet(base, prop)) {
         nativeReflectSet(base, prop, value);
         return value;
       }
       if (base == null) return nullishFail('set', base, prop);
       if (typeof prop !== 'symbol') prop = String(prop);
-      // A window of another site: `location` navigates, everything else throws.
+      // Cross-origin windows permit `location` navigation writes and reject all other writes.
       const cross = crossOriginHandle(base);
       if (cross) { nativeReflectSet(cross, prop, value); return value; }
-      // R2: eval 실행 중 호출자 바인딩 우선 — setter 가 호출자 스코프에서
-      // 실행되어 const 쓰기 TypeError 도 네이티브 그대로 나온다.
+      // During direct `eval`, write to matching caller local bindings (`__zp_eval_desc`) first.
       {
         const d = __zp_eval_desc;
         if (d && (base === root || isScopeProxy(base)) && typeof prop === 'string'
             && nativeHasOwn.call(d, prop)) { d[prop] = value; return value; }
       }
-      // R1: bare 식별자 쓰기는 전역 렉시컬 바인딩으로 라우팅 —
-      // const 면 TypeError (zpLexWrite). 멤버 경로(scope 베이스)는 제외.
+      // Bare identifier assignments update matching global lexical bindings (`zpLex`) before the global object.
       if (base === root) {
         const le = zpLexGetEntry(prop);
         if (le) return zpLexWrite(le, prop, value);
@@ -1785,21 +1469,15 @@
         setVirtualWindowName(crossWindowTargets.get(base) || (isScopeProxy(base) ? root : base), value);
         return value;
       }
-      // Non-root document: `doc.location = url` is PutForwards=href — forward
-      // through the facade so the frame navigates via activatedFrameURL.
+      // Forward `doc.location = url` on non-root documents through `wrappedLocationFor` (`[PutForwards=href]`).
       if (prop === 'location' && isDocumentLike(base) && base !== document) {
         try { const loc = nativeReflectGet(base, 'location'); if (loc) wrappedLocationFor(loc).href = value; } catch {}
         return value;
       }
       if (((isWindowLike(base) || base === document) && prop === 'location') || (base === virtualLocation && prop === 'href')) { setVirtualLocation(value); return value; }
       if (base === virtualLocation && prop === 'hash') { updateVirtualHash(value); return value; }
-      // ★cross-window 파사드에 대한 일반 expando 쓰기는 네이티브 같은-오리진
-      // 의미 그대로 진짜 창에 기록한다. 더미 객체에 쓰면 `parent.__childSW = v`
-      // 류의 cross-frame 전달이 조용히 죽는다(실측: srcdoc 자식의 SharedWorker
-      // 회신 silent). 단 세 부류는 절대 진짜 창에 심지 않는다: (1) __zp_*
-      // 내부명 — 부모 scopeGet 이 root[prop] 로 떨어지므로 헬퍼 탈취 통로,
-      // (2) MEMBER_DANGER — 가상화 표면을 expando 로 덮어쓰는 우회,
-      // (3) 문자열 on* — 브라우저가 미리라이트 코드로 컴파일한다.
+      // Forward safe expando writes on a same-origin cross-window facade to the underlying window,
+      // excluding `__zp_*` names, `MEMBER_DANGER` properties, and string `on*` handlers.
       {
         const crossWin = crossWindowTargets.get(base);
         if (crossWin && (typeof prop !== 'string'
@@ -1815,9 +1493,8 @@
     function assign(base, prop, operator, value) {
       if (typeof prop !== 'symbol') prop = String(prop);
       const current = get(base, prop);
-      // `value` is ALWAYS a thunk (rewriter emits `()=>(rhs)`): evaluated only
-      // after the get — native get→RHS→set order — and only when the operator
-      // actually writes (logical short-circuit stays lazy).
+      // `value` is a lazy thunk (`() => rhs`) evaluated only after reading `current`,
+      // preserving native evaluation order and logical assignment short-circuiting.
       let next;
       switch (operator) {
         case '+=': next = current + value(); break;
@@ -1865,16 +1542,12 @@
       if (isStackHook(base, prop)) return pageStackHook.exists;
       return nativeReflectHas(Object(base), prop);
     }
-    // Document-ness by nodeType 9: covers root document, iframe
-    // contentDocument, DOMParser/implementation documents — including
-    // cross-realm documents where `instanceof Document` fails.
+    // Check `nodeType === 9` to match Document instances across realms where `instanceof Document` would fail.
     function isDocumentLike(base) {
       try { return !!base && base.nodeType === 9 && typeof base.implementation === 'object'; } catch { return false; }
     }
-    // Bases whose dangerous-named members are membrane-backed: window-like
-    // proxies, the document, native/wrapped Locations, and frame host
-    // elements (contentWindow/contentDocument accessors are already masked
-    // on their prototypes, so descriptor paths must match).
+    // Identify objects whose `MEMBER_DANGER` properties are virtualized by the membrane
+    // (windows, documents, Locations, and frame host elements).
     function dangerousBase(base) {
       try {
         return isWindowLike(base) || isDocumentLike(base) || isScopeProxy(base)
@@ -1885,8 +1558,7 @@
           || (typeof HTMLEmbedElement === 'function' && base instanceof HTMLEmbedElement);
       } catch { return false; }
     }
-    // Accessor pair that reads/writes through the membrane — what a
-    // virtualized descriptor hands out instead of the real native accessor.
+    // Build masked getter and setter functions that route through the membrane for virtualized descriptors.
     function membraneGetter(base, prop) {
       const g = function () { return get(base, prop); };
       nativeReflectDefineProperty(g, 'name', { value: 'get ' + String(prop), configurable: true });
@@ -1903,13 +1575,12 @@
       if (base == null) return nullishFail('keys', base, prop);
       const cross = crossOriginHandle(base);
       if (cross) return nativeReflectGOPD(cross, prop);
-      // what an assignment makes natively: a plain data property
+      // Present `Error.prepareStackTrace` as a standard data descriptor when assigned by page code.
       if (isStackHook(base, prop)) {
         return pageStackHook.exists ? { value: pageStackHook.value, writable: true, enumerable: true, configurable: true } : undefined;
       }
-      // 서술자로 우회해 진짜 게터를 꺼내 가는 길도 막는다 — 여기서 진짜 접근자를
-      // 돌려주면 `gopd(document,'location').get.call(document)` 한 줄로 프록시
-      // 주소가 새어 나간다.
+      // Return membrane wrapper accessor descriptors for `MEMBER_DANGER` properties so callers
+      // cannot extract and invoke raw native getters via `Object.getOwnPropertyDescriptor`.
       if (typeof prop === 'string' && MEMBER_DANGER.has(prop) && dangerousBase(base)) {
         if (prop === 'location' && (base === root || isScopeProxy(base))) {
           return nativeReflectGOPD(scopeTarget, prop);
@@ -1935,25 +1606,22 @@
       if (typeof prop !== 'symbol') prop = String(prop);
       const cross = crossOriginHandle(base);
       if (cross) return nativeReflectDeleteProperty(cross, prop);
-      // R2: eval 중 호출자 바인딩 delete → non-configurable 접근자라 false.
+      // `delete` on a caller local binding inside direct `eval` returns `false`.
       {
         const d = __zp_eval_desc;
         if (d && (base === root || isScopeProxy(base)) && typeof prop === 'string'
             && nativeHasOwn.call(d, prop)) { delete d[prop]; return false; }
       }
-      // `delete window.location` — unforgeable, silently refuses. Returning
-      // false mirrors native non-strict `delete` instead of a phantom success.
+      // `window.location` and `document.location` are unforgeable and cannot be deleted.
       if (prop === 'location' && (isWindowLike(base) || isDocumentLike(base))) return false;
-      // the page's value goes; the sanitizer stays
+      // Deleting `Error.prepareStackTrace` clears the page's hook while keeping the stack sanitizer active.
       if (isStackHook(base, prop)) { pageStackHook.forget(); return true; }
       return nativeReflectDeleteProperty(Object(base), prop);
     }
     function odel(base, prop) { return base == null ? true : del(base, prop); }
     function oget(base, prop) { return base == null ? undefined : get(base, prop); }
-    // `x?.m()` / `x?.m?.()` / `x.m?.()` — `flags` packs (baseOpt<<1)|callOpt:
-    // bit1 guards a nullish base, bit0 guards a nullish member. `x.m?.()`
-    // still throws when x is null — only the call is optional there. One
-    // `get` only (accessors must not run twice).
+    // Optional call helper (`x?.m()`, `x?.m?.()`, `x.m?.()`). `flags` encodes `(baseOpt << 1) | callOpt`
+    // so `base` and `fn` are evaluated once while preserving `TypeError` when `base` is non-optional and nullish.
     function ocall(base, prop, args, flags) {
       if (base == null) {
         if (flags & 2) return undefined;
@@ -1963,12 +1631,9 @@
       if (fn == null && (flags & 1)) return undefined;
       return nativeApply(fn, isScopeProxy(base) ? root : base, Array.isArray(args) ? args : []);
     }
-    // 옵셔널 체인 연속(OCHAIN) — 리라이터는 `a?.[k].b` 를
-    // `__zp_ochain(a, __zp_oc => __zp_get(__zp_oc,k).b)` 로 낸다. 네이티브 `?.`
-    // 처럼 base 가 nullish 면 키·인자·나머지 체인을 하나도 평가하지 않는다.
+    // Short-circuit optional chaining helper (`a?.[k].b`) when `base` is nullish.
     function ochain(base, cont) { return base == null ? undefined : cont(base); }
-    // `obj.m?.(…)` — 피호출자를 한 번 읽어 obj 에 묶는다. 없으면 undefined 로
-    // 단락하고, obj 자체가 nullish 면(`?.` 는 호출에만 붙었다) 네이티브처럼 던진다.
+    // Optional method call helper (`obj.m?.(...)`): look up the method once, bind `obj`, and short-circuit to `undefined` if nullish.
     function ocallv(base, prop) {
       if (base == null) throw new TypeError("Cannot read properties of " + base + " (reading '" + String(prop) + "')");
       const fn = get(base, prop);
@@ -1976,9 +1641,8 @@
       const self = isScopeProxy(base) ? root : base;
       return function () { return nativeApply(fn, self, arguments); };
     }
-    // Reflect.get/set with a `receiver` arg: route dangerous names through
-    // the membrane, everything else through native Reflect with receiver
-    // semantics intact.
+    // Route `Reflect.get` and `Reflect.set` through the membrane for `MEMBER_DANGER` properties,
+    // while forwarding other properties to native `Reflect` with the caller's `receiver`.
     function rget(target, prop, receiver) {
       if (!isObjectLike(target)) return nullishFail('rget', target, prop);
       if (typeof prop !== 'symbol') prop = String(prop);
@@ -2005,15 +1669,11 @@
       }
       return out;
     }
-    // Reflect.getOwnPropertyNames 는 없는 API 다 — 네이티브 Object 쪽을 써야
-    // 한다. 패치된 Object.getOwnPropertyNames 는 전역 객체의 __zp_* 스크럽까지
-    // 해 주므로 그대로 위임하면 누출 필터도 유지된다.
+    // Delegate to the patched `Object.getOwnPropertyNames` so `__zp_*` filtering on global objects is preserved.
     function getOwnPropertyNames(base) { if (base == null) return nullishFail('keys', base); return Object.getOwnPropertyNames(crossOriginHandle(base) || Object(base)); }
     function okeys(base) { if (base == null) return nullishFail('keys', base); return Object.keys(crossOriginHandle(base) || Object(base)); }
-    // `with(obj)` identifier resolution: the object's properties win over
-    // outer scope unless the name is Symbol.unscopables-hidden. `fb` is the
-    // outer-scope thunk — the rewriter chains these for nested `with`s and
-    // threads values through so RHS side effects run exactly once.
+    // Resolve identifiers inside `with(obj)` blocks: properties on `obj` take precedence over
+    // the outer scope thunk `fb` unless hidden by `Symbol.unscopables`.
     function unscopablesHidden(obj, prop) {
       const uns = obj == null ? null : obj[Symbol.unscopables];
       return uns != null && !!uns[prop];
@@ -2021,12 +1681,8 @@
     function scopeHas(obj, prop) {
       return obj != null && prop in Object(obj) && !unscopablesHidden(obj, prop);
     }
-    // `with` 의 객체 우선 조회에서도 위험명은 멤브레인 표면으로 — raw
-    // `obj[prop]` 는 `with(document){location}` 에서 real Location(정체
-    // 노출 + identity 위반), `with(realChildWin){location}` 에서 부모
-    // 가상 URL 도 아닌 날 Location 을 내놓는다. `document.location = x` 는
-    // PutForwards 인데 unforgeable 세터가 없어 raw 대입은 네비게이션을
-    // 삼킨다 — membrane set 은 activatedFrameURL 로 보낸다.
+    // Route `MEMBER_DANGER` property accesses on `with` target objects through the membrane
+    // so `with(document){ location }` does not expose the raw native `Location`.
     function withGet(obj, prop, fb) {
       if (!scopeHas(obj, prop)) return fb();
       if (typeof prop === 'string' && MEMBER_DANGER.has(prop) && dangerousBase(obj)) return get(obj, prop);
@@ -2052,8 +1708,7 @@
       if (scopeHas(obj, prop)) return del(obj, prop);
       return fb();
     }
-    // Assignment-target sink inside `with`: returns an accessor object whose
-    // `.v` resolves like a `with` reference (object-first, then `sink`).
+    // Return an `{ v }` accessor target for destructuring and complex assignments inside `with` blocks.
     function withD(obj, prop, sink) {
       const viaMembrane = typeof prop === 'string' && MEMBER_DANGER.has(prop) && dangerousBase(obj);
       return {
@@ -2061,11 +1716,9 @@
         set v(x) { if (scopeHas(obj, prop)) { if (viaMembrane) set(obj, prop, x); else obj[prop] = x; } else sink[prop] = x; }
       };
     }
-    // Legacy accessor hooks — `document.__lookupGetter__('location')` handed
-    // out the REAL unforgeable accessor, and `.call(document)` then leaked the
-    // real Location (proxy origin + href). Dangerous names on membrane bases
-    // resolve to membrane-backed accessors; `__define*__` writes land on the
-    // facade (or the element itself) instead of corrupting host intrinsics.
+    // Wrap legacy `Object.prototype.__lookupGetter__`, `__lookupSetter__`, `__defineGetter__`,
+    // and `__defineSetter__` so `MEMBER_DANGER` properties on membrane bases cannot extract
+    // raw unforgeable native accessors or bypass the window facade.
     const nativeLookupGetter = Object.prototype.__lookupGetter__;
     const nativeLookupSetter = Object.prototype.__lookupSetter__;
     const nativeDefineGetter = Object.prototype.__defineGetter__;
@@ -2092,10 +1745,8 @@
         writable: true, enumerable: false, configurable: true
       });
     }
-    // `window.__defineGetter__('x', fn)` === defineProperty(window,'x',{get:fn})
-    // — it must land where every other page definition lands (root via the
-    // proxy, the element itself otherwise), so `window.x` reads it back.
-    // Unforgeable names fail defineProperty → TypeError, same as native.
+    // Route `__defineGetter__` and `__defineSetter__` on the window facade to `root` so
+    // page-defined accessors are observable on `window` while unforgeable properties still throw `TypeError`.
     if (nativeDefineGetter) {
       defineMasked(Object.prototype, '__defineGetter__', {
         value: function __defineGetter__(prop, fn) {
@@ -2136,13 +1787,9 @@
       if (u.protocol !== 'http:' && u.protocol !== 'https:') throw normalizedError('NotSupportedError');
       return scriptProxyPath(u.href, 'module');
     }
-    // `import('data:…')` / `import('blob:…')` — 소스를 읽어 이 realm 의
-    // 재작성기로 재작성한 뒤 **재작성된** blob URL 을 돌린다. 재작성 코드가
-    // 참조하는 `__zp_*` 는 같은 window 의 전역이라 그대로 풀린다. 읽기/
-    // 재작성 실패는 fail-closed(NotSupportedError).
-    //   - data: 는 동기 디코드.
-    //   - blob: 은 same-origin blob 이라 네이티브 sync XHR 로 읽는다 —
-    //     in-process 조회라 네트워크를 타지 않는다.
+    // Handle dynamic `import('data:...')` and `import('blob:...')` module specifiers by decoding
+    // `data:` URLs synchronously or reading same-origin `blob:` URLs via synchronous XHR, rewriting
+    // the module source through the current realm's rewriter, and returning a new `blob:` URL.
     function virtualModuleURL(u) {
       let src;
       try {
@@ -2174,32 +1821,20 @@
       return (Native.createObjectURL || URL.createObjectURL).call(URL, blob);
     }
     define(root, '__zp_get', get);
-    // The rewriter's inline guards (zp-rewriter `guard_claim`): a site keeps its native access when these answer true —
-    // exactly when `get`/`set`/`call` would have taken their fast path.
+    // Fast-path predicates called by inline rewriter guards (`zp-rewriter` `guard_claim`).
     define(root, '__zp_fast', (base, prop) => base != null && fastDataKey(prop) && fastDataBase(base));
     define(root, '__zp_fastset', fastSet);
     define(root, '__zp_set', set);
-    // This document's security origin, for the embedder and for frames it contains.
+    // Expose this document's virtual security origin to its embedder and child frames.
     define(root, '__zp_origin', function () { return securityOrigin(); });
-    // This document's virtual URL, for the frames it contains (their `document.referrer`).
+    // Expose this document's virtual URL to child frames for `document.referrer`.
     define(root, '__zp_url', function () { return virtualURL.href; });
-    // Is this frame element opaque (see OPAQUE_FRAME_ATTR)? For the frame's own prelude to ask.
+    // Report whether a child frame element is marked opaque (`OPAQUE_FRAME_ATTR`).
     define(root, '__zp_frame_opaque', function (frame) { try { return frameHasOpaqueMark(frame); } catch { return false; } });
-    // Write-only sink for destructuring assignment targets.
-    //
-    // `({ location } = obj)` needs a *settable member expression*, not a call:
-    // `({ __zp_set(globalThis,"location",…) } = obj)` is a SyntaxError, which
-    // killed the whole script file. The rewriter instead emits
-    // `({ location: __zp_get.d.location } = obj)` — valid syntax whose write
-    // lands on this proxy's `set` trap and routes through the membrane setter,
-    // so a destructured global write cannot escape the jail.
-    //
-    // Deliberately read-*less*: `get` always yields undefined and every other
-    // trap is inert, so target code can never pull a raw native through it.
-    // That is why we do NOT reuse the `with(__zp_scope)` proxy — its `get`
-    // falls through to `target[prop]` and would hand out real natives.
-    // Hung off `__zp_get` rather than a new global so the page's global
-    // namespace gains nothing observable.
+    // Write-only sink (`__zp_get.d`) for destructuring assignment targets such as `({ location } = obj)`.
+    // Destructuring requires a valid assignment target expression rather than a function call, so the
+    // rewriter emits `__zp_get.d.<prop>`, whose `set` trap forwards to the membrane setter while all
+    // read and inspection traps return inert defaults.
     try {
       const globalWriteSink = new Proxy(Object.create(null), {
         get() { return undefined; },
@@ -2238,8 +1873,7 @@
     define(root, '__zp_getOwnPropertyNames', getOwnPropertyNames);
     define(root, '__zp_okeys', okeys);
     define(root, '__zp_with_get', withGet);
-    // `this` in sloppy function code: a plain call gets the real global from the engine, where natively it is the window —
-    // here the facade. Every other receiver passes through untouched.
+    // Coerce raw `root` (`this` in plain sloppy function calls) to the `scope` facade.
     define(root, '__zp_this', function (t) { return t === root ? scope : t; });
     define(root, '__zp_with_set', withSet);
     define(root, '__zp_with_assign', withAssign);
@@ -2250,29 +1884,9 @@
     define(root, '__zp_nav_replace', v => setVirtualLocation(v, true));
     define(root, '__zp_runClassic', fn => fn.call(root, withScope));
     define(root, '__zp_runEvent', (selfValue, event, fn) => fn.call(selfValue, new Proxy(withScope, { get(t, p, r) { if (p === 'event') return event; return Reflect.get(t, p, r); } })));
-    // 2026-06-08 split-bundle (c.1) Step 2.4: page-realm primary swap.
-    // `globalThis.ZPBundle` (loaded by `zp-page-bundle.js` per Step 2.3) is
-    // now the primary rewriter; legacy ZPRewriter (rewriter-rs/, OXC 0.60)
-    // survives only as the fallback if modern errors. Step 3 will drop
-    // OXC from rewriter-rs entirely; Step 4 will delete the crate.
-    //
-    // ZPBundle's `rewriteScript` is positional `(source, kind, target_url)`
-    // and either returns the rewritten string or throws a JsError. Legacy
-    // ZPRewriter is options-object + returns `{ok, code, errorCode, …}`.
-    // The helpers below normalize both shapes behind a single try/catch.
-    // 2026-06-08 split-bundle (c.1) Step 3: legacy ZPRewriter.rewriteScript
-    // fallback dropped — the rewriter-rs/ crate is now CSS-only. ZPBundle
-    // is the single rewriter; on failure we surface NotSupportedError so
-    // the calling __ZP_EXEC_* helper falls through to the strict-mode
-    // block stub.
-    // A parse failure is a SyntaxError natively too, and in both cases nothing
-    // runs. Reporting every rewrite failure as NotSupportedError broke pages
-    // that detect syntax support with `e instanceof SyntaxError` (measured by
-    // the dyn differential, Chrome 152). The error is built by a factory that
-    // runs in eval'd code tagged with the virtual URL: built in the prelude,
-    // an uncaught one leaks the prelude URL through ErrorEvent.filename
-    // (trap-notebook 에러-filename-누출). The message is passed as an argument,
-    // never spliced into the eval'd source.
+    // Construct a `SyntaxError` for script parse failures inside an eval helper tagged with
+    // `virtualURL.href` so uncaught syntax errors do not leak the prelude asset URL via
+    // `ErrorEvent.filename`, while preserving `instanceof SyntaxError` for feature-detection code.
     function parseSyntaxError(message) {
       let err = null;
       try {
@@ -2283,18 +1897,13 @@
       parseErrors.add(err);
       return err;
     }
-    // The rewrite is a function of the source, its kind and the document's URL. A challenge VM compiles the same strings
-    // again and again: Turnstile's widget evaluated one 1.3 MB source fifteen times, `this` dozens of times, and each went
-    // through the rewriter anew (1.4 s of 15). Keyed by the source string itself — the page mostly hands over the same
-    // string, whose hash V8 keeps — with the kind and URL checked on a hit. Bounded by entries and by characters;
-    // re-inserted on a hit so the oldest unused leave first.
+    // Cache rewritten script strings keyed by `(source, kind, virtualURL.href)` with bounded
+    // entry count and total character size (evicting least-recently-used entries first).
     const rewriteCache = newMap();
     let rewriteCacheChars = 0;
     const REWRITE_CACHE_ENTRIES = 512, REWRITE_CACHE_CHARS = 32 << 20, REWRITE_CACHE_ONE = 8 << 20;
-    // Whitespace around the code is left out of the rewrite and put back around its output: Turnstile times
-    // `eval(<1.3 million spaces> + "0, /.*honk.*/, " + Date.now())` again and again — natively a scan V8 does in about a
-    // millisecond, here 20-30 ms each of copying it into the rewriter and back. Every position in the code stays where
-    // it was. (`trimStart`/`trimEnd` slice without copying.)
+    // Strip leading and trailing whitespace on large scripts before invoking the WASM rewriter
+    // and reattach it afterward to avoid copying megabytes of padding while preserving source offsets.
     function callPageRewriter(source, kind) {
       if (typeof source === 'string' && source.length > 65536) {
         const core = source.trimStart();
@@ -2323,7 +1932,7 @@
       let parseFailure = null;
       try {
         const out = root.ZPBundle.rewriteScript(source, kind, href);
-        // Empty in, empty out is a valid rewrite: native `eval('')` is undefined.
+        // Preserve empty-string rewrites (`eval('')` evaluates to `undefined`).
         if (typeof out === 'string' && (out.length > 0 || source === '')) {
           if (cacheable) {
             const old = rewriteCache.get(source);
@@ -2348,16 +1957,14 @@
     }
     function rewriteDynamicFunctionBody(params, body, kind) {
       const list = Array.isArray(params) ? params : [];
-      // 래퍼의 종류가 body 와 맞아야 한다 — `new AsyncFunction('await x')` 의
-      // body 를 plain function 으로 감싸면 파싱 자체가 실패한다.
+      // Wrap the body in a function matching `kind` so `await` or `yield` parses validly.
       const prefix = functionPrefix(kind) + ' __zp_dynamic__(' + list.map(value => String(value)).join(',') + '){\n';
       const suffix = '\n}';
       const wrapped = prefix + String(body || '') + suffix;
       const code = callPageRewriter(wrapped, 'classic');
-      // The wrapper's closing brace may come back after the temps its inline guards declare (`…\n;var __zp_t_1;}`).
+      // The closing brace may follow temporary variable declarations appended by inline guards.
       if (!code.startsWith(prefix) || !code.endsWith('}')) {
-        // A body naming one of our runtime names comes back as a script that throws (zp-rewriter
-        // reserved_name_violation): the constructor throws that SyntaxError, as for any body it cannot compile.
+        // Propagate reserved-name violations emitted by the rewriter as `SyntaxError`.
         const refused = /^throw new SyntaxError\("([^"]*)"\);$/.exec(code);
         if (refused) throw parseSyntaxError(refused[1]);
         throw normalizedError('NotSupportedError');
@@ -2367,29 +1974,21 @@
     function rewriteWithPageRewriter(source, kind) {
       return callPageRewriter(String(source || ''), kind);
     }
-    // Share with `installNetworkContainment` (see `pageRewriteHooks`).
+    // Expose page rewriter hooks for `installNetworkContainment`.
     pageRewriteHooks = {
       rewrite: rewriteWithPageRewriter,
       decodeEntities: decodeInlineEntities
     };
-    // Share with the frame accessors, message events and popup hook (see
-    // `windowHandles`). `hint` is a frame element for a window it holds, or
-    // 'ancestor' for parent / top / opener.
+    // Expose window handle helpers for frame accessors, `MessageEvent.source`, and popup hooks.
     windowHandles = {
       forWindow: (win, hint) => windowHandleFor(win, hint),
       isCrossOrigin: (win, hint) => { try { return crossOriginFacadeSet.has(windowHandleFor(win, hint)); } catch { return false; } },
-      // For a window about to navigate to a known origin (a popup opened with a URL).
+      // Wrap a window about to navigate to a known target origin (such as a popup).
       forOrigin: (win, origin) => (origin && origin !== securityOrigin() ? crossOriginWindow(win) : windowHandleFor(win)),
       originOf: win => virtualOriginOfWindow(win),
     };
-    // 인라인 <script> 본문은 브라우저가 raw text mode 로 토크나이즈하여 HTML
-    // 엔티티를 디코딩하지 않는다. React `dangerouslySetInnerHTML` 가 JS 연산자
-    // (`=>`/`&&`)를 `=&gt;`/`&amp;&amp;` 로 엔티티 인코딩해 박은 케이스는 우리가
-    // 직접 디코딩해야 파서가 받아낸다. 단, 모든 스크립트에 unconditional
-    // 디코드를 걸면 `encMap={"\"":"&quot;",...}` 같이 ENTITY 가 **데이터**로
-    // 들어있는 외부 스크립트 (e.g. NAVER GFP SafeFrame) 가 파괴된다 — Rust
-    // 측은 디코드 안 함, JS 측이 inline 경로에서만 적용. trap-notebook
-    // rewriter.md 2026-05-30 entry 참조.
+    // Decode HTML entities inside inline `<script>` bodies (such as `=&gt;` or `&amp;&amp;`
+    // inserted via `dangerouslySetInnerHTML`) without altering external script string literals.
     function decodeInlineEntities(src) {
       const s = String(src || '');
       if (s.indexOf('&') < 0) return s;
@@ -2404,43 +2003,20 @@
         .replace(/&nbsp;/g, ' ');
     }
     // Execute a classic script body with real *global* scope semantics.
-    //
-    // A classic `<script>` puts its top-level `var` / `function` declarations
-    // on the global object, so the next script can call them.
-    // `new Function(body)` puts them in that function's own scope instead,
-    // where they die when it returns. NAVER's search page declares
-    // `urlencode` / `lcs_do` / `headerfooter_time_year_s` in one inline script
-    // and calls them from another, which produced a ReferenceError storm and
-    // broke the search-option widgets downstream.
-    //
-    // Indirect eval (member-expression call, not the `eval(...)` identifier
-    // form) is the only executor that evaluates in global scope, and it is
-    // sloppy-mode by default — matching classic script semantics exactly.
-    // This does NOT weaken the jail: the body handed to us is already
-    // membrane-rewritten (`__zp_get`/`__zp_set`), and the previous executor
-    // did not install a `with(__zp_scope)` either — only the *lexical* home
-    // of the declarations changes.
-    //
-    // R1: 리라이터가 classic top-level let/const/class 에 심은 등록/바인딩
-    // 호출의 런타임 측. `__zp_lex_env` 는 현재 렉시컬 환경 — 스크립트 실행
-    // 중엔 zpLex, eval/동적 코드 안에선 그 eval 의 버려지는 Map(네이티브가
-    // eval 렉시컬 환경을 버리는 것과 같은 의미).
-    // 충돌 이름을 반환(throw 는 방출 코드가 한다 — prelude 에서 던지면
-    // 에러 이벤트 filename 이 prelude URL 을 새므로). 2-패스라 부분 등록
-    // 없이 instantiate 실패 의미를 보존한다.
+    // Classic `<script>` top-level `var` and `function` declarations must bind on the global
+    // object via indirect `eval`, while top-level `let`, `const`, and `class` declarations
+    // register in the shared global lexical environment (`zpLex`, or a disposable Map inside `eval`).
+    // `__zp_lex_decl` returns the first conflicting binding name so the rewritten script can
+    // throw the `SyntaxError` from its own source URL rather than the prelude.
     define(root, '__zp_lex_decl', (lexMap, varNames) => {
       const env = __zp_lex_env || zpLex;
       for (const n of varNames) {
-        // var 는 전역 객체가 아니라 전역 varEnv 에 간다 — 충돌 검사는 항상
-        // 공유 zpLex(전역 렉시컬) 기준, eval 환경에도 같은 eval 안의
-        // 선언과는 충돌한다.
+        // Check `var` declarations for conflicts with global `zpLex` and the active `eval` lexical environment.
         if (zpLex.has(n) || (env !== zpLex && env.has(n))) return n;
       }
       for (const n of Object.keys(lexMap)) {
         if (env.has(n) || varNames.includes(n)) return n;
-        // 전역 렉시컬 선언은 비configurable 전역 프로퍼티(var 선언 결과물,
-        // location/document 같은 unforgeable)와도 충돌한다. eval 환경은
-        // 별도 선언 환경이라 이 검사를 건너뛴다.
+        // Global lexical declarations (`env === zpLex`) also conflict with non-configurable global properties.
         if (env === zpLex) {
           const d = Reflect.getOwnPropertyDescriptor(root, n);
           if (d && !d.configurable) return n;
@@ -2454,9 +2030,8 @@
       const e = env.get(name);
       if (e) { e.get = get; e.set = typeof set === 'function' ? set : null; }
     });
-    // sloppy classic script 실행용 식별자 환경 — has 가 **등록된 이름**(및
-    // WindowProperties 의 named frame)에만 true 라 나머지 식별자는 진짜 전역으로
-    // 그대로 통과한다.
+    // `with` environment for sloppy classic scripts: `has` claims only registered global
+    // lexical bindings and named frame windows, passing all other names through to the global object.
     function namedFrameWindow(prop) {
       if (typeof prop !== 'string' || prop === '' || (prop.charCodeAt(0) === 95 || prop.charCodeAt(0) === 90) && ZP_HIDDEN_RE.test(prop)) return null;
       if (nativeReflectGOPD(root, prop) || !(prop in root) || isPrototypeAccessor(prop)) return null;
@@ -2480,15 +2055,11 @@
     const ZP_STRICT_DIRECTIVE_RE = sealRegExp(/^(\s|\/\*[^]*?\*\/|\/\/[^\n]*)*('use strict'|"use strict")/);
     function execGlobalScript(code) {
       const geval = Native.globalEval;
-      // sourceURL — eval'd 코드의 에러 filename 이 prelude URL 을 새지
-      // 않고 문서의 가상 URL 을 가리키게 한다 (네이티브 인라인 스크립트
-      // 에러는 문서 URL 을 reporting 한다).
+      // Append `sourceURL` so stack traces attribute script frames to the virtual document URL.
       const tagged = '\n//# sourceURL=' + virtualURL.href;
       if (geval) {
-        // R1: sloppy classic 은 전역 렉시컬 환경을 with(lexScope) 로
-        // 에뮬레이션 — 등록되지 않은 식별자는 has=false 로 진짜 전역 통과.
-        // strict eval 에선 with 자체가 불법이라 지시자 소스는 래핑하지
-        // 않는다 (strict 잔여 gap — 등록은 되지만 bare 식별자 읽기 불가).
+        // Wrap sloppy classic scripts in `with(__zp_lex_scope)` to bind the global lexical environment
+        // (strict scripts cannot sit inside a top-level `with` and run directly).
         if (!ZP_STRICT_DIRECTIVE_RE.test(code)) return geval('with(__zp_lex_scope){' + ZP_WITH_PROLOGUE + code + '\n}' + tagged);
         return geval(code + tagged);
       }
@@ -2503,11 +2074,7 @@
       promise.finally(() => { try { (Native.revokeObjectURL || URL.revokeObjectURL).call(URL, url); } catch {} });
       return promise;
     });
-    // `_REWRITTEN` variants take code that zp-htmltx already rewrote — they
-    // skip the page-side rewriter entirely. NAVER ships ~200KB + ~150KB
-    // EAGER-DATA inline scripts; rewriting them twice (SW + page) wedged the
-    // main thread for tens of seconds. SW already pays the OXC cost during
-    // HTML transform, so the page just executes the result.
+    // Execute inline scripts that were already rewritten during HTML transformation in the service worker.
     define(root, '__ZP_EXEC_INLINE_REWRITTEN', code => execGlobalScript(String(code || '')));
     define(root, '__ZP_EXEC_INLINE_REWRITTEN_MODULE', code => {
       const blob = new Blob([String(code || '')], { type: 'text/javascript' });
@@ -2519,21 +2086,13 @@
     define(root, '__ZP_EXEC_EVENT', (selfValue, event, source) => Native.FunctionCtor('event', rewriteWithPageRewriter(source, 'event-handler')).call(selfValue, event));
     define(root, 'eval', dynamicEval);
     define(root, 'Function', dynamicFunction);
-    // 인스턴스별 가짜 constructor 저장소.
-    // - value+writable:false → NAVER vendor-common 의 `Object.extend`
-    //   polyfill (`target.constructor = source.constructor`) 가 strict throw →
-    //   React init 깨짐 → 페이지 빈 렌더.
-    // - accessor + WeakMap 저장 → NAVER 정상 (set 이 throw 안 함, read 가 저장값
-    //   반환). 보안: `__zp_get` 가 reading 시점에 `dynamicWrapperFor` 로
-    //   normalise 하므로 target 이 저장한 native Function 도 wrapper 로 반환 →
-    //   escape 면역. BBC bbcdotcom SDK 의 retry-loop 는 hang (alternate value
-    //   기대) — `.ai/trap-notebook/membrane.md` 에 known regression 기록.
-    //   사용자 priority: www.naver.com 호환성 우선.
+    // Virtualize `.constructor` on function prototypes: record per-instance overrides in a
+    // WeakMap so `fn.constructor = ...` succeeds in strict mode, and return the override or
+    // dynamic constructor wrapper on reads.
     const constructorOverrides = newWeakMap();
     for (const [ctor, wrapper] of dynamicConstructorWrappers) {
       if (ctor && ctor.prototype) try {
-        // `configurable: false` 로 심으므로 같은 프로토타입에 두 번 오면 무조건
-        // 던진다. 삼켜지긴 하지만 실측에서 로드당 천 단위였다.
+        // Skip prototypes whose `constructor` property is already non-configurable.
         if (propertyLocked(ctor.prototype, 'constructor')) continue;
         defineMasked(ctor.prototype, 'constructor', {
           get() { return constructorOverrides.get(this) || wrapper; },
@@ -2542,27 +2101,20 @@
         });
       } catch {}
     }
-    // A string timer's syntax error is reported when the timer FIRES, not when
-    // it is registered: natively setTimeout returns an id and the SyntaxError
-    // surfaces as an uncaught error later (Chrome 152). Throwing synchronously
-    // at registration cut the caller's flow short. Non-syntax failures
-    // (rewriter unavailable → NotSupportedError) still fail closed at once.
+    // Wrap non-function timer handlers (`setTimeout("code")`) so they compile and execute via
+    // `dynamicEval` when the timer fires rather than in the unrewritten native global scope,
+    // surfacing any `SyntaxError` at fire time to match native browser behavior.
     function timerHandler(handler) {
       if (typeof handler === 'function') return handler;
-      // Anything that is not a function is code: a string, a TrustedScript's text, or what String() makes of any other
-      // value (`setTimeout({ toString() { … } })`, `setTimeout(['…'])`) — natively too. Only strings used to be caught here;
-      // every other value went to the native timer, which compiled it UNREWRITTEN in the real global.
+      // Coerce non-function handlers (strings, `TrustedScript`, or objects with `toString()`) to source text.
       let text = evalSource(handler);
       if (text === null) text = String(handler);
-      // Compiled and run as an indirect eval — global code. Its `var`s and functions become properties of the global
-      // object, which a Function body (what this used to build) cannot do. Parse errors surface when the timer fires, as
-      // natively.
+      // Evaluate as global code via indirect `dynamicEval` when the timer fires.
       return function () { return dynamicEval.call(undefined, text); };
     }
     if (Native.setTimeout) define(root, 'setTimeout', function(handler, delay, ...args) { return Native.setTimeout(timerHandler(handler), delay, ...args); });
     if (Native.setInterval) define(root, 'setInterval', function(handler, delay, ...args) { return Native.setInterval(timerHandler(handler), delay, ...args); });
-    // `document.write` / `writeln` wrap 은 installDOMHooks(w) 에서 모든 realm
-    // (parent + iframe Document.prototype) 에 일관 적용. 본 위치는 비워둠.
+    // `document.write` and `document.writeln` are installed per-realm in `installDOMHooks`.
     if (Native.DOMParserParseFromString && root.DOMParser) define(root.DOMParser.prototype, 'parseFromString', function(markup, type) { return Native.DOMParserParseFromString.call(this, String(type).toLowerCase() === 'text/html' ? transformHTML(String(markup), { document: true }) : markup, type); });
     if (Native.rangeCreateContextualFragment && root.Range) define(root.Range.prototype, 'createContextualFragment', function(markup) { return Native.rangeCreateContextualFragment.call(this, transformHTML(String(markup))); });
   }

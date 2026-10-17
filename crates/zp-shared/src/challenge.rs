@@ -1,4 +1,4 @@
-//! Cloudflare challenge classifier — pure header/URL predicate.
+//! Cloudflare challenge classifier: pure header/URL predicate.
 //!
 //! Single source of truth shared with the Go server (`internal/headers/
 //! challenge.go`); parity is enforced via `testdata/challenge_cases.json`
@@ -7,7 +7,7 @@
 //! Body is NEVER read or sniffed. Inputs are limited to three already-parsed
 //! signals (the `Cf-Mitigated` response-header value, the final URL host, and
 //! the final URL path). The classifier itself grants no egress, manufactures
-//! no eval, and synthesizes no challenge solution — it is the gate that
+//! no eval, and synthesizes no challenge solution; it is the gate that
 //! upstream callers consult before applying the armed CSP / `no-store` skip /
 //! `X-ZP-Challenge-Compat` marker.
 
@@ -124,7 +124,7 @@ mod tests {
             "x",
             "/"
         ));
-        // disarmed → never
+        // disarmed: never
         assert!(!challenge_subresource_skip(
             false,
             false,
@@ -132,7 +132,7 @@ mod tests {
             "x",
             "/"
         ));
-        // is_doc → never (document stays on no-store)
+        // is_doc: never (document stays on no-store)
         assert!(!challenge_subresource_skip(
             true,
             true,
@@ -140,7 +140,7 @@ mod tests {
             "x",
             "/"
         ));
-        // classifier miss → never
+        // classifier miss: never
         assert!(!challenge_subresource_skip(true, false, "", "x", "/"));
     }
 

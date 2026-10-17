@@ -29,45 +29,17 @@
   const WS_PROTOCOLS = newSet(['ws:', 'wss:']);
   const CONTROL_PREFIX = '/zp/';
   const ASSET_PREFIX = CONTROL_PREFIX + 'assets/';
-  // Default User-Agent presented to target servers. Browsers mark User-Agent
-  // as a forbidden header for fetch(), so the SW smuggles it via
-  // X-ZP-User-Agent and the relay promotes it. Matches the value the prelude
-  // exposes via navigator.userAgent so HTTP+JS UA stay consistent.
-  // Phase 5.8: matches the JA3/extension layout in sw.js capturedFingerprint
-  // (Chrome 148). Sec-CH-UA emitted by the page-side prelude pins v=148 on
-  // the brand entries; mismatch with this UA string is a WAF signal
-  // ("UA claims 148, sec-ch-ua claims 134" = bot).
-  // 2026-08-16: 148 → 151. sw.js 의 captured TLS spec 을 오늘의 Chrome 에 맞춰
-  // 갱신했으므로(ML-DSA sig algs) UA 도 같이 올린다 — TLS 는 151 인데 UA 가
-  // 148 이면 그 불일치 자체가 새로운 tell 이다. 셋(UA / sec-ch-ua / TLS)은
-  // 항상 같은 버전을 말해야 한다.
-  // 2026-10-07: 151 → 154. The same drift again: the machine's own browser is at 154 and its ClientHello had moved
-  // (a GREASE signature algorithm, a GREASE key share, per-connection ECH noise), so the persona and the wire are
-  // brought up together. A frozen persona is re-synced from `tls.peet.ws/api/all` opened both ways (trap notebook).
-  // worker-prelude.js keeps its own copy of the UA string (a worker has no `ZP`): change both.
+  // Default User-Agent presented to target servers. Browsers forbid setting User-Agent on fetch(), so the SW sends
+  // X-ZP-User-Agent and the relay promotes it. The HTTP User-Agent, navigator.userAgent, Sec-CH-UA brands, and the
+  // captured TLS ClientHello in sw.js must all report the same Chrome major version to avoid cross-signal WAF detection.
+  // Keep worker-prelude.js TARGET_USER_AGENT in lockstep.
   const TARGET_CHROME_MAJOR = 154;
   const TARGET_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/' + TARGET_CHROME_MAJOR + '.0.0.0 Safari/537.36';
-  // Wire `sec-ch-ua` MUST match the Chrome 148 UA above. The transport
-  // previously forwarded the host browser's real header, which on Edge/WebView2
-  // reads `"Microsoft Edge WebView2";v="149", "Microsoft Edge";v="149"` — a
-  // glaring tell (UA says Chrome, sec-ch-ua says Edge, v149≠v148) that anti-bot
-  // WAFs (NAVER) profile. Force the canonical Chrome 148 low-entropy brand list
-  // so UA + sec-ch-ua + TLS spec all agree on Chrome 148. (GREASE brand mirrors
-  // the Chromium 14x algorithm; the high-entropy hints stay dropped, as Chrome
-  // only sends them on explicit server request.)
-  // 2026-08-16: 브랜드 목록을 실제 브라우저가 오늘 보내는 모양으로 맞춘다.
-  // 같은 머신에서 직접 측정한 값은
-  //   "Chromium";v="151", "Not=A?Brand";v="99", "Microsoft Edge WebView2";v="151", "Microsoft Edge";v="151"
-  // 이다 — GREASE 브랜드의 **표기법도 위치도** 바뀌었다(`"Not)A;Brand";v="24"`
-  // 선두 → `"Not=A?Brand";v="99"` 두 번째). 우리는 Edge 가 아니라 순수 Chrome
-  // 페르소나를 유지하므로 Edge 두 항목만 "Google Chrome" 으로 바꿔 쓴다.
-  // 2026-10-07: the list is computed, not typed in. Chromium builds Chrome's brand list from the major version alone
-  // (components/embedder_support/user_agent_utils.cc): the GREASE brand is `Not` + a + `A` + b + `Brand` with a and b the
-  // `major % 11` and `(major + 1) % 11` entries of [" ", "(", ":", "-", ".", "/", ")", ";", "=", "?", "_"], its version
-  // `["8", "99", "24"][major % 3]`, and the three brands are placed by `major % 6` in the table below. It reproduces what
-  // Chrome sent at 120 (`Not_A Brand`;8 first), 126, 131, 134, 136 and 140 — names, versions and order — and at 154 the
-  // GREASE brand this machine's own browser sends (`Not A(Brand`;99). The list typed in for 151 had Chromium first; by this
-  // rule Chrome 151's is [GREASE, Google Chrome, Chromium].
+  // Chromium derives the low-entropy Sec-CH-UA brand list deterministically from the major version
+  // (components/embedder_support/user_agent_utils.cc): the GREASE brand is `Not` + a + `A` + b + `Brand` with a and b
+  // indexed by `major % 11` and `(major + 1) % 11`, its version is `["8", "99", "24"][major % 3]`, and `major % 6`
+  // selects the permutation of [GREASE, Chromium, Google Chrome]. Computing this list guarantees the wire header
+  // matches TARGET_CHROME_MAJOR rather than leaking the host browser's own brand (such as Edge WebView2).
   function chromeBrandList(major) {
     const chars = [' ', '(', ':', '-', '.', '/', ')', ';', '=', '?', '_'];
     const orders = [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]];
@@ -82,12 +54,9 @@
     return list;
   }
   const TARGET_SEC_CH_UA = chromeBrandList(TARGET_CHROME_MAJOR).map(b => '"' + b.brand + '";v="' + b.version + '"').join(', ');
-  // 2026-10-13: the persona's high-entropy values — what `navigator.userAgentData.getHighEntropyValues()` resolves to and
-  // what the `Sec-CH-UA-*` hints a site asks for with `Accept-CH` carry. One object for the page, the workers and the SW.
-  // Measured against this machine's Chrome 154 (a local page asking for every hint): the full version is the build
-  // (`154.0.8037.98`), in the hints and in the JS API alike — `.0.0.0` exists only in the reduced User-Agent string, and
-  // the persona used to hand it out as the "full" version too. The GREASE brand's full version is its major + `.0.0.0`.
-  // Bump the build with the major (the drift check in scripts/check-chrome-hello.mjs opens the installed Chrome).
+  // High-entropy User-Agent values returned by `navigator.userAgentData.getHighEntropyValues()` and `Sec-CH-UA-*`
+  // headers when requested via `Accept-CH`. Both the HTTP hints and the JS API report the full four-part build number
+  // (`.0.0.0` appears only in the reduced User-Agent string); the GREASE brand reports its major version plus `.0.0.0`.
   const TARGET_CHROME_FULL_VERSION = TARGET_CHROME_MAJOR + '.0.8037.98';
   const TARGET_UA_HIGH_ENTROPY = Object.freeze({
     architecture: 'x86',
@@ -102,10 +71,9 @@
     uaFullVersion: TARGET_CHROME_FULL_VERSION,
     wow64: false,
   });
-  // `getHighEntropyValues(hints)` the way Blink resolves it: brands, mobile and platform always, the asked-for hints
-  // Chrome knows, and the dictionary's members in **alphabetical order** (an IDL dictionary is converted member by member
-  // in that order — measured: `architecture, bitness, brands, formFactors, …`; the shim used to return insertion order).
-  // A window's values for the client hints the SW sends on its tab's requests (viewport, DPR, media preferences).
+  // Blink serializes the WebIDL dictionary returned by `getHighEntropyValues(hints)` with keys in alphabetical order,
+  // always including `brands`, `mobile`, and `platform` alongside any recognized hint names.
+  // `clientEnvOf` captures viewport, DPR, and media-preference values for client hints on tab requests.
   function clientEnvOf(win) {
     const env = { top: false };
     try {
@@ -134,8 +102,7 @@
   const MAX_RELAY_SERVERS = 8;
   const MAX_RELAY_SERVER_BYTES = 2048;
   const ERRORS = Object.freeze(['BAD_HMAC','INVALID_SHARE_LINK','MALFORMED_ROUTE','SW_NOT_READY','TARGET_PROTOCOL_BLOCKED','TLS_CERTIFICATE_INVALID','TLS_HANDSHAKE_FAILED','TARGET_CONNECT_FAILED','TARGET_HTTP_FAILED','MALFORMED_HTML','REALM_INJECTION_FAILURE','REQUEST_BODY_TOO_LARGE','SUBMISSION_EXPIRED','POLICY_BLOCKED','REWRITE_FAILED','SCRIPT_SRC_BLOCKED','REDIRECT_BODY_NONREPLAYABLE','REDIRECT_LIMIT_EXCEEDED','WS_BLOCKED','RTC_GATEWAY_UNAVAILABLE','WT_UNSUPPORTED']);
-  // Human-friendly title + description per error code. Parity with
-  // crates/zp-shared/src/errors.rs ErrorCode::as_str.
+  // Error titles and descriptions matching crates/zp-shared/src/errors.rs ErrorCode::as_str.
   const ERROR_INFO = Object.freeze({
     BAD_HMAC: { title: 'Tampered share link', desc: 'The share link signature does not verify. The link may have been altered.' },
     INVALID_SHARE_LINK: { title: 'Invalid share link', desc: 'The share link or decryption key is missing or malformed.' },
@@ -145,9 +112,6 @@
     TLS_CERTIFICATE_INVALID: { title: 'TLS certificate rejected', desc: 'The target presented a TLS certificate that did not pass validation.' },
     TLS_HANDSHAKE_FAILED: { title: 'TLS handshake failed', desc: 'ZeroProxy could not establish a TLS connection with the target.' },
     TARGET_CONNECT_FAILED: { title: 'Could not reach target', desc: 'ZeroProxy could not connect to the target server.' },
-    // 상류가 4xx/5xx 를 주거나 HTTP/TLS 계층이 실패한 경우. 예전에는 목록에
-    // 없어서 POLICY_BLOCKED 로 접혔고, 네트워크 실패가 "정책 차단" 으로 둔갑해
-    // 원인 추적을 정반대로 보냈다.
     TARGET_HTTP_FAILED: { title: 'Target returned an error', desc: 'The target server responded with an error, or the HTTP/TLS layer failed before a response arrived. Retry, or check the target URL.' },
     MALFORMED_HTML: { title: 'Malformed HTML', desc: 'The target response contained HTML that could not be safely parsed in strict mode.' },
     REALM_INJECTION_FAILURE: { title: 'Containment failed', desc: 'ZeroProxy could not inject the page containment runtime. Target code execution was blocked.' },
@@ -157,9 +121,6 @@
     REWRITE_FAILED: { title: 'JavaScript rewrite failed', desc: 'A target script could not be safely rewritten and was blocked in strict mode.' },
     SCRIPT_SRC_BLOCKED: { title: 'Script source blocked', desc: 'A script was loaded via a scheme that bypasses the ZeroProxy rewrite pipeline (blob:/data:).' },
     REDIRECT_BODY_NONREPLAYABLE: { title: 'Redirect body cannot be replayed', desc: 'A 307/308 redirect requires resending the request body, but the body is too large or not replayable.' },
-    // 리다이렉트 상한을 넘었다. 예전에는 마지막 3xx 를 그대로 브라우저에
-    // 넘겼는데, 그 Location 이 절대 URL 이면 **브라우저가 따라가 프록시 밖으로
-    // 나갔다**(2026-08-21 실측, 진짜 탈출). 이제 여기서 멈춘다.
     REDIRECT_LIMIT_EXCEEDED: { title: 'Too many redirects', desc: 'The target redirected more times than the proxy will follow. The chain was stopped here rather than handing the last hop to the browser.' },
     WS_BLOCKED: { title: 'WebSocket blocked', desc: 'A WebSocket connection attempt did not go through the ZeroProxy bridge.' },
     RTC_GATEWAY_UNAVAILABLE: { title: 'WebRTC gateway unavailable', desc: 'WebRTC traffic must route through the ZeroProxy gateway, which is not yet provisioned.' },
@@ -181,17 +142,10 @@
     for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
     return out;
   }
-  // D4 — the gateway request for `new WebTransport(target, options)`, shared
-  // by the page and worker wrappers.
-  //
-  // The browser only ever connects to the gateway, so an option that
-  // describes the TARGET cannot go to the native constructor:
-  // `serverCertificateHashes` pins the target's certificate — on the native
-  // connection it would pin the gateway's and fail. Those travel as
-  // `certhash` parameters and the gateway pins its own dial with them.
-  // `gatewayCertHashes` (base64url SHA-256 from `/zp/api/config`) pin a
-  // self-signed dev gateway certificate instead; empty for a CA-trusted one.
-  // Dictionary members are read with Get, as the native binding reads them.
+  // Builds the gateway request for `new WebTransport(target, options)`. Because the browser connects to the gateway
+  // rather than the target, `serverCertificateHashes` from the caller are forwarded as `certhash` query parameters for
+  // the gateway's upstream dial instead of being passed to the native constructor (where they would fail against the
+  // gateway's own certificate). `gatewayCertHashes` pins a self-signed development gateway certificate when present.
   const WT_OPTION_MEMBERS = Object.freeze(['allowPooling', 'requireUnreliable', 'congestionControl', 'protocols', 'anticipatedConcurrentIncomingUnidirectionalStreams', 'anticipatedConcurrentIncomingBidirectionalStreams', 'datagramsReadableType']);
   const arrayBufferByteLength = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, 'byteLength').get;
   function bufferSourceBytes(v) {
@@ -199,11 +153,8 @@
     arrayBufferByteLength.call(v); // brand check: TypeError for anything but an ArrayBuffer
     return new Uint8Array(v);
   }
-  // D5 — the only RTCConfiguration a proxied page's RTCPeerConnection gets:
-  // the page's own dictionary with its ICE servers replaced by the operator's
-  // TURN credentials and `iceTransportPolicy: 'relay'`. The browser then
-  // gathers relay candidates only and never sends a packet from the user's
-  // own address; DTLS/SRTP stay end to end, so the relay carries ciphertext.
+  // Replaces the caller's ICE servers with the operator's TURN credentials and forces `iceTransportPolicy: 'relay'`
+  // so the browser gathers only relay candidates and never exposes the client IP address. DTLS/SRTP remain end-to-end.
   function relayOnlyRTCConfiguration(config, iceServers) {
     const c = Object.assign({}, config == null ? {} : config);
     c.iceServers = iceServers;
@@ -222,8 +173,7 @@
       }
       const pins = options.serverCertificateHashes;
       if (pins != null) {
-        // Present-but-empty still means "pinned" — the gateway must not fall
-        // back to CA validation where the browser would not.
+        // An empty array still requests certificate pinning; the gateway must not fall back to CA validation.
         gw.searchParams.set('pinned', '1');
         for (const h of pins) {
           if (!h || String(h.algorithm).toLowerCase() !== 'sha-256') continue;
@@ -235,11 +185,8 @@
     if (own.length) native.serverCertificateHashes = own.map(h => ({ algorithm: 'sha-256', value: base64UrlToBytes(h) }));
     return { url: gw.toString(), options: native };
   }
-  // v2 fetch envelope — `POST /zp/api/v2/fetch` 는 바디를 base64-in-JSON
-  // 이 아니라 이 바이너리 봉투로 싣는다: [u32le headLen][headJSON][rawBody].
-  // head 는 v1 payload 와 같은 모양이되 init.body 는 비운다(바이너리 꼬리가
-  // 그 자리다). v1 `/zp/api/fetch` 는 동결 유지 — 구 프렐류드/구 SW 조합이
-  // 계속 동작한다.
+  // Binary envelope for `POST /zp/api/v2/fetch`: `[u32le headLen][headJSON][rawBody]`.
+  // `head` carries the request metadata with `init.body` set to null while the raw body bytes follow the header.
   const ENVELOPE_MIME = 'application/zp-envelope';
   function encodeEnvelope(headObj, bodyBytes) {
     const head = te.encode(JSON.stringify(headObj));
@@ -300,39 +247,22 @@
     const raw = String(path || '');
     return CONTROL_PREFIX + raw.replace(/^\/+/, '');
   }
-  // 2026-08-14 — 에셋 URL 에 build id 를 실어 `immutable` 캐시를 가능하게 한다.
-  //
-  // 빌드가 바뀌면 id 가 바뀌고 URL 이 바뀌므로 낡은 사본이 재사용될 수 없다.
-  // 빌드 스크립트가 `__ZP_BUILD_ID__` 를 치환한다 — 치환되지 않은 개발 환경
-  // (dist 를 거치지 않고 web/ 을 직접 서빙)에서는 플레이스홀더가 그대로 남는데,
-  // 그때는 쿼리를 아예 붙이지 않아 서버가 `no-cache` 로 응답하게 둔다.
-  // **`assetPath` 는 쿼리를 붙이지 않는다.** 이 함수는 URL 을 만드는 데도
-  // 쓰이지만 **경로 비교**에도 쓰인다(sw.js `internalPath`, prelude 의 자기
-  // 스크립트 판별). 여기에 `?v=` 를 붙였더니 `url.pathname` 과의 비교가 전부
-  // 어긋나 내부 에셋이 VIRTUAL_SUBRESOURCE 로 분류돼 404 가 났다.
-  // URL 을 emit 할 때만 `assetURL` 을 쓴다.
+  // Build scripts replace `__ZP_BUILD_ID__` with a content hash so `assetURL` can append `?v=<id>` for immutable
+  // caching. `assetPath` omits the query string because callers compare it directly against `url.pathname`.
   const BUILD_ID = '__ZP_BUILD_ID__';
   const ASSET_VERSION_QUERY = /^[0-9a-f]{6,}$/.test(BUILD_ID) ? '?v=' + BUILD_ID : '';
   function assetPath(name) { return ASSET_PREFIX + String(name || '').replace(/^\/+/, ''); }
   function assetURL(name) { return assetPath(name) + ASSET_VERSION_QUERY; }
   function versionedAsset(absolutePath) { return String(absolutePath || '') + ASSET_VERSION_QUERY; }
-  // ★2026-08-22 — "우리 자산" 목록이 세 벌이었고 집합이 서로 달랐다.
-  // sw.js `internalPath` 는 7개, prelude 의 자기 스크립트 판별은 3개(부분집합),
-  // Go 는 `/__zp/` 파일명을 따로 하드코딩. 프렐류드가 못 알아보는 자산은
-  // **직렬화 세정에서 안 지워진다** — 이번 세션에 같은 부류를 한 번 밟았다.
-  // 새 자산을 추가할 자리는 이제 여기 하나다.
-  //
-  // 둘로 나눠 두는 이유: 페이지가 스크립트 태그로 만날 수 있는 것(SCRIPTS)과,
-  // SW 가 "내부 경로라 타깃으로 보내면 안 되는 것"(전체)은 범위가 다르다.
-  // favicon/manifest 는 문서에 링크로 실려 살아 있어야 하므로 스크립트 판별에
-  // 넣지 않는다.
+  // Canonical lists of proxy-internal assets. `INTERNAL_ASSET_SCRIPTS` identifies scripts stripped from DOM
+  // serialization by the prelude; `INTERNAL_ASSET_OTHER` covers non-script assets (`favicon.ico`, manifest) that
+  // the SW serves locally rather than routing as target subresources.
   const INTERNAL_ASSET_SCRIPTS = Object.freeze(['zp-core.js', 'zp-page-bundle.js', 'runtime-prelude.js', 'worker-prelude.js']);
   const INTERNAL_ASSET_OTHER = Object.freeze(['favicon.ico', 'manifest.webmanifest']);
   function isInternalAssetScriptPath(path) { return INTERNAL_ASSET_SCRIPTS.some(n => path === assetPath(n)); }
   function isInternalPath(path) {
     const p = String(path || '');
-    // `/__zp/*` 는 wasm-bindgen 산출물 접두다. 여기서 claim 하지 않으면 SW 가
-    // VIRTUAL_SUBRESOURCE 로 분류해 가상 base(=타깃) 기준으로 리라이트한다.
+    // `/__zp/*` serves WASM artifacts and must not be routed as a target subresource.
     if (p.startsWith('/__zp/')) return true;
     if (isInternalAssetScriptPath(p)) return true;
     if (INTERNAL_ASSET_OTHER.some(n => p === assetPath(n))) return true;
@@ -363,8 +293,7 @@
   }
   function isSharePath(path) { return String(path || '').startsWith(controlPath('p/')); }
   function shareRouteKey(path) { return isSharePath(path) ? String(path).slice(controlPath('p/').length) : ''; }
-  // ZP_* postMessage 프로토콜 — page/SW/launcher 간 유일한 단일 진실 소스.
-  // 값 자체는 wire contract 라 절대 바꾸지 않는다 (REFACTOR.md §5.1).
+  // Wire message type constants shared across the launcher, page runtime, and Service Worker.
   const MSG = Object.freeze({
     BASE_UPDATE: 'ZP_BASE_UPDATE',
     BIND_CLIENT: 'ZP_BIND_CLIENT',
@@ -399,16 +328,8 @@
   function encodeTargetURL(url) { return bytesToBase64Url(te.encode(canonicalTargetURL(url).href)); }
   function decodeTargetURL(encoded) { return canonicalTargetURL(td.decode(base64UrlToBytes(encoded))).href; }
   function randomId(prefix = '') { const b = crypto.getRandomValues(new Uint8Array(12)); return prefix + bytesToBase64Url(b); }
-  // fixedCSP builds the SW-emitted CSP for proxied responses. The legacy
-  // signature fixedCSP(servers) and fixedCSP() remain byte-identical (default
-  // options); the optional second arg projects the armed Cloudflare-Turnstile
-  // compatibility branch when options.challengeCompat is truthy, mirroring the
-  // Rust+Go server side: it adds https://challenges.cloudflare.com to
-  // script-src, frame-src, child-src, connect-src and NOTHING ELSE — no
-  // wildcards, no nonce inflation, no extra eval, no leakage into
-  // style/img/font/media/worker. Callers are responsible for the per-tab
-  // two-signal gate (operator opt-in AND classifier match); this builder is
-  // a pure projection.
+  // Builds the Content-Security-Policy header emitted by the SW for proxied responses. When `options.challengeCompat`
+  // is set, adds `https://challenges.cloudflare.com` to `script-src`, `frame-src`, `child-src`, and `connect-src`.
   function fixedCSP(servers, options) {
     const loc = globalThis.location;
     const ws = loc ? ((loc.protocol === 'https:' ? 'wss://' : 'ws://') + loc.host) : 'wss://proxy.example';
@@ -416,10 +337,7 @@
     for (const server of normalizeRelayServers(servers || [], { allowLoopbackWS: true })) {
       try { const u = new URL(server); connect.add(u.origin); } catch {}
     }
-    // D4: the WebTransport gateway listens on its own origin (another port).
-    // WebTransport is governed by connect-src, so without it the browser
-    // refused every gateway session before a packet left the page. Only our
-    // own gateway is added — page code reaching that origin reaches it too.
+    // The WebTransport gateway listens on a separate port and requires its origin in `connect-src`.
     for (const extra of (options && options.extraConnect) || []) {
       try { connect.add(new URL(extra).origin); } catch {}
     }
@@ -428,12 +346,10 @@
     if (armed) connect.add('https://challenges.cloudflare.com');
     return "default-src 'none'; script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' blob:" + (armed ? cf : '') + "; style-src 'self' 'unsafe-inline' blob: data:; img-src 'self' blob: data:; font-src 'self' blob: data:; media-src 'self' blob: data:; connect-src " + Array.from(connect).join(' ') + " blob: data:; frame-src 'self' blob: data:" + (armed ? cf : '') + "; child-src 'self' blob: data:" + (armed ? cf : '') + "; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'self'; manifest-src 'self'; report-uri /zp/api/csp-report";
   }
-  // E2: meta CSP 교집합 필터 — zp-shared::csp::filter_meta_csp 의 JS 미러.
-  // meta CSP 는 헤더 CSP 와 합성 적용(모든 정책 통과 필요)이라 살려 둬도
-  // 완화는 불가능하고 엄격화만 된다. 배관이 필요한 지시어(script/connect/
-  // worker/child/frame/style/default)는 우리 최소 소스를 얹고, 순수 리소스
-  // 지시어는 'none' 존중 아니면 'self' 를 얹는다. 그 외는 drop.
-  // 규칙이 Rust 와 1:1 이어야 한다 — 어느 쪽을 고쳐도 반대쪽을 같이 고칠 것.
+  // Filters `<meta http-equiv="Content-Security-Policy">` directives to match `zp-shared::csp::filter_meta_csp`.
+  // Browser `<meta>` CSP only tightens header policies, so infrastructure directives merge required proxy sources
+  // (`'self'`, `blob:`, `'unsafe-inline'`, `'unsafe-eval'`, `'wasm-unsafe-eval'`) while resource directives preserve
+  // `'none'` or add `'self'`. Keep in sync with the Rust implementation.
   const META_CSP_INFRA = {
     'script-src': "'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' blob:",
     'script-src-elem': "'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' blob:",
@@ -513,10 +429,8 @@
     if (status === 303 && method !== 'GET' && method !== 'HEAD') return 'GET';
     return method;
   }
-  // Keep native Response identity and brand checks; metadata belongs to the
-  // response, not own properties or a Proxy that breaks borrowed methods.
-  // `onMeta(record)`, when given, sees the metadata before the response is handed
-  // out — the page applies the cookies the response set (`record.cookies`).
+  // Preserves native Response identity and brand checks by storing virtualized metadata in a WeakMap rather than
+  // wrapping instances in a Proxy. `onMeta(record)` runs before returning so callers can apply `record.cookies`.
   function createFetchResponseAdapter(ResponseCtor, HeadersCtor, installAccessor, installMethod, onMeta) {
     const metadata = newWeakMap();
     const proto = ResponseCtor.prototype;
@@ -573,13 +487,7 @@
     };
   }
   const api = Object.freeze({ CONTROL_PREFIX, ASSET_PREFIX, TARGET_USER_AGENT, TARGET_SEC_CH_UA, TARGET_CHROME_FULL_VERSION, TARGET_UA_HIGH_ENTROPY, uaHighEntropyValues, clientEnvOf, chromeBrandList, bytesToBase64Url, base64UrlToBytes, webTransportGatewayRequest, relayOnlyRTCConfiguration, ENVELOPE_MIME,encodeEnvelope, decodeEnvelope, encryptShareURL, decryptShareURL, makeShareURL, makeSharePath, makeShareFragment, defaultRelayServer, relayServersForShare, isSharePath, shareRouteKey, controlPath, assetPath, assetURL, versionedAsset, apiPath, errorPath, INTERNAL_ASSET_SCRIPTS, isInternalAssetScriptPath, isInternalPath, canonicalTargetURL, canonicalWebSocketURL, encodeTargetURL, decodeTargetURL, randomId, fixedCSP, filterMetaCSP, parseRelayServersFromFragment, normalizeRelayServers, isLoopbackHost, redirectMethod, createFetchResponseAdapter, ERRORS, errorInfo, MSG });
-  // `configurable: true` so the page-realm runtime-prelude can DELETE the
-  // named property after capturing it into a closure-local binding.
-  // Without that, `Object.getOwnPropertyNames(window)` enumerates `ZP`
-  // (the spec returns all own properties regardless of `enumerable`) and
-  // an anti-bot probe trivially fingerprints ZeroProxy. SW realm uses ZP
-  // directly (no membrane there), so the live mutability concern is only
-  // page realm — and runtime-prelude runs BEFORE any target script, so
-  // the delete happens before there is anyone to tamper with it.
+  // `configurable: true` allows the page prelude to delete `globalThis.ZP` after capturing it into a closure binding,
+  // preventing `Object.getOwnPropertyNames(window)` from exposing `ZP` to target scripts.
   Object.defineProperty(globalThis, 'ZP', { value: api, enumerable: false, configurable: true, writable: false });
 })();

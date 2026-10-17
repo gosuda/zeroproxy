@@ -1,19 +1,10 @@
 #!/usr/bin/env node
-//
-// E4 dogfood matrix runner — drives the puppeteer real-site harness
-// (`test/e2e/real-site-regression.test.js`) across the full no-CF
-// target list (wikipedia + example + mdn + hackernews) in one pass.
-//
-// Why a wrapper instead of inlining `ZP_TARGETS=matrix` in the npm
-// script: cross-platform env-var syntax is annoying (sh `VAR=x cmd`
-// vs cmd.exe `set VAR=x && cmd`) and `cross-env` would add an npm
-// dependency for one line. Pure Node spawn keeps the dep surface
-// at zero and reuses the existing harness as-is.
+// Run test/e2e/real-site-regression.test.js with ZP_TARGETS=matrix by default
+// to avoid shell-specific environment variable syntax in npm scripts.
 //
 // Usage:
-//   node scripts/dogfood-matrix.mjs              # full matrix
+//   node scripts/dogfood-matrix.mjs
 //   ZP_TARGETS=wikipedia,example node scripts/dogfood-matrix.mjs
-//                                                # caller can override
 
 import { spawn } from 'node:child_process';
 import process from 'node:process';

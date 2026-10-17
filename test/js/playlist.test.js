@@ -129,8 +129,8 @@ test('a body that is not a playlist passes through unchanged', async () => {
   assert.equal(await out.text(), '<html>not a playlist</html>');
 });
 
-// The transport copies the browser's own request headers — `Range: bytes=0-` among them, which is how a media element
-// starts — and a CDN answers that with a 206 of the ORIGINAL bytes. A playlist is rewritten whole, so it is asked for whole.
+// Media elements send `Range: bytes=0-`, which causes CDNs to return 206 partial content of the original bytes.
+// Because playlists must be rewritten as a whole, playlist requests strip Range before forwarding upstream.
 test('the transport leaves Range off a request that asked for it not to travel, and keeps it otherwise', async () => {
   const seen = [];
   const w = loadWorker();

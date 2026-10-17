@@ -113,9 +113,7 @@ class SocketReader {
   }
 }
 
-// A page that reports — by postMessage to its embedder or opener — how ITS view
-// of that window behaves: a native Chrome frame of another site may use a short
-// fixed list and gets SecurityError for everything else.
+// Reports via postMessage which cross-origin window operations succeed or throw SecurityError.
 function xsiteReporter(kind, viaOpener) {
   const w = viaOpener ? 'opener' : 'parent';
   const prefix = viaOpener ? 'opener' : 'parent';
@@ -135,7 +133,7 @@ function xsiteReporter(kind, viaOpener) {
   return '<!doctype html><title>x</title><script>' + body + '<\/script>';
 }
 
-// A solid-color PNG of the given size: a test image that is not the 1x1 of a placeholder.
+// Solid-color PNG of the given dimensions (distinct from a 1x1 placeholder).
 function solidPNG(size) {
   const zlib = require('node:zlib');
   const chunk = (type, data) => {
@@ -207,10 +205,7 @@ function miniTrueTypeFont() {
   return font;
 }
 
-// Probes serialized into a fixture page with Function.prototype.toString: real functions, nothing to escape. Each reports
-// what a page can observe as plain strings, so the native browser and the proxy can be compared key by key.
-// What a page that redefines its own window's accessors sees (Cloudflare's challenge puts a getter on frameElement,
-// not configurable, and reads it back).
+// Probes serialized into fixture pages via Function.prototype.toString.
 function windowRedefineProbe() {
   var out = {};
   var tryIt = function (k, fn) { try { var v = fn(); out[k] = (v && typeof v === 'object') ? JSON.stringify(v) : String(v); } catch (e) { out[k] = '!' + e.name; } };
@@ -232,7 +227,6 @@ function windowRedefineProbe() {
   tryIt('fixed getter receiver', function () { return window.zzFixed === window; });
   window.__xredef = out;
 }
-// The errors of another origin's window and Location (the parent page embeds a frame of 127.0.0.1).
 function crossOriginDenialProbe(src) {
   var f = document.createElement('iframe');
   f.src = src;
@@ -286,8 +280,7 @@ function crossOriginDenialProbe(src) {
   document.body.appendChild(f);
 }
 
-// What a page's canary on the DOM query methods sees while the page does ordinary DOM work. The membrane's own scans (iframes, scripts,
-// styles, the URL attributes) must not run through the page's wrapper: natively only the page's own calls arrive.
+// Membrane DOM scans must not invoke page-installed wrappers on DOM query methods.
 function domScanProbe() {
   var seen = {}, busy = false;
   var rec = function (key, args) {
@@ -312,7 +305,6 @@ function domScanProbe() {
   root.querySelectorAll('a'); // the page's own call
   setTimeout(function () { window.__xdomscan = { calls: seen }; }, 1500);
 }
-// The realm of a frame the page makes: its own built-ins, answered to code running inside it, and nothing of ours in its reflection.
 function childRealmProbe() {
   var out = {};
   var t = function (k, fn) { try { out[k] = String(fn()); } catch (e) { out[k] = '!' + e.name; } };
@@ -335,7 +327,6 @@ function childRealmProbe() {
   });
   window.__xrealm = out;
 }
-// Built-ins as a page can read them: constants and statics of the classes the membrane replaces, names and lengths of its stand-ins.
 function builtinShapeProbe() {
   var out = {};
   var t = function (k, fn) { try { var v = fn(); out[k] = typeof v === 'function' ? 'fn' : String(v); } catch (e) { out[k] = '!' + e.name; } };
@@ -359,10 +350,7 @@ function builtinShapeProbe() {
   t('frameElement getter name', function () { return Object.getOwnPropertyDescriptor(window, 'frameElement').get.name; });
   window.__xshape = out;
 }
-// The text of a page's own functions: what it wrote, on the first read and on every later one (the membrane keeps its answer
-// per function), for the shapes the rewriter changes and the text can be put back from (computed reads, window names, calls) and for
-// the browser's. A guarded read in an arrow (`(a, b) => a[b] || x`), a compound assignment on a member and `delete o[k]` still show
-// the rewrite — not tried here.
+// Function.prototype.toString must return the original source across repeated calls.
 function functionTextProbe() {
   var out = {};
   var fns = {
@@ -389,9 +377,9 @@ function functionTextProbe() {
 }
 
 function createTargetServer(requests, pendingResponses) {
-  // tag → the names of the cookies the request that carried it had (see /xck-echo)
+  // Maps request tag to cookie names received by /xck-echo.
   const xckSeen = new Map();
-  // tag → what each request the cross-origin API (/xcors-api) saw under it looked like
+  // Maps request tag to request metadata recorded by /xcors-api.
   const corsLog = new Map();
   const server = http.createServer((req, res) => {
     ignoreBenignSocketErrors(req);
@@ -768,9 +756,7 @@ function createTargetServer(requests, pendingResponses) {
       res.end(JSON.stringify({ href: url.searchParams.get('href'), userAgent: req.headers['user-agent'] }));
       return;
     }
-    // O4: A-section escape probes executed in a REWRITTEN document — the
-    // inline script exercises real rewriter + membrane semantics (evaluate()
-    // would bypass the rewriter entirely).
+    // Run escape probes in an inline script so they traverse both the rewriter and membrane.
     if (url.pathname === '/escape-probes') {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(`<!doctype html><title>E2E Escape Probes</title><body><script>
@@ -832,8 +818,7 @@ function createTargetServer(requests, pendingResponses) {
     }
     if (url.pathname === '/compat-probes') {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
-      // Same source served directly AND through the proxy — every probe must
-      // produce identical results unless ERRATA documents a divergence.
+      // Served both directly and through the proxy for differential comparison.
       res.end(`<!doctype html><title>ZP Compat Probes</title><body><div id="compat-dom"><a id="ca" href="/x">x</a></div><script>
         (async () => {
           const out = {};
@@ -966,7 +951,7 @@ function createTargetServer(requests, pendingResponses) {
           window.addEventListener('message', ev => {
             try {
               const rec = { data: ev.data, origin: ev.origin };
-              // ev.source 는 직렬화 불가라 열거 불가 프로퍼티로 보관한다.
+              // Store ev.source on a non-enumerable property because Window references cannot be JSON-serialized.
               Object.defineProperty(rec, 'src', { value: ev.source, enumerable: false });
               out.messages.push(rec);
             } catch (e) { out.messages.push({ data: String(ev.data), origin: 'err' }); }
@@ -982,8 +967,8 @@ function createTargetServer(requests, pendingResponses) {
           });
           await P('identityStable', () => {
             const f = mk();
-            // 이전 프로브의 프레임이 body 에 남아 있으므로 frames[0] 가 f 가
-            // 아닐 수 있다 — 컬렉션 멤버십으로 확인한다.
+            // Earlier probe frames remain in document.body, so check collection
+            // membership rather than assuming frames[0] === f.
             let inFrames = false;
             for (let i = 0; i < window.frames.length; i++) if (window.frames[i] === f.contentWindow) inFrames = true;
             return [f.contentWindow === f.contentWindow, inFrames, f.contentWindow.parent === window].join(',');
@@ -1002,8 +987,8 @@ function createTargetServer(requests, pendingResponses) {
           await P('srcLoad', async () => {
             const f = mk();
             f.src = '/frame-child';
-            // textContent 는 script 요소의 리라이트된 소스까지 포함하므로
-            // 본문 마커 존재 여부만 본다.
+            // textContent includes rewritten inline script source, so check
+            // only for the body marker substring.
             return (await waitText(f, 'frame child')).includes('frame child');
           });
           await P('srcVirtual', async () => {
@@ -1017,7 +1002,7 @@ function createTargetServer(requests, pendingResponses) {
             const f = mk();
             f.src = '/frame-child';
             await sleep(1500);
-            // 이전 프레임들도 같은 메시지를 보내므로 발신 창으로 식별한다.
+            // Filter by event.source because earlier probe frames post the same message format.
             const m = out.messages.find(m => m.data && m.data.type === 'frame-child-ready' && m.src === f.contentWindow);
             return m ? [m.data.href, m.data.topOrigin, m.origin, true].join('|') : 'no-message';
           });
@@ -1058,18 +1043,18 @@ function createTargetServer(requests, pendingResponses) {
             await sleep(1200);
             try { void f.contentDocument.body; } catch (e) { docAccess = 'e:' + (e && e.name || e); }
             const ran = out.messages.some(m => m.data === 'sb-ran');
-            // sandbox opaque-origin 프레임은 네이티브에서 contentDocument 가
-            // null 을 돌려준다 — 던지는 게 아니라 null 이 정답.
+            // Native browsers return null for contentDocument on sandboxed
+            // opaque-origin frames rather than throwing.
             const cd = (() => { try { return f.contentDocument === null ? 'null-doc' : (f.contentDocument ? 'doc' : String(f.contentDocument)); } catch (e) { return 'e:' + (e && e.name || e); } })();
             return [ran ? 'ran' : 'silent', cd].join('|');
           });
-          // nested srcdoc → grandchild prelude. 임의 프로퍼티는 cross-window
-          // 파사드가 삼키므로 마커는 postMessage 로 보낸다.
+          // Nested srcdoc grandchild prelude: send the marker via postMessage
+          // because the cross-window facade blocks arbitrary expando reads.
           window.__probeStage = 'nested';
           await P('nested', async () => {
             const f = mk(); const done = load(f);
-            // 자식 srcdoc HTML 안에 script 종료 태그가 들어가면 파서가 조기
-            // 종료하므로 손자 페이로드는 textarea 에 담아 .value 로 꺼낸다.
+            // Read the grandchild payload from a textarea value so a closing
+            // script tag inside nested srcdoc markup does not terminate the outer script.
             const inner = '<scr' + 'ipt>top.postMessage("gc-ran","*");</scr' + 'ipt>';
             f.srcdoc = '<textarea id=t hidden>' + inner + '</textarea><scr' + 'ipt>try{var n=document.createElement("iframe");n.srcdoc=document.getElementById("t").value;document.body.appendChild(n);parent.postMessage("child-did-set","*")}catch(e){parent.postMessage("child-err:"+(e&&(e.name+":"+e.message)||e),"*")}</scr' + 'ipt>';
             await done;
@@ -1103,9 +1088,6 @@ function createTargetServer(requests, pendingResponses) {
       res.end('echo');
       return;
     }
-    // O7: worker suite — dedicated/module/shared × fetch/importScripts/
-    // timers/eval(blocked)/location/storage isolation. The page collects
-    // each worker's postMessage into window.__workerProbes.
     if (url.pathname === '/worker-echo') {
       res.writeHead(200, { 'Content-Type': 'text/plain' });
       res.end('worker-echo');
@@ -1138,7 +1120,7 @@ function createTargetServer(requests, pendingResponses) {
         });
         await P('xhrSync', () => { const x = new XMLHttpRequest(); try { x.open('GET', '/worker-echo?w=sync', false); x.send(); return 'status:' + x.status + '|' + String(x.responseText).slice(0, 20); } catch (e) { return 'e:' + (e && e.name || e); } });
         await P('wsCtor', () => { try { new WebSocket('ws://nonexistent.invalid/'); return 'constructed'; } catch (e) { return 'e:' + (e && e.name || e); } });
-        // W4: 페이지 중계 SW 스트림 — 실제 WS 라운드트립.
+        // Worker WebSocket round-trip relayed through the page Service Worker stream.
         await P('wsRoundtrip', () => new Promise(res => {
           try {
             const ws = new WebSocket('/ws?w=worker');
@@ -1150,7 +1132,7 @@ function createTargetServer(requests, pendingResponses) {
         }));
         await P('rtcCtor', () => { try { new RTCPeerConnection(); return 'constructed'; } catch (e) { return 'e:' + (e && e.name || e); } });
         await P('wtCtor', () => { try { const w = new WebTransport('https://nonexistent.invalid/'); return 'constructed:' + String(w.readyState); } catch (e) { return 'e:' + (e && e.name || e); } });
-        // WorkerEventSource — 프록시 fetch 경유 SSE 가 실제로 이벤트를 받는가.
+        // Worker EventSource receives SSE messages over proxied fetch.
         await P('esRoundtrip', () => new Promise(res => {
           try {
             const es = new EventSource('/sse?w=es');
@@ -1185,7 +1167,7 @@ function createTargetServer(requests, pendingResponses) {
         });
         await P('cookieStore', () => typeof cookieStore);
         await P('errorStack', () => { try { throw new Error('x'); } catch (e) { return /proxy\\.localhost|zp\\//i.test(e.stack || '') ? 'LEAK' : 'clean'; } });
-        // ── W8–W12: WorkerGlobalScope 가상 표면 ──
+        // WorkerGlobalScope virtualized surface probes.
         await P('origin', () => self.origin);
         await P('secureCtx', () => String(self.isSecureContext));
         await P('urlResolve', () => new URL('/w-abs', location.href).href);
@@ -1220,7 +1202,7 @@ function createTargetServer(requests, pendingResponses) {
         await P('fetchEcho', async () => (await fetch('/worker-echo?w=m')).status);
         await P('evalCode', () => eval('1'));
         await P('funcCtor', () => new Function('return 1')());
-        // 모듈 워커 importScripts — 네이티브는 부재(TypeError), 우리는 차단 스텁.
+        // Module worker importScripts throws TypeError.
         await P('importScriptsStub', () => {
           if (typeof importScripts !== 'function') return 'absent';
           try { importScripts('/worker-imported.js'); return 'imported'; } catch (e) { return 'e:' + (e && e.name || e); }
@@ -1250,9 +1232,9 @@ function createTargetServer(requests, pendingResponses) {
             try { w = mkw(); } catch (e) { r({ __ctor: (e && e.name || '') + ':' + (e && e.message || '') }); return; }
             const t = setTimeout(() => r({ __timeout: 1 }), 10000);
             w.onmessage = ev => { clearTimeout(t); r(ev.data); };
-            // module 워커의 그래프 로드 실패는 빈 message 의 error 이벤트로만
-            // 표면한다 — 부팅 체인이 진단 postMessage 를 먼저 보낼 수 있도록
-            // 에러 해결을 조금 지연시킨다.
+            // Module worker graph load failures surface as an error event with
+            // an empty message; delay rejection slightly so diagnostic
+            // postMessage payloads from the boot chain arrive first.
             w.onerror = ev => { const em = String(ev && ev.message || 'err'); setTimeout(() => { clearTimeout(t); r({ __error: em }); }, 600); };
           });
           out.dedicated = await collect(() => new Worker('/probe-worker.js'));
@@ -1271,15 +1253,10 @@ function createTargetServer(requests, pendingResponses) {
       return;
     }
     if (url.pathname === '/csp-probes') {
-      // O8: CSP suite — §K two-sided matrix. Allowed resources must load,
-      // missed/intentional blocks must fire securitypolicyviolation (and land
-      // at /zp/api/csp-report). The inline <script type=module> marker is the
-      // top-priority check: it only executes if `blob:` is in script-src
-      // (the __ZP_EXEC_INLINE_MODULE path) — without it every inline module
-      // dies silently at CSP.
+      // Inline module execution requires blob: in script-src (__ZP_EXEC_INLINE_MODULE).
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(`<!doctype html><title>ZP CSP Probes</title><body><script type="module">
-        // 클래식 프로브가 먼저 객체를 만들 수 있다 — 덮어쓰면 그쪽 수집이 날아가므로 머지.
+        // Merge into existing __workerProbes if classic probes initialized it first.
         (window.__cspProbes = window.__cspProbes || { violations: [] }).inlineModule = 'ran';
       <\/script><script>
         (async () => {
@@ -1295,11 +1272,11 @@ function createTargetServer(requests, pendingResponses) {
             r(hit ? 'spv:' + hit.split('|')[0] : 'no-spv');
           }, ms));
 
-          // ── connect-src blob:/data: — CSP 통과 후 fetch 심이 실제 처리 ──
+          // connect-src blob:/data: requests pass CSP and are handled by the fetch shim.
           await P('fetchData', async () => { const r = await fetch('data:text/plain,hi'); return r.status + ':' + (await r.text()); });
           await P('fetchBlob', async () => { const r = await fetch(URL.createObjectURL(new Blob(['bl']))); return r.status + ':' + (await r.text()); });
 
-          // ── img/style/font/media-src — data:/blob: 허용 (로드 시도 자체가 통과) ──
+          // img/style/font/media-src allow data: and blob: URLs without firing SPV.
           await P('imgData', () => new Promise(r => {
             const i = new Image(); const t = setTimeout(() => r('timeout'), 3000);
             i.onload = () => { clearTimeout(t); r('loaded'); };
@@ -1312,7 +1289,7 @@ function createTargetServer(requests, pendingResponses) {
             l.onerror = () => { clearTimeout(t); r('err'); };
             l.href = 'data:text/css,body%7B%7D'; document.head.appendChild(l);
           }));
-          // 폰트/미디어는 디코드 실패가 정상 — CSP 통과 여부는 SPV 부재로 판정
+          // Font and media decode errors are expected; CSP pass is judged by absence of SPV.
           await P('fontData', async () => {
             try { const f = new FontFace('zpf', 'url(data:font/woff2;base64,AAAA)'); await f.load(); return 'loaded'; }
             catch (e) { return 'font-err:' + (e && e.name || e); }
@@ -1324,7 +1301,7 @@ function createTargetServer(requests, pendingResponses) {
             v.src = 'data:video/mp4;base64,AAAA';
           }));
 
-          // ── 차단 측 — 각 디렉티브가 SPV 를 발사해야 한다 ──
+          // Blocked directives must fire securitypolicyviolation events.
           await P('objectBlocked', () => {
             const o = document.createElement('object');
             o.data = '/csp-payload'; document.body.appendChild(o);
@@ -1343,7 +1320,7 @@ function createTargetServer(requests, pendingResponses) {
             document.head.appendChild(l); return waitFor(/manifest-src/, 800);
           });
 
-          // ── CSP 는 허용하지만 속성 정책이 봉인하는 경로 — divergence 핀 ──
+          // Directives allowed by CSP but blocked earlier by attribute/hook policy.
           await P('frameDataSrc', () => {
             const f = document.createElement('iframe');
             try { f.src = 'data:text/html,<b>x</b>'; document.body.appendChild(f); return 'set:' + String(f.src).slice(0, 40); }
@@ -1356,7 +1333,7 @@ function createTargetServer(requests, pendingResponses) {
             } catch (e) { return 'blocked:' + (e && e.name || e); }
           });
 
-          // ── 'unsafe-inline'/'unsafe-eval' 정면 경로 ──
+          // Inline script and eval execution under unsafe-inline and unsafe-eval.
           await P('inlineHandler', () => new Promise(r => {
             const b = document.createElement('button');
             b.setAttribute('onclick', 'window.__cspHandlerRan = 1');
@@ -1365,7 +1342,7 @@ function createTargetServer(requests, pendingResponses) {
           }));
           await P('evalPath', () => { try { return 'v:' + eval('40+2'); } catch (e) { return 'e:' + (e && e.name || e); } });
 
-          // ── CSP <meta> 주입 — 교집합 적용: 배관은 유지, 엄격화는 존중 ──
+          // Injected <meta> CSP intersection preserves proxy plumbing while enforcing target restrictions.
           await P('metaNeutralized', () => {
             const m = document.createElement('meta');
             m.setAttribute('http-equiv', 'Content-Security-Policy');
@@ -1378,9 +1355,9 @@ function createTargetServer(requests, pendingResponses) {
               i.src = PNG;
             });
           });
-          // E2: 타깃이 더 엄격한 리소스 지시어를 선언하면 그건 지켜진다 —
-          // img-src 'none' 은 배관을 안 건드리므로 verbatim 적용.
-          // (마지막에 놓는다 — meta CSP 는 지워지지 않고 이후 로드를 계속 묶는다.)
+          // Stricter target resource directives such as img-src 'none' are preserved
+          // verbatim when they do not conflict with proxy transport requirements.
+          // (Placed last because a <meta> CSP remains active for subsequent loads.)
           await P('metaStricter', () => {
             const m = document.createElement('meta');
             m.setAttribute('http-equiv', 'Content-Security-Policy');
@@ -1404,18 +1381,13 @@ function createTargetServer(requests, pendingResponses) {
       return;
     }
     if (/^\/lex-mod-[abc]\.js$/.test(url.pathname)) {
-      // import/export 없는 모듈 — GitHub high-contrast-cookie /
-      // global-banner-disable 의 모양. 셋 다 top-level `let e` 를 갖는다.
+      // Modules without import/export declarations still have module scope (isolated top-level let bindings).
       const tag = url.pathname.charAt(9);
       res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(`let e = '${tag}'; window.__lexMod${tag.toUpperCase()} = e;`);
       return;
     }
     if (url.pathname === '/dyn-probes') {
-      // O9: dynamic code suite — §E eval/Function/timers/event handlers/DOM
-      // insertion paths. Three assertion kinds per case: success (runs through
-      // the mediated path), exception (correct error surfaces), source-leak
-      // (no __zp_* / /zp/ internals visible to page JS).
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(`<!doctype html><title>ZP Dynamic Probes</title><body>
       <button id="staticHandler" onclick="window.__staticHandlerRan = 1"></button>
@@ -1431,7 +1403,7 @@ function createTargetServer(requests, pendingResponses) {
           const P = async (k, fn) => { try { out[k] = await fn(); } catch (e) { out[k] = 'e:' + (e && (e.name || e.message) || e); } };
           const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-          // ── eval — 성공/스코프/예외/완료값 ──
+          // Direct and indirect eval probes.
           await P('evalBasic', () => 'v:' + eval('1+1'));
           await P('evalLocation', () => 'v:' + eval('location.href'));
           await P('evalVarVisible', () => {
@@ -1446,7 +1418,7 @@ function createTargetServer(requests, pendingResponses) {
           await P('evalAsCtor', () => { try { return 'v:' + (new eval()); } catch (e) { return 'threw:' + (e && e.name || e); } });
           await P('evalTagged', () => 'v:' + typeof eval\`x\`);
 
-          // ── Function — 파라미터 파싱/this/new.target/중첩 동적코드 ──
+          // Function constructor parameter parsing, receiver binding, new.target, and nested compilation.
           await P('fnBasic', () => 'v:' + new Function('return 40+2')());
           await P('fnParams', () => 'v:' + new Function('a', 'b', 'return a*b')(6, 7));
           await P('fnDefaultParam', () => 'v:' + new Function('a = 5', 'return a')());
@@ -1459,7 +1431,7 @@ function createTargetServer(requests, pendingResponses) {
           await P('asyncFnCtor', () => new Function('return 1').constructor === Function ? 'v:ctor-same' : 'v:ctor-diff');
           await P('asyncFn', async () => 'v:' + await (Object.getPrototypeOf(async function(){}).constructor)('return 8')());
 
-          // ── string timers — 실행/가상 스코프/예외 표면 ──
+          // String timer compilation, virtual scope, and syntax error reporting.
           await P('timerString', () => new Promise(r => { setTimeout('window.__tStr = 7', 0); setTimeout(() => r('v:' + window.__tStr), 300); }));
           await P('timerVirtual', () => new Promise(r => { setTimeout('window.__tVirt = location.origin', 0); setTimeout(() => r('v:' + window.__tVirt), 300); }));
           await P('timerThis', () => new Promise(r => { try { setTimeout('window.__tThis = String(this["location"] && this["location"].href).slice(0,30)', 0); } catch (e) { return r('ctor:' + (e && e.name || e)); } setTimeout(() => r('v:' + String(window.__tThis)), 400); }));
@@ -1474,7 +1446,7 @@ function createTargetServer(requests, pendingResponses) {
             setTimeout(() => { clearInterval(id); r('v:' + window.__tInt); }, 300);
           }));
 
-          // ── event handlers — 정적 속성/프로퍼티 문자열/addEventListener ──
+          // Event handler compilation across content attributes, IDL properties, and addEventListener.
           await P('handlerStatic', () => { document.getElementById('staticHandler').click(); return 'v:' + (window.__staticHandlerRan || 'silent'); });
           await P('handlerPropString', () => {
             const b = document.createElement('button');
@@ -1489,7 +1461,7 @@ function createTargetServer(requests, pendingResponses) {
             return 'v:' + (window.__propFn || 'silent');
           });
 
-          // ── DOM 삽입 — transformHTML 경로로 들어온 스크립트 실행 ──
+          // Dynamic DOM script insertion via transformHTML.
           await P('innerHTMLScript', () => {
             const d = document.createElement('div');
             d.innerHTML = '<scr' + 'ipt>window.__ihScr = 5</scr' + 'ipt>';
@@ -1509,7 +1481,7 @@ function createTargetServer(requests, pendingResponses) {
           });
           await P('docWrite', () => 'v:' + (document.getElementById('dw') ? 'wrote' : 'missing'));
 
-          // ── import() — 경로별 성공/차단 ──
+          // Dynamic import() resolution and blocking.
           await P('importHttp', async () => { const m = await import('/dyn-mod.js'); return 'v:' + m.m + '|' + m.meta; });
           // D2/D3: plain page code — the rewriter turns these into
           // import(__zp_module_url(…)). They used to call that helper by hand,
@@ -1518,9 +1490,9 @@ function createTargetServer(requests, pendingResponses) {
           await P('importData', async () => { try { const m = await import('data:text/javascript,export%20default%201'); return 'v:' + (m && m.default); } catch (e) { return 'threw:' + (e && e.name || e); } });
           await P('importBlob', async () => { try { const u = URL.createObjectURL(new Blob(['export default 3'], { type: 'text/javascript' })); const m = await import(u); return 'v:' + (m && m.default); } catch (e) { return 'threw:' + (e && e.name || e); } });
 
-          // ── 소스 누출 — __zp_*/프록시 경로가 페이지 JS 에 보이면 안 된다 ──
-          // 주의: 픽스처 안 regex 리터럴의 backslash-slash 는 바깥 템플릿
-          // 리터럴이 한 번 풀어 regex 를 조기 종료시킨다 — substring 검사로 쓴다.
+          // Source text leak checks: internal __zp_* identifiers and proxy routes must not be visible.
+          // Use substring checks instead of regex literals so the outer template
+          // literal does not unescape backslash-slash sequences.
           const leaked = s => s.includes('__zp_') || s.includes('/zp/api') || s.includes('proxy.localhost') || s.includes('worker-script');
           await P('leakFnToString', () => leaked(new Function('return 1').toString()) ? 'LEAK' : 'v:clean');
           await P('leakCallee', () => leaked((function(){ return arguments.callee.toString(); })()) ? 'LEAK' : 'v:clean');
@@ -1547,13 +1519,13 @@ function createTargetServer(requests, pendingResponses) {
           await P('fnParamSyntax', () => { try { new Function('a b', 'return 1'); return 'no-throw'; } catch (e) { return 'threw:' + (e && e.name || e); } });
           await P('winHandlerString', () => { window.onmessageerror = 'window.__whs = 1'; const r = 'v:' + window.onmessageerror; window.onmessageerror = null; return r; });
 
-          // ── 모듈 kind — import/export 가 없어도 모듈이다 (2026-09-29, GitHub) ──
-          // 정적 모듈 둘이 각자 top-level let e 를 갖는다. 모듈 스코프는 따로라
-          // 네이티브에선 둘 다 돈다. classic 으로 리라이트되면 R1 레지스트리가
-          // 둘째를 "already declared" 로 죽였다.
+          // Scripts with type="module" remain module-scoped even without import/export syntax.
+          // Two static modules each declare top-level let e in their own module scope;
+          // rewriting them as classic scripts would collide in the shared top-level
+          // lexical registry with "already declared".
           await P('staticModuleLex', async () => { for (let i = 0; i < 60 && !(window.__lexModA && window.__lexModB); i++) await sleep(50); return 'v:' + window.__lexModA + '|' + window.__lexModB; });
-          // src 를 type 보다 먼저 넣는 순서 — kind 는 삽입 시점의 type 이 정한다.
-          // 뒤의 classic let e 는 모듈이 레지스트리에 잘못 올라갔을 때만 충돌한다.
+          // Setting src before type="module" still executes as a module based on type at insertion.
+          // A subsequent classic let e only collides if the module binding leaked into the global registry.
           await P('dynModuleTypeAfterSrc', async () => {
             const s = document.createElement('script');
             Object.assign(s, { src: '/lex-mod-c.js', type: 'module' });
@@ -1563,8 +1535,8 @@ function createTargetServer(requests, pendingResponses) {
             document.head.appendChild(k);
             return 'v:' + window.__lexModC + '|' + window.__lexClassicE;
           });
-          // blob 워커 소스는 생성 시점에 확정된다 — 곧바로 해제해도 돈다
-          // (CNN Permutive SDK 의 순서). 워커 쪽 헬퍼(Object.keys)도 함께 본다.
+          // Blob worker source is snapshotted at creation time and still runs
+          // if URL.revokeObjectURL is called immediately afterward.
           await P('blobWorkerRevoked', () => new Promise((res) => {
             const u = URL.createObjectURL(new Blob(['postMessage(self.location.protocol + Object.keys({ a: 1 }).join())'], { type: 'text/javascript' }));
             const w = new Worker(u);
@@ -1573,9 +1545,9 @@ function createTargetServer(requests, pendingResponses) {
             w.onmessage = (e) => { clearTimeout(t); w.terminate(); res('v:' + e.data); };
             w.onerror = (e) => { clearTimeout(t); e.preventDefault(); res('error:' + e.message); };
           }));
-          // 워커에서 self 로 부른 네이티브 메서드 — 수신자가 스코프 프록시면
-          // Illegal invocation 이었다(CNN Permutive 워커의 self.addEventListener).
-          // 래퍼 Function.prototype 이 빈 객체라 toString 판별도 어긋났었다.
+          // Calling native methods on self inside a worker must unwrap the scope
+          // proxy receiver to avoid Illegal invocation errors, and preserve
+          // Function.prototype on wrapper functions.
           await P('workerSelfMethods', () => new Promise((res) => {
             const src = "self.addEventListener('message', function () { postMessage([self.atob('YQ=='), typeof self.setTimeout(function () {}, 1), self.addEventListener === self.addEventListener, Function.prototype.toString.call(self.atob).indexOf('native code') > 0].join()); });";
             const w = new Worker(URL.createObjectURL(new Blob([src], { type: 'text/javascript' })));
@@ -1590,30 +1562,27 @@ function createTargetServer(requests, pendingResponses) {
       return;
     }
     if (url.pathname === '/perf-probes') {
-      // O10: perf suite — 10M 루프캡 경계, async-poll 수명, bulk DOM,
-      // iframe 수×로드시간. 시간은 계측해서 기록하고 단언은 상한만 잡는다
-      // (머신 분산 방어).
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(`<!doctype html><title>Perf Probes</title><body><script>
         (async () => {
           const out = window.__perfProbes = {};
           const P = async (k, fn) => { try { out[k] = 'v:' + (await fn()); } catch (e) { out[k] = 'threw:' + (e && e.name || e); } };
 
-          // ── 10M 루프캡 경계 ──
-          // 미만 루프는 캡이 발화하지 않고 정상 완료돼야 한다.
+          // 10M loop cap boundary probes.
+          // Loops below the cap complete normally without tripping the guard.
           await P('underCap', () => {
             let i = 0;
             while (true) { i++; if (i >= 5000000) break; }
             return i;
           });
-          // 초과 루프는 hang 이 아니라 캡(10M)에서 종료돼야 한다.
+          // Loops exceeding the cap terminate at 10M iterations instead of hanging.
           await P('cappedWhile', () => {
             let j = 0;
             while (true) { j++; }
             return j;
           });
-          // ERRATA §L: 'for(let i=0;;i++)' uncapped 예측 — 12M 에 break 를
-          // 걸어 두면 capped=10M, uncapped=12000001 로 판별된다.
+          // Unconditional for(let i=0;;i++) with a break at 12M stops at 10M
+          // when capped (or 12000001 if uncapped).
           await P('cappedFor', () => {
             let m = 0;
             for (m = 0;; m++) { if (m > 12000000) break; }
@@ -1624,22 +1593,22 @@ function createTargetServer(requests, pendingResponses) {
             do { d++; } while (true);
             return d;
           });
-          // negative control — 일반 루프는 카운터가 끼면 안 된다.
+          // Negative control: bounded loops must not have loop counter state injected.
           await P('normalLoop', () => {
             let n = 0;
             for (n = 0; n < 3; n++) {}
             return n;
           });
-          // 중첩 루프 — 내부 캡이 외부 카운터와 충돌하면 안 된다.
+          // Nested loops must not share or clobber the outer loop counter.
           await P('nestedLoops', () => {
             let outer = 0, inner = 0;
             while (true) { outer++; if (outer >= 100) break; while (true) { inner++; if (inner >= outer * 100) break; } }
             return outer + '|' + inner;
           });
 
-          // ── async-poll 수명 ──
-          // while(true){await;break} 는 캡 prefix 가 붙어도 break 가 살아야
-          // 하고, 종료 후 폴러가 정말 죽어야 한다.
+          // Async polling loop lifetime.
+          // while(true) with await and break must honor break under the loop cap
+          // and stop polling after exit.
           await P('asyncPollBreak', async () => {
             let ap = 0;
             while (true) {
@@ -1662,7 +1631,7 @@ function createTargetServer(requests, pendingResponses) {
             return flag + '|' + (atExit === polls) + '|' + (polls <= 5000);
           });
 
-          // ── bulk DOM 삽입 ──
+          // Bulk DOM insertion throughput.
           await P('bulkDom', () => {
             const t = performance.now();
             const frag = document.createDocumentFragment();
@@ -1676,7 +1645,7 @@ function createTargetServer(requests, pendingResponses) {
             return document.querySelectorAll('div').length + '|' + Math.round(ms);
           });
 
-          // ── iframe 수 × 로드시간 ──
+          // Concurrent iframe load latency.
           await P('iframes', async () => {
             const N = 5;
             const t = performance.now();
@@ -1698,16 +1667,16 @@ function createTargetServer(requests, pendingResponses) {
             return results.join(',') + '|' + Math.round(ms);
           });
 
-          // ── T5-3: 멤브레인 hot-loop 비용 ──
-          // __zp_get 경유 location.href 읽기 20만 회 — 상한이 아니라 측정값
-          // 보고용 (회귀하면 ms 가 튄다).
+          // Membrane hot-loop property access overhead.
+          // Measure 200k location.href reads via __zp_get for diagnostic reporting
+          // without enforcing a tight wall-clock bound.
           await P('membraneRead', () => {
             const t = performance.now();
             let s = 0;
             for (let i = 0; i < 200000; i++) s += location.href.length;
             return Math.round(performance.now() - t) + 'ms|' + s;
           });
-          // MutationObserver 전체 DOM 감시 비용 — 2000개 연속 삽입.
+          // MutationObserver overhead across 2,000 sequential DOM insertions.
           await P('moOverhead', async () => {
             const t = performance.now();
             for (let i = 0; i < 2000; i++) {
@@ -1725,18 +1694,14 @@ function createTargetServer(requests, pendingResponses) {
       return;
     }
     if (url.pathname === '/frame-html') {
-      // A routed frame that reports what its OWN code sees, now and later — the
-      // late read catches a parent that installs its containment over it.
+      // Reports initial and delayed realm state so parent containment overwrites are caught.
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end('<!doctype html><title>fh</title><script>parent.__fhSaw = String(location.href); setTimeout(function () { parent.__fhLate = String(location.href); }, 300);<\/script>');
       return;
     }
     if (url.pathname === '/xsite-echo') {
-      // Answers a ping from its embedder: the test counts what arrives.
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
-      // A BARE addEventListener (undefined receiver) and a reply through e.source:
-      // the combination ad and widget SDKs use. The proxy used to hand such a
-      // listener its own origin as e.origin and a raw e.source.
+      // Bare addEventListener (undefined receiver) replying via e.source.
       res.end('<!doctype html><title>echo</title><script>addEventListener("message", function (e) { if (e.data === "ping") parent.postMessage("pong", "*"); else if (e.data === "who") e.source.postMessage("who:" + JSON.stringify({ srcIsParent: e.source === parent, srcIsTop: e.source === top, origin: e.origin, trusted: e.isTrusted }), "*"); });<\/script>');
       return;
     }
@@ -1746,8 +1711,6 @@ function createTargetServer(requests, pendingResponses) {
       return;
     }
     if (url.pathname === '/xsite') {
-      // Window access across sites, both directions, frames and a popup. Every
-      // value is a type or an error name — never page content.
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(`<!doctype html><title>Cross-site access</title><body><script>
         window.__xsite = null;
@@ -1880,7 +1843,6 @@ function createTargetServer(requests, pendingResponses) {
       return;
     }
     if (url.pathname === '/xcookie2-child') {
-      // A frame that writes a cookie when asked and reports the ck2_ cookies it can read.
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end('<!doctype html><title>cookie child</title><script>' +
         'function names() { return document.cookie.split("; ").filter(Boolean).map(function (c) { return c.split("=")[0]; }).filter(function (n) { return n.indexOf("ck2_") === 0; }).sort().join(","); }' +
@@ -1892,9 +1854,6 @@ function createTargetServer(requests, pendingResponses) {
       return;
     }
     if (url.pathname === '/xcookie2') {
-      // Cookies the page's copy of the jar learns from OTHER places: a frame's own
-      // navigation, an image, a script, a synchronous XHR, a sibling frame's write.
-      // The jar is shared; each document keeps a copy. Names are the fixture's own.
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(`<!doctype html><title>Cookies from elsewhere</title><body><script>
         window.__xcookie2 = null;
@@ -1956,7 +1915,6 @@ function createTargetServer(requests, pendingResponses) {
       return;
     }
     if (url.pathname === '/xnames-child') {
-      // A frame that reports its own window.name and the locks it can see, when asked.
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end('<!doctype html><title>names child</title><script>' +
         'addEventListener("message", function (m) {' +
@@ -1971,8 +1929,6 @@ function createTargetServer(requests, pendingResponses) {
       return;
     }
     if (url.pathname === '/xnames') {
-      // window.name belongs to a browsing context, not to an origin; the lock manager
-      // lists an origin's locks, not every site's. Values are the fixture's own strings.
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(`<!doctype html><title>Names and locks</title><body><script>
         window.__xnames = null;
@@ -2019,8 +1975,6 @@ function createTargetServer(requests, pendingResponses) {
       return;
     }
     if (url.pathname === '/xmarkup') {
-      // Frames that come out of markup — innerHTML and its kin, a fragment, a template, a parsed
-      // document, document.write — load as frames made by script do, and read back as written.
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(`<!doctype html><title>Markup frames</title><body><script>
         window.__xmarkup = null;
@@ -2077,8 +2031,6 @@ function createTargetServer(requests, pendingResponses) {
       return;
     }
     if (url.pathname === '/xinsert') {
-      // A script put into the document by every door a node can come through asks where it runs. Through the
-      // membrane it reads the page's own URL; raw, the proxy's (and could assign the real location).
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(`<!doctype html><title>Insertion doors</title><body><script>
         window.__xinsert = null;
@@ -2121,8 +2073,6 @@ function createTargetServer(requests, pendingResponses) {
       return;
     }
     if (url.pathname === '/xsyncck') {
-      // A synchronous XHR blocks the thread: it cannot wait for the cookie write to reach the worker. Thirty
-      // rounds of write-then-send, with a cookie of its own each time and one overwritten each time.
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(`<!doctype html><title>Sync XHR cookies</title><body><script>
         window.__xsyncck = null;
@@ -2151,7 +2101,6 @@ function createTargetServer(requests, pendingResponses) {
       return;
     }
     if (url.pathname === '/xsamesite' || url.pathname === '/xsamesite-img') {
-      // Sets the cookie n with the SameSite given (ss=None|Lax|Strict, absent: none stated) and Secure with secure=1.
       const ss = url.searchParams.get('ss');
       const cookie = url.searchParams.get('n') + '=1; Path=/' + (ss ? '; SameSite=' + ss : '') + (url.searchParams.get('secure') ? '; Secure' : '');
       if (url.pathname === '/xsamesite-img') {
@@ -2164,8 +2113,7 @@ function createTargetServer(requests, pendingResponses) {
       return;
     }
     if (url.pathname === '/xck-echo') {
-      // Remembers which cookies the request carried, under the tag it was given; answers an image (or the names, json=1).
-      // Only this test's own cookies: the proxied session's jar also holds what earlier subtests set.
+      // Records only this test's cookies because the shared proxy session jar holds cookies from earlier tests.
       const names = (req.headers.cookie || '').split('; ').filter(Boolean).map(c => c.split('=')[0]).filter(n => /^(ss|op)_/.test(n)).sort().join(',');
       xckSeen.set(url.searchParams.get('tag') || '', names);
       if (url.searchParams.get('json')) {
@@ -2185,7 +2133,6 @@ function createTargetServer(requests, pendingResponses) {
       return;
     }
     if (url.pathname === '/xopck-static') {
-      // A sandboxed document that cannot run a script: every subresource it loads is cross-site natively.
       const rid = url.searchParams.get('rid');
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end('<!doctype html><title>static</title><body>' +
@@ -2195,7 +2142,6 @@ function createTargetServer(requests, pendingResponses) {
       return;
     }
     if (url.pathname === '/xopck-set') {
-      // What an opaque document's responses set: only the SameSite=None one may stick.
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end('<!doctype html><title>set</title><body>' +
         '<img src="/xsamesite-img?n=op_lax&ss=Lax">' +
@@ -2206,7 +2152,6 @@ function createTargetServer(requests, pendingResponses) {
     if (url.pathname === '/xopck-child') {
       const rid = url.searchParams.get('rid');
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
-      // The <script src> is here, where scripts run: a scriptless document does not fetch it the same way in the proxy.
       res.end('<!doctype html><title>script child</title><script src="/xck-echo?tag=' + rid + ':script"></script><script>' +
         'var rid = ' + JSON.stringify(rid) + ';' +
         'Promise.all([fetch("/xck-echo?tag=" + rid + ":fetch-default&json=1").catch(function () {}), fetch("/xck-echo?tag=" + rid + ":fetch-include&json=1", { credentials: "include" }).catch(function () {})])' +
@@ -2215,9 +2160,6 @@ function createTargetServer(requests, pendingResponses) {
       return;
     }
     if (url.pathname === '/xopck') {
-      // What an opaque document's requests carry and keep. Natively a sandboxed document without
-      // allow-same-origin is cross-site to everything: only SameSite=None cookies go with its requests,
-      // and only those may be set by its responses.
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(`<!doctype html><title>Opaque cookies</title><body><script>
         window.__xopck = null;
@@ -2260,8 +2202,6 @@ function createTargetServer(requests, pendingResponses) {
       return;
     }
     if (url.pathname === '/xcors-api') {
-      // A cross-origin API whose answer to the page is picked by `case`: what it allows (ACAO/ACAC/ACEH, and for the
-      // OPTIONS preflight ACAM/ACAH/Max-Age), what it redirects to. It logs what each request looked like.
       const q = url.searchParams;
       const tag = q.get('tag') || '';
       const name = q.get('case') || '';
@@ -2277,7 +2217,7 @@ function createTargetServer(requests, pendingResponses) {
         custom: req.headers['x-custom'] || null,
         auth: req.headers.authorization ? 'yes' : null,
         ct: (req.headers['content-type'] || '').split(';')[0] || null,
-        // nothing of the worker's own (X-ZP-*) ever reaches a target
+        // Internal X-ZP-* headers must never reach the target server.
         zp: Object.keys(req.headers).filter(h => h.startsWith('x-zp')).join(','),
       });
       const ACAO = 'Access-Control-Allow-Origin', ACAC = 'Access-Control-Allow-Credentials', ACEH = 'Access-Control-Expose-Headers';
@@ -2352,8 +2292,6 @@ function createTargetServer(requests, pendingResponses) {
       return;
     }
     if (url.pathname === '/xcors') {
-      // What a page may do with a response from another origin, and when the browser even sends the request:
-      // fetch(), async XHR and sync XHR against /xcors-api on the other host (localhost <-> 127.0.0.1).
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(`<!doctype html><title>CORS</title><body><script>
         window.__xcors = null;
@@ -2487,8 +2425,6 @@ function createTargetServer(requests, pendingResponses) {
       return;
     }
     if (url.pathname === '/xph') {
-      // Images that arrive as markup in a frame the worker does not control (an ad frame written with
-      // document.write, a srcdoc frame) or in a plain document, from another origin: how big do they end up?
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(`<!doctype html><title>placeholders</title><body><div id="top"></div><script>
         window.__xph = null;
@@ -2517,7 +2453,6 @@ function createTargetServer(requests, pendingResponses) {
       return;
     }
     if (url.pathname === '/xdyneval') {
-      // Dynamic code that declares globals — how a challenge's bootstrap plants its decoder — and the file-system entry points.
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(`<!doctype html><title>dyneval</title><body>
         <script>window.__xdyneval = null; (0, eval)('function g1(){return 1}');</script>
@@ -2572,8 +2507,6 @@ function createTargetServer(requests, pendingResponses) {
       return;
     }
     if (url.pathname === '/xframe-env') {
-      // A cross-origin frame's view of its embedder (`document.referrer`, `location.ancestorOrigins`) and the shape of its own
-      // `Error.stack`. The child sits on 127.0.0.1, the parent on localhost: different origins on one server.
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(`<!doctype html><title>frame-env</title><body><script>
         window.__xframeenv = null;
@@ -2583,7 +2516,6 @@ function createTargetServer(requests, pendingResponses) {
       return;
     }
     if (url.pathname === '/xframe-child') {
-      // The probe is an external script: its frames carry the proxy's script URLs, which a stack must show as the page's own.
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(`<!doctype html><title>child</title><body><script src="/xframe-child.js"></script></body>`);
       return;
@@ -2608,7 +2540,6 @@ function createTargetServer(requests, pendingResponses) {
       return;
     }
     if (url.pathname === '/xfm-echo' || url.pathname === '/xfm-frame' || url.pathname === '/xfm') {
-      // Fetch Metadata as the server sees it: a same-origin fetch, a cross-site (CORS) fetch and a cross-site frame.
       const fm = JSON.stringify({
         site: req.headers['sec-fetch-site'] || 'absent', mode: req.headers['sec-fetch-mode'] || 'absent',
         dest: req.headers['sec-fetch-dest'] || 'absent', user: req.headers['sec-fetch-user'] || 'absent',
@@ -2637,8 +2568,6 @@ function createTargetServer(requests, pendingResponses) {
       return;
     }
     if (url.pathname === '/xwenv' || url.pathname === '/xwenv-worker.js') {
-      // A worker's environment as its code sees it — the same probe in the page, a blob worker and a file worker. A
-      // challenge VM runs workers and compares what they report with the page.
       const probe = `(function () {
         var out = {};
         var P = function (k, f) { try { out[k] = f(); } catch (e) { out[k] = 'ERR ' + (e && e.name); } };
@@ -2727,9 +2656,6 @@ function createTargetServer(requests, pendingResponses) {
       return;
     }
     if (url.pathname === '/xtt') {
-      // Code that is not a string: a TrustedScript given to eval and to a timer (Chrome compiles it, enforced or not), and a
-      // timer's object or array handler (compiled as its String()). Each reads `location.href`: rewritten code reads the
-      // page's address, code that bypassed the rewriter the proxy's.
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(`<!doctype html><title>tt</title><body><script>
         var out = {};
@@ -2752,8 +2678,6 @@ function createTargetServer(requests, pendingResponses) {
       return;
     }
     if (url.pathname === '/xdeval') {
-      // Direct eval of a function's own bindings, in the page and in a frame the page writes into (a document of its own
-      // without a prelude of its own), in sloppy and in strict code. The same cases run in both realms.
       const cases = `
         var out = {};
         var t = function (k, fn) { try { var v = fn(); out[k] = v; } catch (e) { out[k] = 'threw:' + e.name; } };
@@ -2791,7 +2715,6 @@ function createTargetServer(requests, pendingResponses) {
       return;
     }
     if (url.pathname === '/xdomscan' || url.pathname === '/xdomscan-child' || url.pathname === '/xdomscan.css') {
-      // A page wraps the DOM query methods, then does ordinary DOM work (domScanProbe).
       if (url.pathname === '/xdomscan.css') { res.writeHead(200, { 'Content-Type': 'text/css', 'Cache-Control': 'no-store' }); res.end('a{color:blue}'); return; }
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       if (url.pathname === '/xdomscan-child') { res.end('<!doctype html><title>child</title><body>child</body>'); return; }
@@ -2799,40 +2722,32 @@ function createTargetServer(requests, pendingResponses) {
       return;
     }
     if (url.pathname === '/xrealm') {
-      // The realm of a frame the page makes (childRealmProbe).
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end('<!doctype html><title>realm</title><body><script>(' + childRealmProbe.toString() + ')()<\/script></body>');
       return;
     }
     if (url.pathname === '/xshape') {
-      // Constants, statics, names and lengths of the stand-ins (builtinShapeProbe).
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end('<!doctype html><title>shape</title><body><script>(' + builtinShapeProbe.toString() + ')()<\/script></body>');
       return;
     }
     if (url.pathname === '/xtext') {
-      // The text of a page's own functions (functionTextProbe).
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end('<!doctype html><title>text</title><body><script>(' + functionTextProbe.toString() + ')()<\/script></body>');
       return;
     }
     if (url.pathname === '/xredef') {
-      // A page redefines its own window's accessors (windowRedefineProbe).
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end('<!doctype html><title>redefine</title><body><script>(' + windowRedefineProbe.toString() + ')()<\/script></body>');
       return;
     }
     if (url.pathname === '/xdeny' || url.pathname === '/xdeny-child') {
-      // The errors a window and a Location of another origin raise (crossOriginDenialProbe).
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       if (url.pathname === '/xdeny-child') { res.end('<!doctype html><title>child</title><body>child</body>'); return; }
       res.end('<!doctype html><title>deny</title><body><script>(' + crossOriginDenialProbe.toString() + ')(' + JSON.stringify('http://127.0.0.1:' + req.socket.localPort + '/xdeny-child') + ')<\/script></body>');
       return;
     }
     if (url.pathname === '/xhist') {
-      // history.pushState / replaceState and the URLs they refuse. A document may be rewritten to a URL that differs from its
-      // own only in path, query and fragment; any other scheme, user info, host or port is a SecurityError with the browser's
-      // sentence. Cloudflare's widget pushes a foreign URL to see that it is refused.
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(`<!doctype html><title>history</title><body><script>
         var out = {};
@@ -2857,9 +2772,6 @@ function createTargetServer(requests, pendingResponses) {
       return;
     }
     if (url.pathname === '/xnf' || url.pathname === '/xnf-anchor' || url.pathname === '/xnf-challenge') {
-      // The shape of reCAPTCHA: a page holds two frames of another site, named; the second reads the first through its
-      // parent — `parent['anchor']` — and the page reads a frame inside the first through its window. The parent is
-      // cross-origin to the reader, and a cross-origin window still answers for the names of its child frames.
       const other = `http://127.0.0.1:${req.socket.localPort}`;
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       const show = `var show = function (fn) { try { var v = fn(); return v === undefined ? 'undefined' : (typeof v === 'object' && v !== null) ? (v === window ? 'self' : 'object') : String(v); } catch (e) { return 'threw:' + e.name; } };
@@ -2914,9 +2826,6 @@ function createTargetServer(requests, pendingResponses) {
       return;
     }
     if (url.pathname === '/xtables') {
-      // A page that wraps the methods of Map, Set, WeakMap and WeakSet the way instrumentation does: a counter and the
-      // original are top-level variables, read inside the wrapper. Every argument, receiver and result is shown to a judge
-      // that knows what a page must never hold (a window or Location of the proxy, a string naming it).
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(`<!doctype html><title>tables</title><body><script>
         var calls = 0, seenProxy = [], origins = {};
@@ -2967,7 +2876,6 @@ function createTargetServer(requests, pendingResponses) {
       return;
     }
     if (url.pathname === '/xwinown') {
-      // A getter the page puts on its own window, as a native function: `Object.prototype.valueOf` returns its receiver.
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(`<!doctype html><title>own window</title><script>
         var out = {};
@@ -2989,17 +2897,12 @@ function createTargetServer(requests, pendingResponses) {
       return;
     }
     if (url.pathname === '/xempty') {
-      // An external script whose body is empty (an ad partner's user sync answers so): natively it runs as nothing.
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(`<!doctype html><title>empty</title><script>window.__errs = []; addEventListener('error', function (e) { __errs.push(String(e.message)); });</script>
         <script src="/xempty.js"></script><script>window.__xempty = { errors: __errs, after: 1 };</script>`);
       return;
     }
     if (url.pathname === '/xhelper') {
-      // The helpers rewritten code calls by name are handed the real global object (`__zp_get(globalThis, 'location')`,
-      // `__zp_this(this)`; an `on*` attribute's executor gets the handler's `this`, for `<body onmessage>` the window).
-      // Whoever answers for the name gets it. Every function an attack plants records whether it was handed a window
-      // other than the page's own. Each attack is its own script: one the rewriter refuses dies whole.
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(`<!doctype html><title>helpers</title><body><button id="xb">b</button><script>
         window.__xh = { leaks: [], ran: [] };
@@ -3044,10 +2947,7 @@ function createTargetServer(requests, pendingResponses) {
       return;
     }
     if (url.pathname.startsWith('/xfp')) {
-      // What a frame reads of its feature policy and its permissions: top, a same-origin frame, a cross-origin frame without
-      // and with `allow`. A cross-origin frame is refused notifications at once (asked only there: elsewhere it prompts).
-      // `unload` is left out: its default in a cross-origin frame is the browser's field-trial state — a user's Chrome
-      // allows it there, the launched headless one does not; the proxy reads as the user's (measured 2026-10-13).
+      // Excludes unload because its cross-origin default depends on Chrome field-trial state in headless vs user profiles.
       const other = `http://127.0.0.1:${req.socket.localPort}`;
       const probe = `<script>(async function () {
         var cross = location.host.indexOf('127.0.0.1') === 0, out = { where: location.pathname };
@@ -3075,9 +2975,6 @@ function createTargetServer(requests, pendingResponses) {
       return;
     }
     if (url.pathname.startsWith('/xch')) {
-      // Client hints as Chrome negotiates them: the document asks with Accept-CH + Critical-CH (Cloudflare's list), is asked
-      // for again with them, its own sub-requests carry them and a third party's do not — each request's header names in
-      // wire order. Plus a fetch/XHR to a port that refuses the connection.
       const seen = globalThis.__chSeen || (globalThis.__chSeen = new Map());
       const run = url.searchParams.get('run') || '';
       const other = `http://127.0.0.1:${req.socket.localPort}`;
@@ -3086,10 +2983,7 @@ function createTargetServer(requests, pendingResponses) {
         res.end(JSON.stringify(seen.get(run) || []));
         return;
       }
-      // The transport places these itself on HTTP/1.1 (`priority` is HTTP/2's; Chrome sends none on HTTP/1.1). A
-      // puppeteer-launched Chrome sets `accept-language` among the renderer's headers, so it moves with them; a user's
-      // Chrome adds it in the network stack, last (measured) — it is left out of the comparison. So is `cookie`: whether
-      // there is one depends on what the suite ran before in that browser (its place is the kernel's `header_order` test's).
+      // Omit HTTP/2-only priority, renderer-ordered accept-language in Puppeteer, and session-dependent cookie headers.
       const names = []; const hints = {};
       for (let i = 0; i < req.rawHeaders.length; i += 2) {
         const k = req.rawHeaders[i].toLowerCase();
@@ -3125,8 +3019,6 @@ function createTargetServer(requests, pendingResponses) {
       return;
     }
     if (url.pathname.startsWith('/xref')) {
-      // What a frame's `document.referrer` is, and what Referer its request carried: the embedder's Referrer-Policy header,
-      // a `<meta name=referrer>`, a frame's `referrerpolicy` attribute, and a document reached by navigating.
       const seen = globalThis.__refSeen || (globalThis.__refSeen = new Map());
       const run = url.searchParams.get('run') || '';
       const other = `http://127.0.0.1:${req.socket.localPort}`;
@@ -3148,19 +3040,14 @@ function createTargetServer(requests, pendingResponses) {
         res.end(JSON.stringify(out));
         return;
       }
-      // the embedder's policy as a header: same-origin keeps the URL in-site and sends nothing across
       if (url.pathname === '/xref') {
         return html(collect(4) + child('cross', other) + child('same') + child('crossUnsafe', other, 'referrerpolicy="unsafe-url"')
           + child('sameNone', '', 'referrerpolicy="no-referrer"'), { 'Referrer-Policy': 'same-origin' });
       }
-      // the policy declared in markup
       if (url.pathname === '/xref-meta') return html(`<meta name="referrer" content="origin">` + collect(2) + child('metaSame') + child('metaCross', other));
-      // a document reached from another one: its referrer is the page it left
       if (url.pathname === '/xref-nav') return html(`<script>location.href = '/xref-landing?run=${run}&from=nav';</script>`);
     }
     if (url.pathname === '/xfm2' || url.pathname === '/xfm2-r' || url.pathname === '/xfm2-log') {
-      // Fetch Metadata of element loads: what the target server reads for an image, a script, a stylesheet, a no-cors fetch,
-      // a beacon and a worker, same-origin and cross-site.
       const seen = globalThis.__fmSeen || (globalThis.__fmSeen = new Map());
       const run = url.searchParams.get('run') || '';
       if (url.pathname === '/xfm2-r') {
@@ -3216,8 +3103,6 @@ function createTargetServer(requests, pendingResponses) {
       return;
     }
     if (url.pathname === '/xcoep' || url.pathname === '/xcoep-worker.js') {
-      // A cross-origin-isolated page (COEP require-corp + COOP same-origin) that starts workers — what Cloudflare's challenge
-      // widget does. A worker under such an owner must come with a compatible COEP of its own (a blob worker inherits it).
       const isolation = { 'Cross-Origin-Embedder-Policy': 'require-corp', 'Cross-Origin-Opener-Policy': 'same-origin', 'Cache-Control': 'no-store' };
       if (url.pathname === '/xcoep-worker.js') {
         res.writeHead(200, { ...isolation, 'Content-Type': 'text/javascript' });
@@ -3240,7 +3125,6 @@ function createTargetServer(requests, pendingResponses) {
       return;
     }
     if (url.pathname === '/xstack') {
-      // Error.stack taken inside an INLINE script (the proxy runs it through `eval`), in the shapes a VM reads.
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(`<!doctype html><title>stack</title><body><script>
         var site = function (st) { return String(st).split('\\n').slice(1).map(function (l) { return l.replace(/:\\d+:\\d+/g, ':L:C').trim(); }); };
@@ -3258,7 +3142,6 @@ function createTargetServer(requests, pendingResponses) {
       return;
     }
     if (url.pathname === '/xthis' || url.pathname === '/xthis.js' || url.pathname === '/xthis-worker.js') {
-      // `Error.prepareStackTrace` as page code sees it: absent until assigned, a plain data property after, gone on delete.
       const stackProbe = `(function () {
         var view = function () {
           var d = Object.getOwnPropertyDescriptor(Error, 'prepareStackTrace');
@@ -3284,7 +3167,6 @@ function createTargetServer(requests, pendingResponses) {
         res.end(`postMessage(${stackProbe});`);
         return;
       }
-      // What a plain call's `this` is, and how `window` / `location` describe themselves — read by inline and external code.
       const probe = `(function () {
         var r = {};
         r.plain = (function () { return this === window; })();
@@ -3318,7 +3200,6 @@ function createTargetServer(requests, pendingResponses) {
       return;
     }
     if (url.pathname === '/xrawtext') {
-      // innerHTML on an element whose content is text: React Helmet puts a head script in with script.innerHTML = code.
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(`<!doctype html><title>rawtext</title><body><script>
         window.__xrawtext = null;
@@ -3343,7 +3224,6 @@ function createTargetServer(requests, pendingResponses) {
       return;
     }
     if (url.pathname.startsWith('/xhls/')) {
-      // A master playlist whose URIs are relative and absolute (another origin), a media playlist with a key, and TS-ish segments.
       xckSeen.set('hls:' + url.pathname, 'hit');
       const host = String(req.headers.host || '');
       const otherHost = host.startsWith('localhost') ? host.replace('localhost', '127.0.0.1') : host.replace('127.0.0.1', 'localhost');
@@ -3381,7 +3261,6 @@ function createTargetServer(requests, pendingResponses) {
       return;
     }
     if (url.pathname === '/xdocparse') {
-      // A complete document keeps its html/head/body tags (and what is on them) wherever the page parses it.
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(`<!doctype html><title>docparse</title><body><script>
         window.__xdocparse = null;
@@ -3413,7 +3292,6 @@ function createTargetServer(requests, pendingResponses) {
       return;
     }
     if (url.pathname === '/xdestr') {
-      // Dangerous globals that are only READ inside an assignment target: a member's receiver, a computed key, a default.
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(`<!doctype html><title>destr</title><body><script>
         window.__xdestr = null;
@@ -3438,7 +3316,6 @@ function createTargetServer(requests, pendingResponses) {
       return;
     }
     if (url.pathname === '/xnullish') {
-      // The rewritten member operations on a null or undefined receiver throw what the engine throws.
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(`<!doctype html><title>nullish</title><body><script>
         window.__xnullish = null;
@@ -3520,14 +3397,12 @@ function createTargetServer(requests, pendingResponses) {
       return;
     }
     if (url.pathname === '/xsdjs') {
-      // A srcdoc frame with an inline script, an external one and an inline one that needs the external one.
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end('<!doctype html><title>srcdoc scripts</title><body><script>' +
         'window.__xsdjs = null;' +
         'var f = document.createElement("iframe");' +
         'f.srcdoc = "<body><script>window.__inline = 1; window.__body = document.body ? document.body.nodeName + \':\' + document.readyState : \'null\';</" + "script><script src=\'/xsdjs-lib.js\'></" + "script><script>window.__after = window.__lib;</" + "script><script type=module src=\'/xsdjs-mod.js\'></" + "script><script>var d = document.createElement(\'script\'); d.src = \'/xsdjs-dyn.js\'; document.head.appendChild(d);</" + "script>";' +
         'document.body.appendChild(f);' +
-        // a frame whose first and only script request is one a script creates (nothing has bound the frame yet)
         'var g = document.createElement("iframe");' +
         'g.srcdoc = "<body><script>var d = document.createElement(\'script\'); d.src = \'/xsdjs-dyn2.js\'; document.head.appendChild(d);</" + "script>";' +
         'document.body.appendChild(g);' +
@@ -3536,7 +3411,6 @@ function createTargetServer(requests, pendingResponses) {
       return;
     }
     if (url.pathname === '/xclen-echo') {
-      // Records how a request's body was framed: its Content-Length and Transfer-Encoding, and what arrived.
       const tag = url.searchParams.get('tag') || '';
       const chunks = [];
       req.on('data', d => chunks.push(d));
@@ -3557,7 +3431,6 @@ function createTargetServer(requests, pendingResponses) {
       return;
     }
     if (url.pathname === '/xclen') {
-      // The same requests from a page — natively and through the proxy — and how the server saw their bodies framed.
       const run = url.searchParams.get('run');
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(`<!doctype html><title>content-length</title><body><script>
@@ -3595,7 +3468,6 @@ function createTargetServer(requests, pendingResponses) {
       return;
     }
     if (url.pathname === '/xwdyn') {
-      // An ad frame written with document.write whose script loads another script (from another origin) by creating an element.
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end('<!doctype html><title>written frame, dynamic script</title><body><script>' +
         'window.__xwdyn = null;' +
@@ -3605,22 +3477,17 @@ function createTargetServer(requests, pendingResponses) {
         'd.write("<body><script>window.__loads = 0; var s = document.createElement(\'script\'); s.onload = function () { window.__loads++; }; s.onerror = function () { window.__errors = 1; }; s.src = \'" + other + "/xwdyn.js\'; document.head.appendChild(s);</" + "script>");' +
         'd.close();' +
         'var fw = f.contentWindow;' +
-        // a script the PARENT creates in the frame's document — inserted, connected, and observed by the parent's membrane
         'var ps = f.contentDocument.createElement("script"); ps.onload = function () { window.__ploads = (window.__ploads || 0) + 1; }; f.contentDocument.head.appendChild(ps); ps.src = other + "/xwdyn.js";' +
-        // a hidden blank frame whose whole document is written markup with an external script (an ad-verification vendor's tag)
         'var g = document.createElement("iframe"); g.style.display = "none"; document.body.appendChild(g);' +
         'var gd = g.contentDocument; gd.open(); gd.write("<html><head><script src=\\"" + other + "/xwdyn.js\\"></" + "script></head><body></body></html>"); gd.close();' +
-        // the same, made by a creative inside a srcdoc ad frame (it has a membrane of its own): Geoedge's tag on NYT
         'function inner() {' +
         ' function hidden() { var h = document.createElement("iframe"); h.style.display = "none"; document.body.appendChild(h); return h; }' +
         ' var a = hidden(); var d = a.contentDocument; d.open(); d.write("<html><head><script src=\\"" + OTHER + "/xwdyn.js\\"></" + "script></head><body></body></html>"); d.close();' +
-        // the DOM way: a script created in the hidden frame, its source set before and after it is inserted
         ' var b = hidden(); var sb = b.contentDocument.createElement("script"); sb.src = OTHER + "/xwdyn.js"; b.contentDocument.head.appendChild(sb);' +
         ' var c = hidden(); var sc = c.contentDocument.createElement("script"); c.contentDocument.head.appendChild(sc); sc.src = OTHER + "/xwdyn.js";' +
         ' setTimeout(function () { window.__nestedRan = [a.contentWindow.__wdyn, b.contentWindow.__wdyn, c.contentWindow.__wdyn].join(); }, 3000);' +
         ' }' +
         'var sd = document.createElement("iframe"); sd.srcdoc = "<body><script>var OTHER=" + JSON.stringify(other) + ";try{(" + inner.toString() + ")();}catch(e){window.__nestedErr=String(e.stack).slice(0,300)}</" + "script>"; document.body.appendChild(sd);' +
-        // a wedged main thread stops the heartbeat
         'window.__ticks = 0; var hb = setInterval(function () { window.__ticks++; }, 50); setTimeout(function () { clearInterval(hb); }, 4500);' +
         'new fw.Image().src = other + "/xwdyn-pix?tag=new-image";' +
         'var im = f.contentDocument.createElement("img"); im.src = other + "/xwdyn-pix?tag=unattached";' +
@@ -3644,14 +3511,12 @@ function createTargetServer(requests, pendingResponses) {
       return;
     }
     if (url.pathname === '/xscr-frame') {
-      // A document that asks for a script and an image; whether each is requested depends on the frame's sandbox.
       const q = 'run=' + url.searchParams.get('run') + '&tag=' + url.searchParams.get('tag');
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end('<!doctype html><title>f</title><body><script src="/xscr-probe.js?' + q + '-script"></script><img src="/xscr-probe.js?' + q + '-img">');
       return;
     }
     if (url.pathname === '/xscr') {
-      // Which requests a frame's document makes under each sandbox: scripts that may not run are still requested.
       const run = url.searchParams.get('run');
       const variants = [['m-empty', 'sandbox=""'], ['m-same', 'sandbox="allow-same-origin"'], ['m-forms', 'sandbox="allow-forms"'], ['m-scripts', 'sandbox="allow-scripts"'], ['m-scripts-same', 'sandbox="allow-scripts allow-same-origin"'], ['m-none', '']];
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
@@ -3665,7 +3530,6 @@ function createTargetServer(requests, pendingResponses) {
       return;
     }
     if (url.pathname === '/xcorsel-child') {
-      // A sandboxed document without allow-same-origin: its origin is opaque, so its crossorigin images say `Origin: null`.
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(`<!doctype html><title>opaque</title><body><script>
         (async function () {
@@ -3692,9 +3556,6 @@ function createTargetServer(requests, pendingResponses) {
       return;
     }
     if (url.pathname === '/xcorsel') {
-      // The same rules for what the page does not fetch() itself: images, scripts, modules, stylesheets and fonts
-      // that ask for CORS (crossorigin, module scripts, FontFace and @font-face), the credentials they ask for,
-      // redirects, a srcdoc frame and an opaque frame.
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(`<!doctype html><title>CORS elements</title><body><script>
         window.__xcorsel = null;
@@ -3857,7 +3718,6 @@ function createTargetServer(requests, pendingResponses) {
       return;
     }
     if (url.pathname === '/xpopop-popup') {
-      // A popup of a sandboxed frame says what it is.
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end('<!doctype html><title>popup</title><script>' +
         'var R = {};' +
@@ -3925,8 +3785,6 @@ function createTargetServer(requests, pendingResponses) {
       return;
     }
     if (url.pathname === '/xsbchild') {
-      // A sandboxed document (no allow-same-origin) tells what it can touch and what it can reach. One
-      // page for every way of making the frame; ?egress=1 also tries the network.
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(`<!doctype html><title>sandbox child</title><body><script>
         // ?tamper=1: the frame first redefines its own window's \`frameElement\` — natively that changes nothing of the
@@ -4037,8 +3895,6 @@ function createTargetServer(requests, pendingResponses) {
       return;
     }
     if (url.pathname === '/xsandbox') {
-      // Sandboxed frames, made every way a page can make one. Each reports from inside; the page
-      // reads what it can of them. Values are the fixture's own strings.
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(`<!doctype html><title>Sandboxed frames</title><body><script>
         window.__xsandbox = null;
@@ -4122,8 +3978,6 @@ function createTargetServer(requests, pendingResponses) {
       return;
     }
     if (url.pathname === '/xsetcookie') {
-      // Answers with a Set-Cookie for the name in ?n=: ?httponly=1, ?maxage=0 and
-      // ?redirect=1 (the cookie rides on the redirect, the final page sets none).
       const n = url.searchParams.get('n') || 'xsrf';
       const attrs = 'Path=/' + (url.searchParams.get('httponly') ? '; HttpOnly' : '') + (url.searchParams.get('maxage') !== null ? '; Max-Age=' + url.searchParams.get('maxage') : '');
       if (url.searchParams.get('redirect')) {
@@ -4141,9 +3995,6 @@ function createTargetServer(requests, pendingResponses) {
       return;
     }
     if (url.pathname === '/xcookie') {
-      // Cookies a SERVER sets in answer to the page's own fetch / XHR: a script reads
-      // them (an anti-forgery token, a session marker) the moment the promise
-      // resolves. Cookie names are the fixture's own; nothing else is read.
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(`<!doctype html><title>Server-set cookies</title><body><script>
         window.__xcookie = null;
@@ -4186,7 +4037,6 @@ function createTargetServer(requests, pendingResponses) {
       return;
     }
     if (url.pathname === '/xstore-child') {
-      // A frame that writes storage when asked and reports every storage event it hears.
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end('<!doctype html><title>store child</title><script>' +
         'var ev = [];' +
@@ -4203,10 +4053,6 @@ function createTargetServer(requests, pendingResponses) {
       return;
     }
     if (url.pathname === '/xstore') {
-      // Storage events across sites. Every proxied site shares one physical origin,
-      // so the browser's own storage event reaches every frame of every site — with
-      // the physical (prefixed) key and the other site's value. Values here are the
-      // fixture's own keys and strings, nothing else.
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(`<!doctype html><title>Storage events</title><body><script>
         window.__xstore = null;
@@ -4268,10 +4114,7 @@ function createTargetServer(requests, pendingResponses) {
       return;
     }
     if (url.pathname === '/frame-loads') {
-      // Frame load events and joint history. The proxy parks a frame on a blank
-      // page while its route is prepared; the page must still see ONE load per
-      // navigation and ONE history entry per change, as natively (2026-10-01:
-      // an inline onload on a parsed iframe ran three times).
+      // Parking a frame on about:blank while preparing its route must not emit extra load events or history entries.
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(`<!doctype html><title>Frame Loads</title><body>
       <iframe id="s1" src="/frame-plain" onload="window.__statOnload = (window.__statOnload || 0) + 1"></iframe>
@@ -4317,23 +4160,18 @@ function createTargetServer(requests, pendingResponses) {
       return;
     }
     if (url.pathname === '/frame-outer') {
-      // A frame holding a frame: the inner link targets _parent, so the OUTER
-      // frame navigates — never the page around it.
+      // Inner link targets _parent so the outer frame navigates instead of the top page.
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end('<!doctype html><title>fo</title><iframe srcdoc="<a id=up href=\'/frame-plain\' target=_parent>up</a>"></iframe>');
       return;
     }
     if (url.pathname === '/frame-plain') {
-      // None of html/head/body/script: the streaming transform had no anchor for
-      // the prelude, so this document ran with no membrane at all.
+      // Document without html/head/body/script tags still receives prelude injection.
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end('<!doctype html><title>fp</title><p>plain</p>');
       return;
     }
     if (url.pathname === '/surface-probes') {
-      // T1: 미검증 표면 실측 — transformer 잔여(importmap/speculationrules/
-      // shadow DOM/SVG), transferable 누출, 명명 프레임 접근, 레거시 접근자,
-      // 에러 이벤트 인자, a.ping, document.write 두 번째 문서, iframe 잔여.
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(`<!doctype html><title>Surface Probes</title><head>
       <script type="importmap">{"imports":{"x-mod":"/dyn-mod.js"}}<\/script>
@@ -4347,10 +4185,10 @@ function createTargetServer(requests, pendingResponses) {
         window.__surfaceErrs = [];
         window.addEventListener('error', e => { window.__surfaceErrs.push('err:' + e.filename + '|' + e.lineno + '|' + e.message); });
         window.addEventListener('unhandledrejection', e => { window.__surfaceErrs.push('rej:' + String(e.reason && e.reason.stack || e.reason)); });
-        let ZXC7 = 7;   // cross-script lexical — 다음 스크립트에서 보이는가
-        var ZXC8 = 8;   // cross-script var — 전역 프로퍼티로 지속되어야 함
-        const ZXC9 = 9; // cross-script const — 지속 + 쓰기 TypeError
-        class ZXC10 {}  // cross-script class — 지속
+        let ZXC7 = 7;   // cross-script lexical binding visible to subsequent scripts
+        var ZXC8 = 8;   // cross-script var binding persisted on the global object
+        const ZXC9 = 9; // cross-script const binding persisted and read-only
+        class ZXC10 {}  // cross-script class binding persisted across scripts
       <\/script>
       <script>
         (async () => {
@@ -4359,7 +4197,7 @@ function createTargetServer(requests, pendingResponses) {
           const tick = () => new Promise(r => setTimeout(r, 30));
           const leaked = s => s.includes('__zp_') || s.includes('/zp/api') || s.includes('proxy.localhost') || s.includes('worker-script');
 
-          // ── T1-1: transformer 잔여 ──
+          // Transformer surface probes.
           await P('importmapText', () => {
             const t = document.querySelector('script[type=importmap]').textContent;
             return t.includes('/zp/') ? 'rewritten' : 'raw';
@@ -4383,7 +4221,7 @@ function createTargetServer(requests, pendingResponses) {
             return leaked(a || '') ? 'LEAK:' + a : 'clean:' + a;
           });
 
-          // ── T1-2: transferable/clone 누출 ──
+          // Transferable and structuredClone probes.
           await P('cloneLocation', () => {
             try { const c = structuredClone(location); return 'cloned:' + String(c && c.href || c); }
             catch (e) { return 'threw:' + e.name; }
@@ -4408,7 +4246,7 @@ function createTargetServer(requests, pendingResponses) {
             try { structuredClone(window); return 'cloned'; } catch (e) { return 'threw:' + e.name; }
           });
 
-          // ── T1-3: 명명/인덱스 프레임 접근 ──
+          // Named and indexed frame access probes.
           const nf = document.createElement('iframe');
           nf.name = 'nf'; nf.srcdoc = '<p>nfx</p>';
           document.body.appendChild(nf);
@@ -4440,7 +4278,7 @@ function createTargetServer(requests, pendingResponses) {
             return leaked(String(w.location.href)) ? 'LEAK:' + w.location.href : 'clean:' + w.location.href;
           });
 
-          // ── T1-4: 레거시 접근자 ──
+          // Legacy Object.prototype accessor probes.
           await P('defineGetterLoc', () => {
             try { window.__defineGetter__('location', () => 'fake'); return 'installed|href:' + location.href.slice(0, 40); }
             catch (e) { return 'threw:' + e.name; }
@@ -4460,7 +4298,7 @@ function createTargetServer(requests, pendingResponses) {
             return leaked(String(s)) ? 'LEAK' : 'fn';
           });
 
-          // ── T1-5: 에러 인자/ownKeys ──
+          // Error event argument and ownKeys hygiene probes.
           await P('ownKeysLeak', () => {
             // Harness bindings Puppeteer injects into the page it drives are not ours.
             const ks = Object.getOwnPropertyNames(window).filter(k => !/^(__aria|puppeteer)/.test(k));
@@ -4473,8 +4311,8 @@ function createTargetServer(requests, pendingResponses) {
           await new Promise(r => setTimeout(r, 120));
 
           // ── T1-6: a.ping + import.meta.resolve ──
-          // ping setter 는 값을 WeakMap 에 삼키고 실속성을 지운다 — 클릭할
-          // 필요 없이 속성 상태로 검증한다 (클릭은 페이지를 네비게이션시킨다).
+          // The ping setter stashes the value in a WeakMap and strips the live
+          // attribute; verify via attribute state without triggering navigation.
           await P('anchorPing', () => {
             const a = document.createElement('a');
             a.href = '/ping-dest';
@@ -4486,7 +4324,7 @@ function createTargetServer(requests, pendingResponses) {
             return 'attr:' + attr + '|marker:' + (marker || 'none') + '|prop:' + prop;
           });
 
-          // ── T1-7: document.write 두 번째 문서 ──
+          // Second document.write document execution under virtual location.
           await P('docWriteFrame', async () => {
             const f = document.createElement('iframe');
             document.body.appendChild(f);
@@ -4500,7 +4338,7 @@ function createTargetServer(requests, pendingResponses) {
             return leaked(String(v)) ? 'LEAK:' + v : 'clean:' + v;
           });
 
-          // ── T1-8: iframe 잔여 ──
+          // Additional iframe containment probes.
           await P('iframeCspAttr', () => {
             const f = document.createElement('iframe');
             f.setAttribute('csp', "default-src 'none'");
@@ -4515,7 +4353,7 @@ function createTargetServer(requests, pendingResponses) {
             document.body.appendChild(f);
             return 'set';
           });
-          // ── 명명 타깃 내비게이션 (2026-10-01) ──
+          // Named target navigation confinement probes.
           // A named target used to load the '?via=' LAUNCHER into the proxied
           // frame, which never reached the target. Reading only the frame's URL
           // passed anyway — 'via=' decodes to the target — so every probe here
@@ -4694,7 +4532,7 @@ function createTargetServer(requests, pendingResponses) {
             const v = window.__childSW;
             return v === undefined ? 'silent' : (leaked(String(v)) ? 'LEAK:' + v : 'clean:' + v);
           });
-          // ── T2-1: with(obj) 의미 — own dangerous name 이 obj 우선 ──
+          // with(obj) scope resolution: own properties on obj take precedence over virtualized globals.
           await P('withShadow', () => {
             const fake = { href: 'fake-marker' };
             let r; with ({ location: fake }) r = location;
@@ -4705,20 +4543,20 @@ function createTargetServer(requests, pendingResponses) {
             return r ? 'identity-ok' : 'identity-broken';
           });
           await P('withDocWrite', () => {
-            // document.location = '#frag' — PutForwards: 해시만 바뀌어야 한다.
+            // Assigning document.location = '#frag' forwards to location and updates only the hash.
             let r;
             with (document) { location = '#withfrag'; }
             r = location.hash === '#withfrag' ? 'forwarded' : 'swallowed:' + location.hash;
             return r;
           });
           await P('withEvalScope', () => {
-            // eval 은 with 오브젝트를 못 본다 — 핀 divergence.
+            // Direct eval inside with(obj) does not observe the with-object bindings (pinned divergence).
             let r; with ({ location: 'WITHOBJ' }) r = eval('typeof location === "string" ? location : "virtual"');
             return r;
           });
-          // ── T2-2: 스코프 모델 — 선언이 있으면 로컬 바인딩 우선 ──
+          // Scope resolution: local declarations shadow virtualized globals.
           await P('scopeHoistVar', () => {
-            // var location 이 함수 끝에 선언돼도 호이스트 → 첫 읽기는 로컬 undefined.
+            // Hoisted var location resolves to local undefined before initialization.
             const f = function () { let x; try { x = location.href; var location; return 'read:' + x; } catch (e) { return 'threw:' + e.name; } };
             return f();
           });
@@ -4732,18 +4570,18 @@ function createTargetServer(requests, pendingResponses) {
             const f = function ({ location }) { return location; };
             return f({ location: 'dp' }) === 'dp' ? 'bound' : 'leaked';
           });
-          // cross-script 바인딩 — 앞 스크립트의 let/var 지속성
+          // Cross-script binding persistence for top-level let, var, const, and class.
           await P('crossScriptLet', () => typeof ZXC7);
           await P('crossScriptVar', () => typeof ZXC8 + ':' + ZXC8);
-          // R1: let/const/class 도 공유 전역 렉시컬 환경에 지속된다.
+          // Top-level let, const, and class bindings persist in the shared global lexical environment.
           await P('crossScriptConst', () => ZXC9);
           await P('crossScriptClass', () => typeof ZXC10);
           await P('crossScriptLetWrite', () => { ZXC7 = 42; return ZXC7; });
           await P('crossScriptConstWrite', () => { ZXC9 = 1; return 'no-throw'; });
           await P('lexRedeclare', () => __surfaceErrs.filter(e => e.includes('has already been declared')).length);
-          // direct eval 이 호출자 스코프의 로컬을 읽는가 (ERRATA: global만)
+          // Direct eval reads bindings from the caller function scope.
           await P('evalCallerScope', () => { const lc = 'LOCAL'; return eval('typeof lc === "string" ? lc : "global-only"'); });
-          // R2 — direct eval 호출자 스코프 parity.
+          // Direct eval caller scope parity.
           await P('evalCallerWrite', () => { let w = 1; eval('w = 7'); return w; });
           await P('evalCallerVar', () => { const g = function () { var v = 'VV'; return eval('v'); }; return g(); });
           await P('evalCallerConst', () => { const g = function () { const c = 'C'; try { eval('c = 9'); return 'no-throw:' + c; } catch (e) { return e.name + ':' + c; } }; return g(); });
@@ -4752,20 +4590,20 @@ function createTargetServer(requests, pendingResponses) {
           await P('evalNonString', () => JSON.stringify([eval(42), eval(null), eval({}) instanceof Object, eval()]));
           await P('evalVirtual', () => { const g = function () { const location = 'LOCALLOC'; return eval('location'); }; return g(); });
           await P('evalVirtualGlobal', () => eval('typeof location === "string" ? location : (location && location.hostname)'));
-          // indirect 형태는 여전히 전역 — 로컬 lc 가 보이면 안 된다.
+          // Indirect eval executes in global scope and must not read caller local bindings.
           await P('evalIndirectNoScope', () => { const lc = 'LOCAL'; const e = eval; return e('typeof lc === "string" ? lc : "global-only"'); });
           await P('evalOptionalNoScope', () => { const lc = 'LOCAL'; return eval?.('typeof lc === "string" ? lc : "global-only"'); });
           await P('evalShadowed', () => { const g = function () { const eval = s => 'shadow:' + s; return eval('x'); }; return g(); });
-          // 함수 내부 sloppy Annex B / labeled 함수 선언 — strict 의미로 처리되어
-          // 참조가 virtual 로 간다 (네이티브 sloppy 는 'function') — pinned divergence.
+          // Sloppy-mode block-scoped and labeled function declarations follow strict
+          // lexical semantics under the rewriter (pinned divergence from Annex B).
           await P('annexBSloppy', () => { const g = function () { if (1) { function location() { return 'fn'; } } return typeof location; }; return g(); });
           await P('labeledFnDecl', () => { const g = function () { lbl: function location() {} return typeof location; }; return g(); });
-          // R3: sloppy eval 의 var 는 호출자 varEnv 에 생긴다 — 'number'.
+          // Sloppy direct eval hoists var declarations into the caller var environment.
           await P('evalVarLocal', () => { const g = function () { eval('var history = 1'); return typeof history; }; return g(); });
-          // strict-mode with — 리라이터가 with 를 보존하므로 네이티브와
-          // 동일하게 파스 시점 SyntaxError (silent rewrite 면 'no-error').
+          // Strict-mode with statements are preserved by the rewriter so the engine
+          // throws a parse-time SyntaxError matching native behavior.
           await P('strictWith', () => { try { new Function('"use strict"; with({}){}'); return 'no-error'; } catch (e) { return e.name; } });
-          // ── T2-8: CSS 잔여 — sheet.href 디프록시 + insertRule url() ──
+          // CSS stylesheet href deproxying and insertRule url() rewriting.
           await P('sheetHref', () => {
             const s = document.styleSheets[0];
             return s ? String(s.href) : 'no-sheet';
@@ -4773,9 +4611,9 @@ function createTargetServer(requests, pendingResponses) {
           await P('insertRuleUrl', async () => {
             const sh = new CSSStyleSheet();
             sh.replaceSync('#zpcssx{background:url(http://css-leak.example/a.png)}');
-            // 매칭 엘리먼트가 있어야 브라우저가 실제 fetch 를 낸다 — wire 로
-            // 프록시 경유 여부를 검증한다 (read-back 만으로는 미리라이트와
-            // 구분이 안 된다).
+            // Attach a matching element so the browser issues an actual fetch,
+            // verifying wire-level proxy routing rather than read-back alone.
+            //
             const d = document.createElement('div'); d.id = 'zpcssx';
             document.body.appendChild(d);
             document.adoptedStyleSheets = [...document.adoptedStyleSheets, sh];
@@ -4794,7 +4632,7 @@ function createTargetServer(requests, pendingResponses) {
             d.remove();
             return got;
           });
-          // ── T3-1: sealing — 외부 스킴/다이얼로그/동적 base ──
+          // External scheme, modal dialog stub, and dynamic <base> sealing.
           await P('mailtoNav', () => {
             try { location.assign('mailto:probe@example.invalid'); return 'no-throw'; }
             catch (e) { return 'e:' + (e && e.name || e); }
@@ -4806,7 +4644,7 @@ function createTargetServer(requests, pendingResponses) {
           await P('webAuthn', async () => {
             if (typeof PublicKeyCredential !== 'function' || !navigator.credentials) return 'absent';
             try {
-              // headless 에서 authenticator 프롬프트가 멈출 수 있어 race 로 묶는다.
+              // Bound with Promise.race in case headless Chrome stalls on the authenticator prompt.
               const r = await Promise.race([
                 navigator.credentials.create({ publicKey: {
                   challenge: new Uint8Array(32), rp: { name: 'x' },
@@ -4836,7 +4674,7 @@ function createTargetServer(requests, pendingResponses) {
             a.setAttribute('href', '/rel-x');
             return a.getAttribute('href');
           });
-          // ── T4-1: 지문 잔여 표면 ──
+          // Fingerprint and residual surface probes.
           await P('consoleString', () => String(location));
           await P('perfNavEntry', () => {
             const e = performance.getEntriesByType('navigation')[0];
@@ -4857,20 +4695,20 @@ function createTargetServer(requests, pendingResponses) {
             try { navigator.registerProtocolHandler('web+zptest', 'http://localhost/x?u=%s'); return 'ok'; }
             catch (e) { return 'e:' + (e && e.name || e); }
           });
-          // E4: 가상 오리진과 같은 URL 은 네이티브 검증을 통과한다 — 등록은
-          // 브라우저 프롬프트에 프록시 오리진을 노출하므로 silent-success.
+          // Same-origin virtual URLs pass validation and resolve silently without
+          // exposing the proxy origin in a browser protocol-handler prompt.
           await P('registerPHSameOrigin', () => {
             if (typeof navigator.registerProtocolHandler !== 'function') return 'absent';
             try { navigator.registerProtocolHandler('web+zptest', location.origin + '/x?u=%s'); return 'ok'; }
             catch (e) { return 'e:' + (e && e.name || e); }
           });
-          // ── P0: 미감사 표면 — ShadowRealm/credentials/wasm/locks ──
+          // ShadowRealm, CredentialsContainer, WebAssembly streaming, and Web Locks probes.
           await P('shadowRealmEval', () => {
             if (typeof ShadowRealm !== 'function') return 'absent';
             try {
               const r = new ShadowRealm();
-              // evaluate 내부에서 가상 location 을 건드릴 수 있는지 — 리라이트
-              // 우회 여부가 핵심 (그냥 1+1 이 아니라 탈출 경로 실측).
+              // Verify whether ShadowRealm.prototype.evaluate can access virtual
+              // location without going through the rewriter.
               const v = r.evaluate('typeof location');
               return 'evaluated:' + v;
             } catch (e) { return 'e:' + (e && e.name || e); }
@@ -4913,7 +4751,7 @@ function createTargetServer(requests, pendingResponses) {
               return 'got:' + r;
             } catch (e) { return 'e:' + (e && e.name || e); }
           });
-          // ── P4–P13: 가상 표면 감사 항목 ──
+          // Virtualized Window and Navigator surface audit probes.
           await P('secureCtx', () => String(self.isSecureContext));
           await P('webkitURLAlias', () => typeof webkitURL === 'function' ? new webkitURL('/wk-page', location.href).href : 'absent:' + typeof webkitURL);
           await P('webkitIDB', () => typeof webkitIndexedDB !== 'undefined' && webkitIndexedDB === indexedDB ? 'alias' : 'not-alias:' + typeof webkitIndexedDB);
@@ -4945,10 +4783,10 @@ function createTargetServer(requests, pendingResponses) {
             el.remove();
             return 'ctor:' + sameCtor + '|up:' + upgraded + '|names:' + names + '|qs:' + (found === el) + '|tag:' + byTag;
           });
-          // P11b: 파스된 요소의 업그레이드 — GitHub catalyst 패턴 (2026-09-29).
-          // define 전에 잡아 둔 요소가 그 자리에서 업그레이드되고(정체성 유지),
-          // connectedCallback 의 closest(tag) 타깃 탐색·matches·CSS 타입 선택자가
-          // 네이티브처럼 맞아야 한다. 타깃별 접두 레지스트리는 넷 다 깼다.
+          // Custom element upgrade of parser-created elements: elements queried
+          // before customElements.define must upgrade in place (preserving node
+          // identity) and match tag-name selectors in closest(), matches(), and CSS.
+          //
           await P('customElUpgrade', async () => {
             if (typeof customElements === 'undefined') return 'absent';
             const host = document.createElement('div');
@@ -4975,7 +4813,7 @@ function createTargetServer(requests, pendingResponses) {
           });
           await P('paSurfaces', async () => [
             typeof self.sharedStorage,
-            // browsingTopics 는 존재해도 빈 배열로 게이트된다(비차단 + 무자료).
+            // document.browsingTopics resolves to an empty array without throwing.
             typeof document.browsingTopics === 'function' ? 'fn:' + JSON.stringify(await document.browsingTopics()) : typeof document.browsingTopics,
             typeof self.runAdAuction,
             typeof self.joinAdInterestGroup,
@@ -4983,8 +4821,8 @@ function createTargetServer(requests, pendingResponses) {
             typeof self.queryLocalFonts === 'function' ? 'fn-gated' : typeof self.queryLocalFonts
           ].join('|'));
           await P('setHTMLHook', () => {
-            // 기본 Sanitizer 가 img 를 지우므로 a[href] 로 검증 — .href 게터는
-            // 가상 베이스로 풀어야 변환이 먹힌 것.
+            // Default Sanitizer strips <img>, so test via <a href> where the
+            // .href getter resolves against the virtual base URL.
             if (typeof document.createElement('div').setHTML !== 'function') return 'absent';
             const d = document.createElement('div');
             d.setHTML('<a href="/set-html-probe.png">x</a>');
@@ -5023,14 +4861,11 @@ function createTargetServer(requests, pendingResponses) {
       return;
     }
     if (url.pathname === '/err-doc') {
-      // T1-9: 500 에러 문서도 transformer 가 적용돼야 한다 — 인라인 스크립트가
-      // 원문 그대로면 location 이 프록시를 찌른다.
       res.writeHead(500, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(`<!doctype html><title>err</title><body><script>window.__errDoc = String(location.href);<\/script></body>`);
       return;
     }
     if (url.pathname === '/trunc-doc') {
-      // 잘린 HTML — 닫힘 태그 없이 끊겨도 transformer 결과여야 한다.
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(`<!doctype html><title>trunc</title><body><script>window.__truncDoc = String(location.href);<\/script><div>`);
       return;
@@ -5627,12 +5462,7 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
       await context.close();
     }
   });
-  // The budget only caps a hang. It was 180 s while the matrix took ~110 s
-  // unloaded, so a busy machine (a toolchain upgrade running beside it took the
-  // suite 3-5x longer) failed the whole block on time alone. Raised again
-  // 2026-10-12: the block took 358-367 s of its 420 s, its native-vs-proxied
-  // tests each start a browser, and two runs in a row ran out on time with no
-  // test failing (an A/B of the slowed tests: 185 s vs 193 s — no regression).
+  // High timeout budget to avoid false timeouts when native-vs-proxied tests launch multiple browser instances under load.
   await t.test('E1 escape matrix and runtime integrations', { timeout: 720000 }, async t => {
   const page = await browser.newPage();
   t.after(async () => { await saveArtifacts('e1', page); await page.close(); });
@@ -5721,8 +5551,7 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     });
   }
   await t.test('favicon masking without upstream fetch', () => {
-  // R6 parity: getAttribute/Attr.value return the author-written literal;
-  // only the IDL property resolves to the absolute target URL.
+  // getAttribute and Attr.value return the author-written literal; only the IDL property resolves to the absolute target URL.
   assert.deepEqual(home.faviconProbe && {
     rel: home.faviconProbe.rel,
     href: home.faviconProbe.href,
@@ -6035,7 +5864,7 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
   });
   assert.equal(fingerprintMasking.canvasMask, 'function toDataURL() { [native code] }');
   assert.equal(fingerprintMasking.voicesMask, 'function getVoices() { [native code] }');
-  // Farbled, but the same way every time — a device renders one drawing one way.
+  // Farbling is deterministic per session for a given drawing.
   assert.equal(fingerprintMasking.sameDrawingSameBytes, true);
   assert.ok(fingerprintMasking.farbledChannels > 0, 'no channel farbled');
   assert.equal(fingerprintMasking.withinLowBit, true);
@@ -6289,9 +6118,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
         resolve(err && err.message || String(err));
       }
     });
-    // D5: blob:/data: 워커 소스는 재작성 후 실행된다 — 실행 자체는 네이티브
-    // parity, 검증 포인트는 워커의 location 이 blob:/data: 로 보이는 것
-    // (멤브레인 활성 + 가상 location) 과 코드가 돈다는 것이다.
     out.blobWorker = await new Promise(resolve => {
       let worker;
       try {
@@ -6323,7 +6149,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     out.virtualHash = loc.hash;
     out.virtualHref = loc.href;
     out.topOrigin = __zp_get(globalThis, 'top').location.origin;
-    // Dynamic compilation remains usable, but must never expose proxy location.
     out.functionEscape = (() => {
       try { const v = (new Function('return location.href'))(); return 'ran:' + String(v); }
       catch (err) { return 'blocked:' + (err && err.name || 'Error'); }
@@ -6336,7 +6161,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
       try { const Async = (async function(){}).constructor; const v = await new Async('return location.href')(); return 'ran:' + String(v); }
       catch (err) { return 'blocked:' + (err && err.name || 'Error'); }
     })();
-    // A3 hardening: <script src=blob:...> must be neutralised by setAttribute observer.
     out.scriptBlobSrc = await new Promise(resolve => {
       try {
         window.__scriptBlobRan = false;
@@ -6353,7 +6177,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
       } catch (err) { resolve('throw:' + (err && err.message || err)); }
     });
 
-    // Reflect.get(window, 'location') → must hit membrane, not native.
     out.reflectGetLocation = (() => {
       try {
         const loc = Reflect.get(__zp_get(globalThis, 'window'), 'location');
@@ -6361,8 +6184,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
       } catch (err) { return 'throw:' + (err && err.message || err); }
     })();
 
-    // top.location / parent.location / opener: all dangerous globals must
-    // route through the membrane (no clean realm access to native location).
     out.topLocation = (() => {
       try {
         const href = __zp_get(globalThis, 'top').location.href;
@@ -6382,18 +6203,13 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
       } catch (err) { return 'throw:' + (err && err.message || err); }
     })();
 
-    // D7 storage isolation: facade returns un-prefixed keys to target code,
-    // and writes land in the underlying proxy-origin store under a hashed
-    // prefix (so other targets cannot see them). We can only probe the
-    // facade from inside the target realm; verify it reports unprefixed
-    // keys via key(i) enumeration and consistent get/set/remove semantics.
+    // Storage facade exposes unprefixed keys while storing values under a per-target prefix on the proxy origin.
     out.storagePrefix = (() => {
       try {
         const w = __zp_get(globalThis, 'window');
         const ls = w.localStorage;
         ls.setItem('zp-probe', 'v1');
         const got = ls.getItem('zp-probe');
-        // Enumerate via key(i) and ensure the bare key appears, not a prefixed one.
         const keys = [];
         for (let i = 0; i < ls.length; i++) keys.push(ls.key(i));
         ls.removeItem('zp-probe');
@@ -6403,30 +6219,19 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
       } catch (err) { return 'throw:' + (err && err.message || err); }
     })();
 
-    // D7 document.domain virtualization: setter must be a no-op visible to
-    // native, but the virtual getter returns the target host.
     out.documentDomainSetter = (() => {
       try {
         const d = __zp_get(globalThis, 'document');
         const initial = d.domain;
         try { d.domain = 'evil.example'; } catch {}
         const after = d.domain;
-        // M109+ parity: setter 는 유효 suffix 에도 no-op 다.
         try { d.domain = initial; } catch {}
         const afterValid = d.domain;
         return (after === initial && afterValid === initial) ? 'unchanged:' + initial : 'changed:' + after + '|' + afterValid;
       } catch (err) { return 'throw:' + (err && err.message || err); }
     })();
 
-    // D7 document.origin must be the virtual target origin, never proxy —
-    // *if the property exists at all*. Real-browser control (2026-09-14,
-    // Chrome 152 + Edge/WebView2 153, both headless and headed): neither
-    // has `document.origin` any more (own on Document.prototype: false,
-    // value: undefined). It used to be a real non-standard Chromium
-    // property; this assertion predates its removal. Nothing to virtualize
-    // means nothing to leak, so `undefined` is the correct, safe outcome —
-    // but if some engine still has it, the old invariant (must read as the
-    // target origin, never the proxy's) still applies.
+    // Chromium removed non-standard document.origin; if present in another engine, it must report the virtual target origin.
     out.documentOrigin = (() => {
       try {
         const d = __zp_get(globalThis, 'document');
@@ -6435,20 +6240,16 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
       } catch (err) { return 'throw:' + (err && err.message || err); }
     })();
 
-    // D7 BroadcastChannel: target name must be prefixed at native layer.
     out.broadcastChannelName = (() => {
       try {
         const w = __zp_get(globalThis, 'window');
         const bc = new w.BroadcastChannel('zp-test');
         const nm = bc.name;
         try { bc.close(); } catch {}
-        // Facade reports the un-prefixed name to target code.
         return nm === 'zp-test' ? 'unprefixed-facade' : 'leaked-prefix:' + nm;
       } catch (err) { return 'throw:' + (err && err.message || err); }
     })();
 
-    // E1: Indirect eval `(0,eval)('location.href')` must hit prelude's
-    // dynamicEval (virtual URL), not native realm's eval.
     out.indirectEval = (() => {
       try {
         const v = (0, eval)('location.href');
@@ -6456,7 +6257,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
       } catch (err) { return 'throw:' + (err && err.name || String(err)); }
     })();
 
-    // E1: globalThis.eval — same routing requirement.
     out.globalThisEval = (() => {
       try {
         const v = globalThis.eval('location.href');
@@ -6464,8 +6264,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
       } catch (err) { return 'throw:' + (err && err.name || String(err)); }
     })();
 
-    // E1: Computed property access `window['loca'+'tion']` — must route
-    // through the membrane like any other property access.
     out.computedAccess = (() => {
       try {
         const w = __zp_get(globalThis, 'window');
@@ -6475,8 +6273,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
       } catch (err) { return 'throw:' + (err && err.name || String(err)); }
     })();
 
-    // E1: Destructuring `const { location } = window` — the unpacked
-    // reference must still be the virtual surface.
     out.destructuringAccess = (() => {
       try {
         const w = __zp_get(globalThis, 'window');
@@ -6485,7 +6281,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
       } catch (err) { return 'throw:' + (err && err.name || String(err)); }
     })();
 
-    // E1: Optional chaining `window?.location?.href`.
     out.optionalChainAccess = (() => {
       try {
         const w = __zp_get(globalThis, 'window');
@@ -6494,8 +6289,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
       } catch (err) { return 'throw:' + (err && err.name || String(err)); }
     })();
 
-    // E1: `Object.getOwnPropertyDescriptor(window, 'location')` — if it
-    // hands back a getter, that getter must yield the virtual surface.
     out.locationDescriptor = (() => {
       try {
         const w = __zp_get(globalThis, 'window');
@@ -6515,8 +6308,7 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
       } catch (err) { return 'throw:' + (err && err.name || String(err)); }
     })();
 
-    // E1: DOMParser.parseFromString — per HTML5 spec, inline <script>s
-    // inside the parsed document must NOT execute. Verify no regression.
+    // Per HTML5 spec, inline scripts inside DOMParser.parseFromString documents must not execute.
     out.domParserScript = (() => {
       try {
         window.__domParserRan = false;
@@ -6524,8 +6316,7 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
           '<html><body><script>window.__domParserRan = true<\/script></body></html>',
           'text/html'
         );
-        // Adopting the parsed node into the live document must not run the
-        // inline script either (it's parser-inserted, not inserted-while-parsed).
+        // Adopting a parser-inserted script node into the live document must not execute it.
         document.body.appendChild(document.importNode(doc.body, true));
         return window.__domParserRan ? 'ran' : 'blocked';
       } catch (err) { return 'throw:' + (err && err.name || String(err)); }
@@ -6538,7 +6329,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     try { out.rangeFragmentScript = await window.__runFragmentProbe(); }
     catch (err) { out.rangeFragmentScript = { error: err && err.name || String(err) }; }
 
-    // E1: innerHTML inline <script> never executes (HTML5 spec), regression guard.
     out.innerHTMLScript = (() => {
       try {
         window.__innerHTMLRan = false;
@@ -6549,7 +6339,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
       } catch (err) { return 'throw:' + (err && err.name || String(err)); }
     })();
 
-    // E1 D7: sessionStorage isolation parity with localStorage.
     out.sessionStoragePrefix = (() => {
       try {
         const w = __zp_get(globalThis, 'window');
@@ -6560,7 +6349,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
         for (let i = 0; i < ss.length; i++) keys.push(ss.key(i));
         ss.removeItem('zp-sess-probe');
         const removed = ss.getItem('zp-sess-probe');
-        // Bare key visible to target — internal `zp:s:...` prefix must not leak.
         const leaked = keys.some(k => /^zp:/.test(k));
         return got === 'v2' && removed === null && !leaked
           ? 'isolated'
@@ -6568,8 +6356,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
       } catch (err) { return 'throw:' + (err && err.name || String(err)); }
     })();
 
-    // E1 D7: caches (CacheStorage) origin prefix — target-visible names
-    // are un-prefixed, internal namespace is hidden.
     out.cachesAPI = await (async () => {
       try {
         const w = __zp_get(globalThis, 'window');
@@ -6582,9 +6368,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
       } catch (err) { return 'throw:' + (err && err.name || String(err)); }
     })();
 
-    // E1 D7: performance.timeOrigin must be numeric (virtualized to navigation
-    // baseline). The exact value depends on prelude state but it must not be
-    // missing or stringified.
     out.performanceTimeOrigin = (() => {
       try {
         const w = __zp_get(globalThis, 'window');
@@ -6593,8 +6376,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
       } catch (err) { return 'throw:' + (err && err.name || String(err)); }
     })();
 
-    // E1 D4/D5: WebTransport / RTCPeerConnection virtual gateway stubs —
-    // construction succeeds (feature detection works) but `.ready` rejects.
     out.webTransport = await (async () => {
       try {
         const WT = __zp_get(globalThis, 'WebTransport');
@@ -6609,8 +6390,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
         const RTC = __zp_get(globalThis, 'RTCPeerConnection');
         if (typeof RTC !== 'function') return 'absent';
         const pc = new RTC();
-        // The gateway stub must refuse data channels (and other surface)
-        // synchronously — `.createDataChannel()` throws our NotSupportedError.
         try { pc.createDataChannel('chan'); return 'allowed:dc'; }
         catch (err) { return 'gateway-stub:' + (err && err.name || String(err)); }
       } catch (err) { return 'throw:' + (err && err.name || String(err)); }
@@ -6629,37 +6408,23 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
   await t.test('topOrigin', () => { assert.equal(escapeMatrix.topOrigin, `http://${targetHost}:${targetPort}`); });
   await t.test('proxy-origin navigation', () => { assert.equal(page.url().startsWith(`http://proxy.localhost:${proxyPort}/`), true); });
   await t.test('stringTimer', () => { assert.equal(escapeMatrix.stringTimer, 'ran'); });
-  // D5: blob:/data: 워커 소스는 rewrite-then-execute — 실행되되 워커의
-  // location.protocol 이 blob:/data: 로 보여야 한다(멤브레인 가상 location).
   await t.test('blobWorker', () => { assert.equal(escapeMatrix.blobWorker, 'ran:blob:'); });
   await t.test('dataWorker', () => { assert.equal(escapeMatrix.dataWorker, 'ran:data:'); });
   await t.test('eventHandlerLocation', () => { assert.ok(escapeMatrix.eventHandlerLocation === '' || escapeMatrix.eventHandlerLocation === `http://${targetHost}:${targetPort}/#compound-tail`, `event handler location: ${escapeMatrix.eventHandlerLocation}`); });
   await t.test('upstream request identity', () => { assert.equal(requests.filter(r => r.userAgent && r.userAgent !== TARGET_UA).length, 0, `target requests: ${JSON.stringify(requests)}`); });
   await t.test('upstream request identity', () => { assert.ok(requests.some(r => r.url.startsWith('/direct-fetch') && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`); });
-  // Successful dynamic compilation must still execute in the virtual realm.
   await t.test('functionEscape', () => { assert.equal(escapeMatrix.functionEscape, 'ran:' + escapeMatrix.virtualHref); });
   await t.test('constructorEscape', () => { assert.equal(escapeMatrix.constructorEscape, 'ran:' + escapeMatrix.virtualHref); });
   await t.test('asyncFunctionEscape', () => { assert.equal(escapeMatrix.asyncFunctionEscape, 'ran:' + escapeMatrix.virtualHref); });
-  // A3 hardening: <script src=blob:...> must be neutralised.
   await t.test('scriptBlobSrc', () => { assert.equal(escapeMatrix.scriptBlobSrc, 'blocked', `<script src=blob:...> must not execute, got: ${escapeMatrix.scriptBlobSrc}`); });
-  // B-extra: Reflect.get(window,'location') routed through membrane.
   await t.test('reflectGetLocation', () => { assert.equal(escapeMatrix.reflectGetLocation, 'virtual', `Reflect.get must hit membrane, got: ${escapeMatrix.reflectGetLocation}`); });
-  // top/parent must not leak the proxy realm.
   await t.test('topLocation', () => { assert.equal(escapeMatrix.topLocation, 'virtual', `top.location escape: ${escapeMatrix.topLocation}`); });
   await t.test('parentLocation', () => { assert.equal(escapeMatrix.parentLocation, 'virtual', `parent.location escape: ${escapeMatrix.parentLocation}`); });
   await t.test('opener', () => { assert.equal(escapeMatrix.opener, 'empty', `opener leak: ${escapeMatrix.opener}`); });
-  // D7 storage isolation must hold (no raw target key on proxy origin).
   await t.test('storagePrefix', () => { assert.equal(escapeMatrix.storagePrefix, 'isolated', `storage prefix leak: ${escapeMatrix.storagePrefix}`); });
-  // D7 document.domain setter is virtualised (no real native change).
   await t.test('documentDomainSetter', () => { assert.match(escapeMatrix.documentDomainSetter, /^unchanged:/, `document.domain leak: ${escapeMatrix.documentDomainSetter}`); });
-  // D7 document.origin reports the virtual target origin when the property
-  // exists at all; current real browsers no longer have it (measured), so
-  // 'absent-natively:ok' is the expected — not just tolerated — outcome.
   await t.test('documentOrigin', () => { assert.match(escapeMatrix.documentOrigin, /^(virtual:|absent-natively:ok)/, `document.origin leak: ${escapeMatrix.documentOrigin}`); });
-  // D7 BroadcastChannel facade returns un-prefixed name (target-visible truth).
   await t.test('broadcastChannelName', () => { assert.equal(escapeMatrix.broadcastChannelName, 'unprefixed-facade', `BroadcastChannel: ${escapeMatrix.broadcastChannelName}`); });
-  // E1 indirect eval / globalThis.eval / computed / destructuring / optional
-  // chaining / descriptor — every location read path lands on the virtual surface.
   await t.test('indirectEval', () => { assert.match(escapeMatrix.indirectEval, /^virtual:/, `indirect eval: ${escapeMatrix.indirectEval}`); });
   await t.test('globalThisEval', () => { assert.match(escapeMatrix.globalThisEval, /^virtual:/, `globalThis.eval: ${escapeMatrix.globalThisEval}`); });
   await t.test('computedAccess', () => { assert.equal(escapeMatrix.computedAccess, 'virtual', `computed access: ${escapeMatrix.computedAccess}`); });
@@ -6667,24 +6432,18 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
   await t.test('optionalChainAccess', () => { assert.equal(escapeMatrix.optionalChainAccess, 'virtual', `optional chain: ${escapeMatrix.optionalChainAccess}`); });
   await t.test('locationDescriptor', () => { assert.equal(escapeMatrix.locationDescriptor, 'virtual', `descriptor leak: ${escapeMatrix.locationDescriptor}`); });
   await t.test('locationDescriptorFlags', () => { assert.deepEqual(escapeMatrix.locationDescriptorFlags, { configurable: false, enumerable: true, getter: 'function', setter: 'function', stable: true, sameLocation: true, redefinable: false, deletable: false }); });
-  // Inert HTML ingestion stays inert; executable fragments retain confinement.
   await t.test('domParserScript', () => { assert.equal(escapeMatrix.domParserScript, 'blocked', `DOMParser script: ${escapeMatrix.domParserScript}`); });
   await t.test('rangeFragmentScript', () => {
     assert.deepEqual(escapeMatrix.rangeFragmentScript, { beforeInsertion: true, result: { href: escapeMatrix.virtualHref, origin: `http://${targetHost}:${targetPort}`, echo: { href: escapeMatrix.virtualHref, userAgent: TARGET_UA } } });
   });
   await t.test('innerHTMLScript', () => { assert.equal(escapeMatrix.innerHTMLScript, 'blocked', `innerHTML script: ${escapeMatrix.innerHTMLScript}`); });
-  // D7 parity: sessionStorage / caches / performance.timeOrigin virtualized.
   await t.test('sessionStoragePrefix', () => { assert.equal(escapeMatrix.sessionStoragePrefix, 'isolated', `sessionStorage leak: ${escapeMatrix.sessionStoragePrefix}`); });
   await t.test('cachesAPI', () => { assert.equal(escapeMatrix.cachesAPI, 'isolated', `caches leak: ${escapeMatrix.cachesAPI}`); });
   await t.test('performanceTimeOrigin', () => { assert.equal(escapeMatrix.performanceTimeOrigin, 'numeric', `timeOrigin: ${escapeMatrix.performanceTimeOrigin}`); });
-  // D4 / D5 gateway stubs — construction succeeds but operations fail-closed.
   await t.test('webTransport', () => { assert.match(escapeMatrix.webTransport, /^(?:gateway-stub|absent)/, `WebTransport leak: ${escapeMatrix.webTransport}`); });
   await t.test('rtcPeerConnection', () => { assert.match(escapeMatrix.rtcPeerConnection, /^(?:gateway-stub|absent)/, `RTCPeerConnection leak: ${escapeMatrix.rtcPeerConnection}`); });
   });
 
-  // O4: A-section escape verification in a REWRITTEN document. Every probe
-  // must either return a virtual surface or fail closed — a proxy-origin URL
-  // or a real-global leak anywhere is a regression.
   await t.test('A-section escapes stay virtual or fail closed', async t => {
     await page.evaluate(target => { __zp_get(globalThis, 'location').href = target; }, `http://${targetHost}:${targetPort}/escape-probes`);
     await page.waitForFunction(() => window.__escapeProbes, { timeout: 30000 });
@@ -6719,9 +6478,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
       assert.ok(noProxy(probes.contentDocLocation), `contentDocument.location leaked proxy: ${probes.contentDocLocation}`);
     });
     await t.test('navigation.navigate refuses javascript:', () => {
-      // Either the URL classifier (TARGET_PROTOCOL_BLOCKED → plain Error) or
-      // the facade's isHTTPURL gate (NotSupportedError DOMException) blocks —
-      // both are fail-closed; what matters is it threw and nothing executed.
       assert.match(probes.navigationJs, /^blocked:/, `navigation.navigate: ${probes.navigationJs}`);
       assert.equal(probes.navEscaped, 'clean');
       assert.equal(probes.navCurrentEntry, virtual, `navigation.currentEntry.url: ${probes.navCurrentEntry}`);
@@ -6737,25 +6493,16 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
       assert.equal(probes.metaRefresh, 'neutralized', `meta refresh: ${probes.metaRefresh}`);
     });
     await t.test('diagnostics surface exists but stays hidden from page scope', async () => {
-      // The fixture read returns -1 — `__zp_diagnostics` is ZP_HIDDEN_RE-
-      // filtered on the scope proxy, as intended. The real surface is on the
-      // real window, reachable from CDP but not from page code.
+      // __zp_diagnostics is filtered on the scope proxy and only reachable on the real window via CDP.
       assert.equal(probes.diagnostics, -1);
       assert.ok(await page.evaluate(() => Array.isArray(window.__zp_diagnostics)), '__zp_diagnostics missing on real window');
     });
     assert.equal(new URL(page.url()).origin, proxyOrigin, `page escaped proxy: ${page.url()}`);
   });
 
-  // O5: direct-vs-proxy differential. The SAME fixture source runs once
-  // against the raw target server and once through the rewriter+membrane.
-  // Every probe must produce identical results; divergences are allowed only
-  // where ERRATA documents a semantic limit — each is pinned to the exact
-  // documented proxy-side value so a silent behavior change can't hide.
   await t.test('direct-vs-proxy compatibility differential', async t => {
     const targetBase = `http://${targetHost}:${targetPort}`;
-    // Separate browser instance — `browser.on('targetcreated')` observes every
-    // target in `browser`, so a direct-target page there would poison the
-    // suite-wide "all network stays on proxy origin" assertion at the end.
+    // Use a separate browser instance so direct-target navigations do not trigger the suite-wide targetcreated network guard.
     const directBrowser = await puppeteer.launch({
       headless: true,
       protocolTimeout: 30000,
@@ -6771,9 +6518,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
       await directBrowser.close();
     }
     const expectedDivergences = {
-      // Documented limits — proxy value pinned so a silent change can't hide.
-      // R2: direct eval caller scope is now native-parity (desc-accessor +
-      // real direct eval), so evalDirectLocal is no longer divergent.
     };
     const wireBefore = wireRequests.length;
     await page.evaluate(u => { __zp_get(globalThis, 'location').href = u; }, `${targetBase}/compat-probes`);
@@ -6801,11 +6545,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
       assert.ok(!newWire.some(u => u.startsWith(`${targetBase}/`)), `page issued direct-target requests: ${JSON.stringify(newWire.filter(u => u.startsWith(targetBase)))}`);
       assert.ok(requests.some(r => r.url.startsWith('/compat-echo')), 'upstream never saw /compat-echo');
     });
-    // ERRATA J: each URL-bearing attribute / IDL write / CSS form must load
-    // through the proxy exactly when it loads natively. Judged from the
-    // target's own request log — native requests carry the browser UA,
-    // proxied ones TARGET_UA. (A missed rewrite is CSP-blocked, so it shows
-    // up here as "native loaded, proxy never asked".)
     await t.test('J: every URL form loads through the proxy exactly when it loads natively', () => {
       const keys = ['poster', 'inputsrc', 'tdbg', 'imagesrcset', 'svgimage', 'imageset', 'mask', 'before', 'shape', 'import', 'bodybg', 'svgbaseval'];
       const seen = (k, proxied) => requests.some(r => r.url.includes('j=' + k) && ((r.userAgent === TARGET_UA) === proxied));
@@ -6817,9 +6556,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     });
   });
 
-  // O6: iframe suite — creation/insertion/navigation/srcdoc/blob(blocked)/
-  // sandbox/nested/remove-race/postMessage/identity/ownerDocument, all in a
-  // rewritten document so the membrane + rewriter paths are what run.
   await t.test('iframe suite', async t => {
     await page.evaluate(u => { __zp_get(globalThis, 'location').href = u; }, `http://${targetHost}:${targetPort}/iframe-probes`);
     try {
@@ -6837,7 +6573,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
       assert.equal(probes.createBlank, 'v:true,true,true', `createBlank: ${probes.createBlank}`);
     });
     await t.test('identity surfaces', () => {
-      // contentWindow facade stability + frames[i]/parent mapping — pin exact.
       assert.equal(probes.identityStable, 'v:true,true,true', `identityStable: ${probes.identityStable}`);
     });
     await t.test('navigation via src + virtual child location', () => {
@@ -6856,7 +6591,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
       assert.match(probes.blobBlocked, /^v:contained:/, `blobBlocked: ${probes.blobBlocked}`);
     });
     await t.test('sandbox allow-scripts runs opaque-origin child', () => {
-      // opaque-origin 자식의 contentDocument 는 네이티브처럼 null 이어야 한다.
       assert.match(probes.sandboxOpaque, /^v:ran\|(null-doc|e:)/, `sandboxOpaque: ${probes.sandboxOpaque}`);
     });
     await t.test('nested srcdoc grandchild gets prelude', () => {
@@ -6868,10 +6602,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     assert.equal(new URL(page.url()).origin, proxyOrigin, `page escaped proxy: ${page.url()}`);
   });
 
-  // O7: worker suite — dedicated/module/shared × fetch/importScripts/timers/
-  // eval(blocked)/location/storage isolation. Worker scripts are served from
-  // the target and rewritten by the SW worker-script path, so the probes
-  // exercise real worker-prelude semantics.
   await t.test('worker suite', async t => {
     await page.evaluate(u => { __zp_get(globalThis, 'location').href = u; }, `http://${targetHost}:${targetPort}/worker-probes`);
     try {
@@ -6887,41 +6617,30 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     await t.test('dedicated worker location is virtual', () => {
       assert.equal(d.href, `v:${targetBase}/probe-worker.js`, `href: ${d.href}`);
       assert.equal(d.locProps, `v:http:|${targetHost}:${targetPort}|/probe-worker.js`, `locProps: ${d.locProps}`);
-      // WorkerLocation natively has no assign/replace — shape is pinned.
       assert.match(d.locMethods, /^v:(undefined|function),(undefined|function),function$/, `locMethods: ${d.locMethods}`);
     });
     await t.test('dedicated worker network surface', () => {
       assert.equal(d.fetchEcho, 'v:200', `fetchEcho: ${d.fetchEcho}`);
       assert.equal(d.xhrShim, 'v:200', `xhrShim: ${d.xhrShim}`);
-      // W3: 동기 XHR 은 /zp/api/sync-fetch park-릴레이 — 진짜 블로킹 + 프록시 전송.
       assert.equal(d.xhrSync, 'v:status:200|worker-echo', `xhrSync: ${d.xhrSync}`);
-      // W4: 워커 WebSocket — 페이지 중계 SW 스트림으로 실제 라운드트립.
-      // 생성자는 성공하고 연결 실패는 비동기로 표면한다(네이티브 parity).
       assert.equal(d.wsCtor, 'v:constructed', `wsCtor: ${d.wsCtor}`);
       assert.equal(d.wsRoundtrip, 'v:msg:echo:ping', `wsRoundtrip: ${d.wsRoundtrip}`);
       assert.ok(requests.some(r => r.upgrade && String(r.url).startsWith('/ws?w=worker')), `upstream never saw worker /ws upgrade: ${JSON.stringify(requests.filter(r => r.upgrade).map(r => r.url))}`);
-      // W5: RTCPeerConnection 은 워커에 [Exposed=Window] — 네이티브 부재라
-      // ReferenceError parity. WebTransport 는 워커에 있지만 게이트웨이
-      // 미설정 → stub 생성 성공(메서드만 reject, 페이지와 같은 의미).
       assert.equal(d.rtcCtor, 'v:e:ReferenceError', `rtcCtor: ${d.rtcCtor}`);
       assert.equal(d.wtCtor, 'v:constructed:closed', `wtCtor: ${d.wtCtor}`);
-      // WorkerEventSource — 프록시 fetch 경유 SSE 라운드트립.
       assert.equal(d.esRoundtrip, 'v:msg:sse-ok', `esRoundtrip: ${d.esRoundtrip}`);
       assert.ok(requests.some(r => r.url.startsWith('/worker-echo')), `upstream never saw /worker-echo: ${JSON.stringify(requests.map(r => r.url))}`);
     });
     await t.test('dedicated worker dynamic code is rewrite-then-execute', () => {
-      // W1/W2: zp-page-bundle 이 워커에 실려 eval/Function 이 재작성 경유 실행된다.
       assert.equal(d.evalCode, 'v:2', `evalCode: ${d.evalCode}`);
       assert.equal(d.funcCtor, 'v:7', `funcCtor: ${d.funcCtor}`);
     });
     await t.test('dedicated worker timers', () => {
       assert.equal(d.timerFn, 'v:fired', `timerFn: ${d.timerFn}`);
-      // W6: 문자열 타이머는 재작성 후 전역 eval 로 스케줄된다.
       assert.equal(d.timerStr, 'v:ran', `timerStr: ${d.timerStr}`);
     });
     await t.test('dedicated worker importScripts', () => {
       assert.equal(d.importScriptsOK, 'v:imp-ok', `importScriptsOK: ${d.importScriptsOK}`);
-      // W7: data:/blob: 소스는 읽어서 재작성 후 전역 실행한다.
       assert.equal(d.importScriptsData, 'v:imported', `importScriptsData: ${d.importScriptsData}`);
       assert.equal(d.importScriptsBlob, 'v:imported', `importScriptsBlob: ${d.importScriptsBlob}`);
       assert.ok(requests.some(r => r.url.startsWith('/worker-imported.js')), 'upstream never saw /worker-imported.js');
@@ -6935,26 +6654,13 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
       assert.equal(d.errorStack, 'v:clean', `errorStack: ${d.errorStack}`);
     });
     await t.test('worker virtual surfaces (W8-W12)', () => {
-      // self.origin 은 가상 타깃 오리진 — 프록시 오리진 누출 없음.
       assert.equal(d.origin, `v:${targetBase}`, `origin: ${d.origin}`);
-      // http://localhost 타깃은 네이티브도 potentially-trustworthy → true.
-      // 비-localhost http 타깃이면 가상화 게터가 false 를 돌린다.
       assert.equal(d.secureCtx, 'v:true', `secureCtx: ${d.secureCtx}`);
-      // new URL(rel, base) 의 명시 base 는 가상 URL 로 푼다 — 프록시
-      // bootstrap URL 이 아니다. 단일 인자 relative 는 네이티브도 TypeError.
       assert.equal(d.urlResolve, `v:${targetBase}/w-abs`, `urlResolve: ${d.urlResolve}`);
-      // webkitURL/webkitIndexedDB 는 이 Chrome 워커에 네이티브로 없다 —
-      // absent 가 parity. 탑재 브라우저에서는 파사드 별칭이어야 한다.
       assert.equal(d.webkitURLAlias, 'v:absent:undefined', `webkitURLAlias: ${d.webkitURLAlias}`);
       assert.match(d.webkitIDB, /^v:(alias|not-alias:undefined)$/, `webkitIDB: ${d.webkitIDB}`);
-      // BroadcastChannel.name 은 페이지가 요청한 이름만 보인다(실제 채널은
-      // 타깃 해시 프리픽스로 격리).
       assert.equal(d.bcName, 'v:wp1', `bcName: ${d.bcName}`);
-      // OPFS — a per-target subdirectory, but the root handle's name reads ''
-      // exactly like the native root (the namespace itself stays invisible).
       assert.equal(d.opfsName, 'v:name:', `opfsName: ${d.opfsName}`);
-      // 레거시 FS — 이 Chrome 워커엔 webkitRequestFileSystem 이 실재한다 —
-      // 우리는 NotSupportedError 게이트로 fail-closed (프록시 오리진 FS 차단).
       assert.match(d.webkitFS, /^v:(undefined|fn:e:NotSupportedError)$/, `webkitFS: ${d.webkitFS}`);
       assert.equal(d.sharedStorageW, 'v:undefined', `sharedStorageW: ${d.sharedStorageW}`);
     });
@@ -6965,9 +6671,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
       assert.equal(m.fetchEcho, 'v:200', `fetchEcho: ${m.fetchEcho}`);
       assert.equal(m.evalCode, 'v:1', `evalCode: ${m.evalCode}`);
       assert.equal(m.funcCtor, 'v:1', `funcCtor: ${m.funcCtor}`);
-      // 모듈 워커 importScripts — Chrome 은 함수 자체는 노출하고 호출 시
-      // TypeError("module worker")를 던진다. 스텁이 네이티브로 위임돼 같은
-      // TypeError 가 나온다 — 네이티브 parity.
       assert.equal(m.importScriptsStub, 'v:e:TypeError', `importScriptsStub: ${m.importScriptsStub}`);
       assert.ok(requests.some(r => r.url.startsWith('/probe-module-dep.js')), 'upstream never saw module dep');
     });
@@ -6975,18 +6678,11 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     await t.test('shared worker isolation + messaging', () => {
       assert.equal(s.href, `${targetBase}/probe-shared-worker.js`, `href: ${s.href}`);
       assert.equal(s.ua, TARGET_UA, `ua: ${s.ua}`);
-      // 실제 SharedWorker 이름은 `zp:w:<hash>:` 접두어로 타깃 격리되지만,
-      // 워커 안에서 보이는 self.name 은 페이지가 요청한 이름으로 마스킹된다
-      // (네이티브 parity — 네이티브도 인자 이름을 돌려준다).
       assert.equal(s.name, 'swprobe', `name: ${s.name}`);
     });
     assert.equal(new URL(page.url()).origin, proxyOrigin, `page escaped proxy: ${page.url()}`);
   });
 
-  // O8: CSP suite — §K two-sided matrix in a real browser. The proxied
-  // document CSP (build_proxied_csp) is asserted on the response header,
-  // allowed resources must load, intentional blocks must fire
-  // securitypolicyviolation AND land at /zp/api/csp-report (server log).
   await t.test('csp suite', async t => {
     await page.evaluate(u => { __zp_get(globalThis, 'location').href = u; }, `http://${targetHost}:${targetPort}/csp-probes`);
     try {
@@ -6999,8 +6695,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     fs.writeFileSync(path.join(artifacts, 'csp-probes.json'), JSON.stringify(probes, null, 2));
     const v = probes.violations || [];
     await t.test('inline module executes via blob: script-src', () => {
-      // §K top-priority: script-src 에 blob: 가 없으면 __ZP_EXEC_INLINE_MODULE
-      // 경로 전체가 죽어 모든 인라인 모듈이 무음 사망한다.
       assert.equal(probes.inlineModule, 'ran', `inlineModule: ${probes.inlineModule}`);
     });
     await t.test('connect-src allows data: and blob: fetch', () => {
@@ -7010,23 +6704,16 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     await t.test('img/style/font/media allow data: sources', () => {
       assert.equal(probes.imgData, 'loaded', `imgData: ${probes.imgData}`);
       assert.equal(probes.styleData, 'loaded', `styleData: ${probes.styleData}`);
-      // 디코드 실패는 허용 — CSP 통과의 판정은 해당 디렉티브 SPV 부재.
       assert.ok(!v.some(x => /^font-src/.test(x)), `font-src violation: ${v}`);
       assert.ok(!v.some(x => /^media-src/.test(x)), `media-src violation: ${v}`);
     });
     await t.test('blocked resources fire securitypolicyviolation', () => {
       assert.equal(probes.objectBlocked, 'spv:object-src', `objectBlocked: ${probes.objectBlocked}`);
       assert.equal(probes.baseBlocked, 'spv:base-uri', `baseBlocked: ${probes.baseBlocked}`);
-      // manifest 는 headless Chrome 이 삽입 시점에 fetch 하지 않는다 — 요청이
-      // 없으니 SPV 도 없다. 디렉티브 존재 자체는 응답 헤더 단언이 검증한다.
       assert.equal(probes.manifestBlocked, 'no-spv', `manifestBlocked: ${probes.manifestBlocked}`);
-      // prefetch 도 headless 에서는 fetch 자체가 안 나간다 — §K 의 "prefetch
-      // 막힘" 손실은 유효하나 SPV 관측은 불가. 디렉티브 부재는 헤더 단언이 커버.
       assert.equal(probes.prefetchBlocked, 'no-spv', `prefetchBlocked: ${probes.prefetchBlocked}`);
     });
     await t.test('sealed paths fail before CSP (divergence pins)', () => {
-      // frame-src data:/worker-src blob: 는 CSP 상 허용이지만 속성/훅 정책이
-      // 먼저 봉인한다 — 어느 쪽이든 네트워크 도달 없이 차단돼야 한다.
       assert.match(probes.frameDataSrc, /^(blocked:|set:(about:|http:\/\/proxy))/,
         `frameDataSrc: ${probes.frameDataSrc}`);
       assert.ok(!v.some(x => /^frame-src|^child-src/.test(x)), `frame violation leaked: ${v}`);
@@ -7037,17 +6724,11 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
       assert.equal(probes.evalPath, 'v:42', `evalPath: ${probes.evalPath}`);
     });
     await t.test('CSP meta injection is intersected, not dropped', () => {
-      // default-src 'none' meta — 필터 후 data: img 허용이 남아 로드된다.
       assert.equal(probes.metaNeutralized, 'img-loaded-after-meta', `metaNeutralized: ${probes.metaNeutralized}`);
-      // img-src 'none' — 배관과 무관한 순수 엄격화는 verbatim 으로 지켜진다.
       assert.equal(probes.metaStricter, 'img-blocked', `metaStricter: ${probes.metaStricter}`);
     });
     await t.test('response CSP matches proxied policy contract', () => {
-      // 네비게이션 응답 헤더 — share URL 응답의 CSP 를 CDP 로 읽는다.
-      // /zp/api/* 응답도 CSP 를 싣지만 그건 control-surface 정책(build_csp)
-      // 이라 문서 정책과 다르다 — pathname 이 정확히 share 경로인 것만 본다.
-      // 같은 /zp/ 경로라도 Go 서버의 공유-엔드포인트 응답은 control CSP 를 싣는다
-      // — 프록시드 문서 정책(build_proxied_csp)만 report-uri 를 포함하므로 그걸로 식별.
+      // Filter to the share document response (identified by report-uri) rather than control-surface /zp/api/* responses.
       const docHeaders = [...responseHeaders.entries()]
         .filter(([u]) => { try { const p = new URL(u); return p.origin === proxyOrigin && (p.pathname === '/zp/' || p.pathname.startsWith('/zp/p/')); } catch { return false; } })
         .map(([, h]) => h['content-security-policy'] || h['Content-Security-Policy'])
@@ -7064,16 +6745,12 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
       assert.match(csp, /form-action 'self'/, 'form-action');
       assert.match(csp, /manifest-src 'self'/, 'manifest-src');
       assert.match(csp, /report-uri \/zp\/api\/csp-report/, 'report-uri');
-      // 프록시 문서에는 frame-ancestors 없음(우리가 프레임에 싣는다) +
-      // 모방 방지 지시어 부재 (§K correctly-absent 목록).
       assert.ok(!/frame-ancestors/.test(csp), 'frame-ancestors must be absent on proxied docs');
       for (const absent of ['trusted-types', 'require-trusted-types-for', 'sandbox', 'upgrade-insecure-requests', 'block-all-mixed-content']) {
         assert.ok(!csp.includes(absent), `${absent} must be absent`);
       }
     });
     await t.test('violation reports reach the server log', async () => {
-      // report-uri → /zp/api/csp-report → Go 서버 [CSP] 로그 라인.
-      // 브라우저 리포트는 비동기 — 잠깐 기다린 뒤 로그를 확인한다.
       await new Promise(r => setTimeout(r, 1500));
       assert.match(proxyLog, /\[CSP\] blocked=.*directive=object-src/, `no object-src report in server log`);
       assert.match(proxyLog, /\[CSP\] blocked=.*directive=base-uri/, `no base-uri report in server log`);
@@ -7081,8 +6758,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     assert.equal(new URL(page.url()).origin, proxyOrigin, `page escaped proxy: ${page.url()}`);
   });
 
-  // O9: dynamic code suite — §E eval/Function/timers/event handlers/DOM
-  // insertion × success/exception/source-leak.
   await t.test('dynamic code suite', async t => {
     await page.evaluate(u => { __zp_get(globalThis, 'location').href = u; }, `http://${targetHost}:${targetPort}/dyn-probes`);
     try {
@@ -7095,10 +6770,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     fs.writeFileSync(path.join(artifacts, 'dyn-probes.json'), JSON.stringify(probes, null, 2));
     const targetBase = `http://${targetHost}:${targetPort}`;
 
-    // The pins below were once written from proxy-only runs, and four of them
-    // encoded divergences as "designed" (onclick strings executing, eval parse
-    // errors as NotSupportedError, …). Run the same fixture natively and hold
-    // the proxy to it — a pin that disagrees with Chrome is a bug, not a spec.
     await t.test('dyn probes match native Chrome (direct-vs-proxy)', async () => {
       const directBrowser = await puppeteer.launch({
         headless: true,
@@ -7129,16 +6800,11 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
       assert.equal(probes.evalNonString, 'v:[123,null,null]', `evalNonString: ${probes.evalNonString}`);
     });
     await t.test('eval exceptions and edge forms', () => {
-      // 파스 불가 eval 은 네이티브처럼 SyntaxError — 어느 쪽이든 한 줄도 실행되지
-      // 않는다. (예전 NotSupportedError 핀은 네이티브 대조 없이 적은 것이었다.)
       assert.equal(probes.evalSyntaxError, 'threw:SyntaxError', `evalSyntaxError: ${probes.evalSyntaxError}`);
       assert.equal(probes.evalIndirect, `v:${targetBase}`, `evalIndirect: ${probes.evalIndirect}`);
       assert.equal(probes.evalCall, 'v:5', `evalCall: ${probes.evalCall}`);
-      // R5 parity — 네이티브 eval 은 non-constructor, `new eval()` 은 TypeError.
       assert.equal(probes.evalAsCtor, 'threw:TypeError', `evalAsCtor: ${probes.evalAsCtor}`);
-      // tagged eval`x` 는 문자열 배열(비문자열)을 받아 평가 없이 그대로 돌려준다.
       assert.equal(probes.evalTagged, 'v:object', `evalTagged: ${probes.evalTagged}`);
-      // eval 이 만든 var 는 다음 접근에서 보인다(네이티브 parity).
       assert.equal(probes.evalVarVisible, 'v:42', `evalVarVisible: ${probes.evalVarVisible}`);
     });
     await t.test('Function paths', () => {
@@ -7148,7 +6814,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
       assert.equal(probes.fnCommentParam, 'v:9', `fnCommentParam: ${probes.fnCommentParam}`);
       assert.equal(probes.fnLocation, `v:${targetBase}`, `fnLocation: ${probes.fnLocation}`);
       assert.equal(probes.asyncFn, 'v:8', `asyncFn: ${probes.asyncFn}`);
-      // A3 fix 검증 — dynamic Function 의 this 는 가상 글로벌이다.
       assert.equal(probes.fnThisIsWindow, 'v:true', `fnThisIsWindow: ${probes.fnThisIsWindow}`);
       assert.ok(String(probes.fnThis).startsWith(`v:${targetBase}`), `fnThis: ${probes.fnThis}`);
       assert.equal(probes.fnWith, 'v:1', `fnWith: ${probes.fnWith}`);
@@ -7159,41 +6824,30 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
       assert.equal(probes.timerString, 'v:7', `timerString: ${probes.timerString}`);
       assert.equal(probes.timerVirtual, `v:${targetBase}`, `timerVirtual: ${probes.timerVirtual}`);
       assert.ok(probes.intervalString && probes.intervalString.startsWith('v:') && +probes.intervalString.slice(2) >= 1, `intervalString: ${probes.intervalString}`);
-      // 타이머 문자열 안의 this["location"] 도 가상화된다(A2 연동).
       assert.ok(String(probes.timerThis).startsWith(`v:${targetBase}`), `timerThis: ${probes.timerThis}`);
-      // 타이머 문자열의 문법 오류는 네이티브처럼 발화 시점에 비동기 에러로
-      // 보고된다 — 등록(setTimeout)은 던지지 않는다.
       assert.equal(probes.timerBad, 'v:error-surfaced', `timerBad: ${probes.timerBad}`);
     });
     await t.test('event handlers', () => {
       assert.equal(probes.handlerStatic, 'v:1', `handlerStatic: ${probes.handlerStatic}`);
       assert.equal(probes.handlerPropFn, `v:${targetBase}`, `handlerPropFn: ${probes.handlerPropFn}`);
-      // onclick 프로퍼티에 문자열을 넣으면 네이티브는 null 로 무시한다 —
-      // 컴파일/실행하지 않는다(content attribute 만 컴파일된다).
       assert.equal(probes.handlerPropString, 'v:silent', `handlerPropString: ${probes.handlerPropString}`);
     });
     await t.test('module kind survives import/export-free modules', () => {
-      // 네이티브 값. classic 리라이트면 'v:a|undefined' / 'v:c|undefined'.
       assert.equal(probes.staticModuleLex, 'v:a|b', `staticModuleLex: ${probes.staticModuleLex}`);
       assert.equal(probes.dynModuleTypeAfterSrc, 'v:c|k', `dynModuleTypeAfterSrc: ${probes.dynModuleTypeAfterSrc}`);
     });
     await t.test('blob worker source is fixed at construction', () => {
-      // 네이티브 값. 구 빌드는 워커가 해제된 URL 을 읽다가 fail-closed 했다.
       assert.equal(probes.blobWorkerRevoked, 'v:blob:a', `blobWorkerRevoked: ${probes.blobWorkerRevoked}`);
       assert.equal(probes.workerSelfMethods, 'v:a,number,true,true', `workerSelfMethods: ${probes.workerSelfMethods}`);
     });
     await t.test('DOM insertion', () => {
       assert.equal(probes.docWrite, 'v:wrote', `docWrite: ${probes.docWrite}`);
-      // native parity — innerHTML/insertAdjacentHTML/DOMParser 스크립트는
-      // 실행되지 않는다(어느 쪽이든 unrewritten 실행은 안 된다).
       assert.equal(probes.innerHTMLScript, 'v:silent', `innerHTMLScript: ${probes.innerHTMLScript}`);
       assert.equal(probes.adjacentScript, 'v:silent', `adjacentScript: ${probes.adjacentScript}`);
       assert.equal(probes.domParserScript, 'v:silent', `domParserScript: ${probes.domParserScript}`);
     });
     await t.test('dynamic import()', () => {
       assert.equal(probes.importHttp, `v:1|${targetBase}/dyn-mod.js`, `importHttp: ${probes.importHttp}`);
-      // D2/D3: data:/blob: 모듈은 디코드·읽기 → 페이지 재작성기 → 재작성된
-      // blob URL 로 import 한다 — 네이티브와 같이 모듈이 실행된다.
       assert.equal(probes.importData, 'v:1', `importData: ${probes.importData}`);
       assert.equal(probes.importBlob, 'v:3', `importBlob: ${probes.importBlob}`);
     });
@@ -7205,8 +6859,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     assert.equal(new URL(page.url()).origin, proxyOrigin, `page escaped proxy: ${page.url()}`);
   });
 
-  // O10: perf suite — 10M 루프캡 경계, async-poll 수명, bulk DOM,
-  // iframe 수×로드시간 (`/perf-probes` fixture, window.__perfProbes).
   await t.test('perf suite', async t => {
     await page.evaluate(u => { __zp_get(globalThis, 'location').href = u; }, `http://${targetHost}:${targetPort}/perf-probes`);
     try {
@@ -7220,27 +6872,16 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     assert.ok(!probes.__fatal, `perf fixture died: ${probes.__fatal}`);
 
     await t.test('10M loop-cap boundary', () => {
-      // 미만 루프는 캡 미발화로 정상 완료.
       assert.equal(probes.underCap, 'v:5000000', `underCap: ${probes.underCap}`);
-      // 초과 루프는 hang 대신 캡에서 종료 — 카운터 값이 정확히 10M.
       assert.equal(probes.cappedWhile, 'v:10000000', `cappedWhile: ${probes.cappedWhile}`);
-      // ERRATA §L 의 `for(i=0;;i++)` uncapped 예측 — 캡됨이면 10M,
-      // 우회면 12000001 에서 멈췄을 것이다.
-      assert.equal(probes.cappedFor, 'v:10000000', `cappedFor (uncapped 우회면 12000001): ${probes.cappedFor}`);
-      // do{}while 는 post-test — 바디가 카운터 검사보다 한 번 먼저 도니
-      // 경계는 10M+1 (캡 자체는 유효, hang 아님).
+      assert.equal(probes.cappedFor, 'v:10000000', `cappedFor (expected 10000000 when capped, 12000001 if uncapped): ${probes.cappedFor}`);
       assert.equal(probes.cappedDo, 'v:10000001', `cappedDo: ${probes.cappedDo}`);
-      // negative control — 일반 루프에 카운터가 끼면 n>3 이 된다.
       assert.equal(probes.normalLoop, 'v:3', `normalLoop: ${probes.normalLoop}`);
-      // outer=100 에서 break 가 inner 보다 먼저 발화 — inner 는 99×100.
       assert.equal(probes.nestedLoops, 'v:100|9900', `nestedLoops: ${probes.nestedLoops}`);
     });
 
     await t.test('async-poll lifetime', () => {
-      // 캡 prefix 가 붙은 async while(true) 도 break 가 정상 발화.
       assert.equal(probes.asyncPollBreak, 'v:20', `asyncPollBreak: ${probes.asyncPollBreak}`);
-      // 조건 폴러는 flag 설정까지 살아 있다가 break 후 완전히 죽는다
-      // (atExit === polls → 좀비 폴러 없음).
       assert.equal(probes.asyncPollFlag, 'v:true|true|true', `asyncPollFlag: ${probes.asyncPollFlag}`);
     });
 
@@ -7248,7 +6889,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
       const m = /^v:(\d+)\|(\d+)$/.exec(probes.bulkDom || '');
       assert.ok(m, `bulkDom: ${probes.bulkDom}`);
       assert.ok(+m[1] >= 5000, `bulkDom count: ${probes.bulkDom}`);
-      // 상한만 잡는다 — 멤브레인 직렬화가 재앙급이면 여기서 걸린다.
       assert.ok(+m[2] < 15000, `bulkDom ms: ${probes.bulkDom}`);
     });
 
@@ -7256,12 +6896,10 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
       const m = /^v:([^|]+)\|(\d+)$/.exec(probes.iframes || '');
       assert.ok(m, `iframes: ${probes.iframes}`);
       assert.equal(m[1], 'loaded,loaded,loaded,loaded,loaded', `iframe results: ${probes.iframes}`);
-      // 5개 srcdoc 프레임 병렬 — 프레임당 프렐루드 주입이 있어도 상한 안.
       assert.ok(+m[2] < 30000, `iframe ms: ${probes.iframes}`);
     });
 
     await t.test('membrane hot-loop cost (T5-3)', () => {
-      // 측정값 리포트 — 재앙급 회귀만 상한으로 잡는다.
       const mm = /^v:(\d+)ms\|(\d+)$/.exec(probes.membraneRead || '');
       assert.ok(mm, `membraneRead: ${probes.membraneRead}`);
       assert.ok(+mm[1] < 20000, `membrane read 200k too slow: ${probes.membraneRead}`);
@@ -7273,11 +6911,7 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     assert.equal(new URL(page.url()).origin, proxyOrigin, `page escaped proxy: ${page.url()}`);
   });
 
-  // Windows of another site. Every proxied frame shares one physical origin, so
-  // the browser's same-origin policy cannot separate them; the membrane has to.
-  // Native Chrome lets a cross-origin window be used through a short fixed list
-  // (postMessage, closed, frames, location navigation, …) and throws
-  // SecurityError for everything else — in both directions, and for popups.
+  // Proxied frames share one physical origin, so the membrane enforces cross-origin Window SecurityError boundaries.
   await t.test('cross-site frame and popup access matches native', async () => {
     const targetBase = `http://${targetHost}:${targetPort}`;
     const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
@@ -7296,7 +6930,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     fs.writeFileSync(path.join(artifacts, 'xsite-differential.json'), JSON.stringify({ direct, proxied }, null, 2));
     assert.ok(!direct.__fatal, `native reference died: ${direct.__fatal}`);
     assert.ok(!proxied.__fatal, `proxied fixture died: ${proxied.__fatal}`);
-    // The reference itself: the facts the comparison stands on.
     assert.equal(direct['p2c.cross.document'], 'threw:SecurityError');
     assert.equal(direct['p2c.cross.localStorage'], 'threw:SecurityError');
     assert.equal(direct['p2c.cross.contentDocument'], 'null');
@@ -7323,8 +6956,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     assert.deepEqual(healed, [], `now match native — update ERRATA and this list: ${healed.join(', ')}`);
   });
 
-  // The page's copy of the cookie jar must learn what happens elsewhere: another
-  // document's response, an image or script, a synchronous XHR, a sibling frame.
   await t.test('cookies reach every document that can see them, and no other (matches native)', async () => {
     const targetBase = `http://${targetHost}:${targetPort}`;
     const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
@@ -7343,7 +6974,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     fs.writeFileSync(path.join(artifacts, 'cookies-from-elsewhere.json'), JSON.stringify({ direct, proxied }, null, 2));
     assert.ok(!direct.__fatal, `native reference died: ${direct.__fatal}`);
     assert.ok(!proxied.__fatal, `proxied fixture died: ${proxied.__fatal}`);
-    // The reference itself: what the comparison stands on.
     assert.equal(direct['frame.navigation'], 'ck2_frame');
     assert.equal(direct['image'], 'ck2_frame,ck2_img');
     assert.equal(direct['script'], 'ck2_frame,ck2_img,ck2_script');
@@ -7354,8 +6984,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     assert.deepEqual(proxied, direct);
   });
 
-  // The jar is shared between tabs of one site, natively and here — so a cookie written
-  // in one tab, or set by a response to another, must reach the other tab's copy.
   await t.test('a cookie reaches the other tab of the same site (matches native)', async () => {
     const targetBase = `http://${targetHost}:${targetPort}`;
     const names = p => p.evaluate(() => document.cookie.split('; ').filter(Boolean).map(c => c.split('=')[0]).filter(n => n.indexOf('ck3_') === 0).sort().join(','));
@@ -7400,9 +7028,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     assert.deepEqual(proxied, direct);
   });
 
-  // window.name belongs to a browsing context and the lock manager to an origin. Every
-  // proxied site shares one physical origin, and the name store was keyed by tab and
-  // origin: a same-site frame read its parent's name; lock queries listed every site's.
   await t.test('window.name stays with its own frame and lock queries stay inside the site', async () => {
     const targetBase = `http://${targetHost}:${targetPort}`;
     const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
@@ -7421,7 +7046,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     fs.writeFileSync(path.join(artifacts, 'names-and-locks.json'), JSON.stringify({ direct, proxied }, null, 2));
     assert.ok(!direct.__fatal, `native reference died: ${direct.__fatal}`);
     assert.ok(!proxied.__fatal, `proxied fixture died: ${proxied.__fatal}`);
-    // The reference itself: what the comparison stands on.
     assert.equal(direct['child.plain'], 'name= held=zp_names_lock pending=0', 'a frame starts unnamed and sees its own site\'s lock');
     assert.equal(direct['child.cross'], 'name= held= pending=0', 'another site sees neither');
     assert.equal(direct['child.named'], 'name=child_named held=zp_names_lock pending=0');
@@ -7431,8 +7055,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     assert.deepEqual(proxied, direct);
   });
 
-  // Cookies the server sets in answer to a page's fetch / XHR. The page's copy of the
-  // jar was a snapshot taken at load: document.cookie and cookieStore never saw them.
   await t.test('cookies set by fetch and XHR responses are visible to the page and match native', async () => {
     const targetBase = `http://${targetHost}:${targetPort}`;
     const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
@@ -7451,7 +7073,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     fs.writeFileSync(path.join(artifacts, 'server-set-cookies.json'), JSON.stringify({ direct, proxied }, null, 2));
     assert.ok(!direct.__fatal, `native reference died: ${direct.__fatal}`);
     assert.ok(!proxied.__fatal, `proxied fixture died: ${proxied.__fatal}`);
-    // The reference itself: what the comparison stands on.
     assert.equal(direct['fetch.visible'], 'tok');
     assert.equal(direct['fetch.httpOnly.visible'], 'absent', 'a script never reads an HttpOnly cookie');
     assert.equal(direct['xhr.visible'], 'tok');
@@ -7465,9 +7086,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     assert.deepEqual(proxied, direct);
   });
 
-  // Storage events across sites. The browser fires its own storage event in every
-  // frame of the shared physical origin — one site heard another's writes (key
-  // with our prefix, the other site's new value) and our own bookkeeping keys.
   await t.test('storage events stay inside the writing site and match native', async () => {
     const targetBase = `http://${targetHost}:${targetPort}`;
     const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
@@ -7486,7 +7104,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     fs.writeFileSync(path.join(artifacts, 'storage-events.json'), JSON.stringify({ direct, proxied }, null, 2));
     assert.ok(!direct.__fatal, `native reference died: ${direct.__fatal}`);
     assert.ok(!proxied.__fatal, `proxied fixture died: ${proxied.__fatal}`);
-    // The reference itself: what the comparison stands on.
     assert.equal(direct['cross.write'], '', 'another site writing is not heard natively');
     assert.equal(direct['same.write'], 'k_child|null|v1|local|true,s_child|null|v1|session|true');
     assert.equal(direct['same.rewrite'], '', 'an unchanged value fires nothing');
@@ -7499,18 +7116,13 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     assert.deepEqual(proxied, direct);
   });
 
-  // The two tests below build many frames — a joint-history entry each, which capped the shared page's
-  // history at 50 and made the history-counting test after them read a delta of 0 — and open popups.
-  // They get a page of their own.
+  // Use a dedicated page because creating many frames caps joint session history at 50 entries and affects history-delta tests.
   const openProxiedPage = async url => {
     const fresh = await browser.newPage();
     await observeTarget(fresh.target());
     assert.ok(await openThroughLauncher(fresh, proxyOrigin, url), `the launcher did not reach ${url}`);
     return fresh;
   };
-  // Frames that come out of markup. The page-side HTML walker used to route a frame on its inert
-  // parser copy, so a frame made by innerHTML, insertAdjacentHTML, a template or document.write stayed
-  // blank for ever.
   await t.test('frames made from markup load and read back as natively', async () => {
     const targetBase = `http://${targetHost}:${targetPort}`;
     const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
@@ -7534,7 +7146,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     fs.writeFileSync(path.join(artifacts, 'markup-frames.json'), JSON.stringify({ direct, proxied }, null, 2));
     assert.ok(!direct.__fatal, `native reference died: ${direct.__fatal}`);
     assert.ok(!proxied.__fatal, `proxied fixture died: ${proxied.__fatal}`);
-    // The reference itself: every way of making the frame ends with the document loaded.
     for (const k of ['innerHTML.title', 'insertAdjacentHTML.beforeend', 'insertAdjacentHTML.afterend', 'insertAdjacentHTML.beforebegin', 'setHTMLUnsafe', 'outerHTML', 'template.import', 'template.clone', 'createContextualFragment', 'DOMParser.adopt', 'document.write', 'innerHTML.late']) {
       assert.equal(direct[k], 'frame ready', `${k}: the native reference changed`);
     }
@@ -7547,9 +7158,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     assert.deepEqual(proxied, direct);
   });
 
-  // A script put into the document by an unhooked door reached the browser un-rewritten and ran raw —
-  // `location` read the proxy's URL and assigning it left for the real target. Every door a node can come
-  // through is hooked now.
   await t.test('scripts put in by every insertion door run through the membrane (matches native)', async () => {
     const targetBase = `http://${targetHost}:${targetPort}`;
     const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
@@ -7573,14 +7181,12 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     fs.writeFileSync(path.join(artifacts, 'insertion-doors.json'), JSON.stringify({ direct, proxied }, null, 2));
     assert.ok(!direct.__fatal, `native reference died: ${direct.__fatal}`);
     assert.ok(!proxied.__fatal, `proxied fixture died: ${proxied.__fatal}`);
-    // The reference itself: every door runs the script, in the page's own URL.
     assert.ok(Object.keys(direct).length >= 19, `the fixture lost doors: ${Object.keys(direct)}`);
     for (const [door, where] of Object.entries(direct)) assert.equal(where, 'virtual', `${door}: the native reference changed`);
     assert.deepEqual(proxied, direct);
   });
 
-  // A synchronous XHR cannot wait for the acknowledgement of a cookie write: it carries the writes the
-  // worker has not confirmed, and the worker applies them before it sends.
+  // Synchronous XHR forwards unacknowledged cookie writes so the Service Worker applies them before sending upstream.
   await t.test('a cookie written just before a synchronous XHR goes out with it (matches native)', async () => {
     const targetBase = `http://${targetHost}:${targetPort}`;
     const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
@@ -7602,13 +7208,10 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
       await fresh.close();
     }
     fs.writeFileSync(path.join(artifacts, 'sync-xhr-cookies.json'), JSON.stringify({ direct, proxied }, null, 2));
-    // The reference itself: natively the jar is synchronous and every request carries what was just written.
     assert.deepEqual(direct, { rounds: 30, uniqueMissed: [], sharedWrong: [], heldSent: true, heldAfter: 'sheld=1/sheld=1' });
     assert.deepEqual(proxied, direct);
   });
 
-  // What an opaque document's requests carry and keep. The service worker attached the whole jar to
-  // everything it forwarded and kept whatever came back.
   await t.test('a sandboxed frame sends and keeps only the cookies a cross-site context may (matches native)', async () => {
     const targetBase = `http://${targetHost}:${targetPort}`;
     const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
@@ -7632,7 +7235,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     fs.writeFileSync(path.join(artifacts, 'opaque-cookies.json'), JSON.stringify({ direct, proxied }, null, 2));
     assert.ok(!direct.__fatal, `native reference died: ${direct.__fatal}`);
     assert.ok(!proxied.__fatal, `proxied fixture died: ${proxied.__fatal}`);
-    // The reference itself: the page sees every cookie; the opaque documents' requests carry fewer.
     assert.equal(direct.jarHere.split(',').includes('ss_lax'), true, 'the embedding page sends its Lax cookie');
     for (const k of ['img', 'css', 'script', 'last', 'fetch-default']) {
       assert.equal(direct[k].split(',').includes('ss_lax'), false, `${k}: a cross-site request carries no Lax cookie`);
@@ -7643,8 +7245,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     assert.deepEqual(proxied, direct);
   });
 
-  // A popup of a sandboxed frame keeps the frame's sandbox — and its opaque origin — unless the page allowed
-  // popups to escape it. The browser applies the flags to the popup itself; the origin is the emulated part.
   await t.test('a popup of a sandboxed frame is as opaque as the frame (matches native)', async () => {
     const targetBase = `http://${targetHost}:${targetPort}`;
     const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
@@ -7668,7 +7268,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     fs.writeFileSync(path.join(artifacts, 'opaque-popups.json'), JSON.stringify({ direct, proxied }, null, 2));
     assert.ok(!direct.__fatal, `native reference died: ${direct.__fatal}`);
     assert.ok(!proxied.__fatal, `proxied fixture died: ${proxied.__fatal}`);
-    // The reference itself.
     const opaque = direct['opaque popup'].report;
     assert.equal(opaque['self.origin'], 'null', 'the popup is as opaque as the frame that opened it');
     assert.equal(opaque.localStorage, 'threw:SecurityError');
@@ -7680,10 +7279,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     assert.deepEqual(proxied, direct);
   });
 
-  // A cross-origin fetch()/XHR the target did not allow cannot be read, and an "unsafe" one is asked about
-  // first (an OPTIONS preflight) — the request itself goes out only if that answer allows it. The proxy sends
-  // the page's requests itself, so these are its rules to apply; they used to be skipped, and a cross-origin
-  // read the target never allowed succeeded.
   await t.test('cross-origin fetch and XHR obey CORS: who may read, when the browser asks first, redirects (matches native)', async () => {
     const targetBase = `http://${targetHost}:${targetPort}`;
     const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
@@ -7707,7 +7302,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     fs.writeFileSync(path.join(artifacts, 'cors.json'), JSON.stringify({ direct, proxied }, null, 2));
     assert.ok(!direct.__fatal, `native reference died: ${direct.__fatal}`);
     assert.ok(!proxied.__fatal, `proxied fixture died: ${proxied.__fatal}`);
-    // The reference itself: the cases mean what their names say.
     assert.equal(direct['acao-origin'].type, 'cors');
     assert.match(String(direct['acao-missing']), /^threw:TypeError/);
     assert.match(String(direct['star-creds-acac']), /^threw:TypeError/);
@@ -7728,10 +7322,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     assert.deepEqual(proxied, direct);
   });
 
-  // While the worker cannot answer a frame itself, its parent fetches the frame's images and swaps them in; until
-  // then an image holds a placeholder. The placeholder was left in place on the live element when the markup had come
-  // through an inert parser copy first, and — being a stretched 1x1 semi-transparent red pixel — showed as a red block
-  // where Naver's ad images belong.
   await t.test('images in frames and in markup end up as the real image, not the placeholder (matches native)', async () => {
     const targetBase = `http://${targetHost}:${targetPort}`;
     const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
@@ -7759,9 +7349,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     assert.deepEqual(proxied, direct);
   });
 
-  // A member operation on a null or undefined receiver throws what the engine throws — the rewritten ones too. The
-  // membrane's helpers used to turn the receiver into an empty object, so `w.location.href` with `w === null` (a
-  // blocked `open()`) quietly answered undefined and a page that catches the TypeError took another branch.
   await t.test('member operations on null and undefined throw as natively', async () => {
     const targetBase = `http://${targetHost}:${targetPort}`;
     const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
@@ -7783,7 +7370,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
       await fresh.close();
     }
     fs.writeFileSync(path.join(artifacts, 'nullish.json'), JSON.stringify({ direct, proxied }, null, 2));
-    // The reference: what the engine says, and that an uncaught one names the page, not a proxy file.
     assert.equal(direct.out['null / get location'], "TypeError: Cannot read properties of null (reading 'location') | true");
     assert.equal(direct.out['undefined / set href'], "TypeError: Cannot set properties of undefined (setting 'href') | true");
     assert.equal(direct.out['null / optional get'], 'ok:undefined');
@@ -7793,11 +7379,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     assert.deepEqual(proxied, direct);
   });
 
-  // Dynamic code that declares functions or variables at the top level makes them globals: `eval` at global scope, an
-  // indirect `eval`, a string timer. The membrane ran the first and the last inside a function body, where the declarations
-  // vanished — Cloudflare's challenge plants its string decoder with `eval("function name(…){…}")` and calls it by name, and
-  // died on `undefined.call`. The two file-system entry points (`webkitRequestFileSystem`, the incognito probe a bot
-  // check runs) stay functions of Chrome's name and length instead of vanishing.
   await t.test('dynamic code declares globals as natively, and the file-system entry points exist', async () => {
     const targetBase = `http://${targetHost}:${targetPort}`;
     const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
@@ -7828,9 +7409,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     assert.deepEqual(proxied, direct);
   });
 
-  // What a cross-origin frame can read of its embedder, and what its own stack looks like: equal to native. A frame's
-  // `document.referrer` was empty and its `ancestorOrigins` too (a challenge widget reads both); a stack carried the
-  // membrane's own frames and lost its line:column positions.
   await t.test('a cross-origin frame sees its embedder and a native-shaped stack', async () => {
     const targetBase = `http://${targetHost}:${targetPort}`;
     const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
@@ -7856,15 +7434,12 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     assert.equal(direct.referrer, `${targetBase}/`);
     assert.equal(direct.stackHasPositions, true);
     assert.equal(direct.stackLeaks, false);
-    // The probe is an external script whose callback runs inside a membrane call: the stack is the browser's, frame for frame
-    // (an inline script's is not — the proxy runs it through `eval`, see the ERRATA residual).
+    // External script callbacks match native stack frames; inline scripts run via eval and differ in top-level frame names.
     assert.equal(direct.stackFrames.length, 5, JSON.stringify(direct.stackFrames));
     assert.equal(proxied.stackLeaks, false, `the stack names the membrane: ${JSON.stringify(proxied.stackFrames)}`);
     assert.deepEqual(proxied, direct);
   });
 
-  // What the target server reads of a request's origin: every request went out `cross-site`, a frame went out as a top-level
-  // `document` navigation with a user activation. Cloudflare's challenge widget is a frame and is asked for as one.
   await t.test('Fetch Metadata of fetches and frames matches native', async () => {
     const targetBase = `http://${targetHost}:${targetPort}`;
     const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
@@ -7892,8 +7467,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     assert.deepEqual(proxied, direct);
   });
 
-  // The same for element loads: an image is `no-cors`/`image`, a classic script `no-cors`/`script` (`cors` with `crossorigin`),
-  // a stylesheet `no-cors`/`style`, a beacon `no-cors`/`empty`, a worker `same-origin`/`worker` — the SW wrote `cors`/`empty` on all.
   await t.test('Fetch Metadata of element loads matches native', async () => {
     const targetBase = `http://${targetHost}:${targetPort}`;
     const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
@@ -7918,16 +7491,11 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     assert.equal(direct['img-same'].dest, 'image');
     assert.equal(direct['script-cross'].mode, 'no-cors');
     assert.deepEqual(direct['worker-same'], { site: 'same-origin', mode: 'same-origin', dest: 'worker', user: 'absent', storage: 'absent' });
-    // Cookie-carrying cross-site loads say `sec-fetch-storage-access`; a `crossorigin` script and a default fetch do not.
     assert.deepEqual(['img-cross', 'css-cross', 'script-cross', 'script-cors', 'fetch-cors'].map(k => direct[k].storage),
       ['active', 'active', 'active', 'absent', 'absent']);
-    // A worker's script is fetched by its bootstrap, not by the browser as a worker load; the SW says what the browser would.
     assert.deepEqual(proxied, direct);
   });
 
-  // A worker started by a COEP require-corp document. The proxy builds every worker from its bootstrap script, a network
-  // response; without a COEP header of its own the browser refused it (`ERR_BLOCKED_BY_RESPONSE`) and the worker never ran —
-  // Cloudflare's challenge widget is such a document, and its VM waits for its worker.
   await t.test('workers start under a cross-origin-isolated document (matches native)', async () => {
     const targetBase = `http://${targetHost}:${targetPort}`;
     const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
@@ -7954,8 +7522,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     assert.deepEqual({ blob: proxied.blob, file: proxied.file }, { blob: direct.blob, file: direct.file });
   });
 
-  // An inline script's stack. The proxy runs it through `eval`: V8 named its top level and its anonymous functions `eval`,
-  // printed `Proxy.` for a call on the window facade, and added the `eval` builtin and the bootstrap script below it.
   await t.test('an inline script\'s Error.stack is a browser\'s (matches native)', async () => {
     const targetBase = `http://${targetHost}:${targetPort}`;
     const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
@@ -7981,11 +7547,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     assert.deepEqual(proxied, direct);
   });
 
-  // A plain call of sloppy code gets the real global from the engine — natively that is `window`, through the proxy it was
-  // not (the page's window is the facade). `Object.keys(window)` threw (the facade reported `window` non-configurable without
-  // the target agreeing), and the location facade had no own accessors. `Error.prepareStackTrace` held the stack sanitizer,
-  // where natively nothing is there until the page assigns one — and a page's `delete` removed the sanitizer. A challenge VM
-  // reads all of these.
   await t.test('a plain call\'s this, Object.keys(window), location\'s accessors and Error.prepareStackTrace are a browser\'s (matches native)', async () => {
     const targetBase = `http://${targetHost}:${targetPort}`;
     const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
@@ -8014,14 +7575,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     assert.deepEqual(proxied, direct);
   });
 
-  // Chrome compiles a TrustedScript handed to `eval` or a timer, whether or not Trusted Types are enforced; the membrane
-  // returned it unevaluated (Cloudflare's Turnstile compiles its decoder that way — the decoder was never defined). And a
-  // timer handler that is neither a function nor a string is compiled as its String() natively; the membrane passed such
-  // handlers to the native timer, which ran them UNREWRITTEN in the real global (they read the proxy's address).
-  // A worker read as the proxy: its hooks printed their source (`fetch.toString()` named `ZP.canonicalTargetURL`), sat as
-  // own properties of the global where the browser keeps them on WorkerGlobalScope.prototype (the natives still there),
-  // the navigator carried own `userAgent`/`appVersion`/`platform`, 56 names of ours were on the global, its resource timing
-  // listed /zp/assets/*, and `this` was not `self`. A challenge VM runs workers and reads exactly these.
   await t.test('a worker sees the environment a browser gives it (matches native)', async () => {
     const targetBase = `http://${targetHost}:${targetPort}`;
     const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
@@ -8043,8 +7596,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
       await fresh.close();
     }
     fs.writeFileSync(path.join(artifacts, 'worker-env.json'), JSON.stringify({ direct, proxied }, null, 2));
-    // The identity is the persona's through the proxy and the test browser's natively (HeadlessChrome) — those must agree
-    // between the page and its workers, as natively; everything else must equal native.
     const identity = ['ua', 'appVersion', 'platform', 'uaData'];
     for (const run of [direct, proxied]) {
       for (const k of identity) assert.deepEqual([run.blob[k], run.file[k]], [run.page[k], run.page[k]], k);
@@ -8084,9 +7635,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     assert.deepEqual(proxied, direct);
   });
 
-  // A frame's `document.referrer` was always the embedder's URL cut by the DEFAULT policy, whatever the embedder declared
-  // (Cloudflare's challenge page sends `Referrer-Policy: same-origin`: natively its widget frame reads "", through the proxy
-  // the challenge page's address), and a document reached by navigating read "" where natively it reads the page it left.
   await t.test('document.referrer and Referer follow the referrer policy, for frames and navigations (matches native)', async () => {
     const targetBase = `http://${targetHost}:${targetPort}`;
     const collect = async (open, run) => {
@@ -8119,11 +7667,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     assert.deepEqual(scrub(proxied), scrub(direct));
   });
 
-  // Client hints (ERRATA 81). The proxy dropped every high-entropy hint and never restarted on `Critical-CH` — Cloudflare
-  // answers Glassdoor's hint-less first request with an interactive challenge, and a real Chrome only renders the restarted
-  // one; a script's fetch/XHR carried `sec-ch-ua` alone and no `accept`; every sub-request went out in a navigation's
-  // header order; the browser underneath restarted the proxy-origin document on the forwarded `Critical-CH`, so the target
-  // was asked for the document once more; and a fetch that could not connect resolved with our 502 page.
   await t.test('client hints are negotiated as Chrome does, and a fetch that cannot connect fails (matches native)', async () => {
     const targetBase = `http://${targetHost}:${targetPort}`;
     const collect = async (open, run) => {
@@ -8146,12 +7689,10 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     }
     const proxied = await collect(u => openProxiedPage(u), 'proxied');
     fs.writeFileSync(path.join(artifacts, 'client-hints.json'), JSON.stringify({ direct, proxied }, null, 2));
-    // which requests went out, and each one's header names in wire order (the restart of the document included)
     const shape = (r, who) => r.log.filter(e => e.who === who).map(e => `${e.method} ${e.path} | ${e.names}`).sort();
     assert.equal(direct.log.filter(e => e.path === '/xch').length, 2, 'natively the document is asked for twice (Critical-CH)');
     assert.deepEqual(shape(proxied, 'self'), shape(direct, 'self'));
-    // A sub-request's order is a hash table's, and the puppeteer-launched Chrome has one more name in it (its
-    // `accept-language`), which reorders a small table: the third party's is pinned to a user's Chrome (measured 2026-10-13).
+    // Puppeteer-launched Chrome injects accept-language in the renderer, changing small header-table hash order relative to a user profile.
     assert.deepEqual(shape(proxied, 'other'), [
       'GET /xch-api | sec-ch-ua-platform user-agent sec-ch-ua sec-ch-ua-mobile accept sec-fetch-site sec-fetch-mode sec-fetch-dest referer accept-encoding',
       'GET /xch-img | sec-ch-ua-platform user-agent sec-ch-ua sec-ch-ua-mobile accept sec-fetch-site sec-fetch-mode sec-fetch-dest sec-fetch-storage-access referer accept-encoding',
@@ -8159,7 +7700,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     assert.deepEqual(proxied.page.neterr, direct.page.neterr);
     assert.deepEqual(proxied.page.neterr, ['rejected TypeError', 'error 0']);
     assert.equal(proxied.page.heKeys, direct.page.heKeys);
-    // the values are the persona's: the build as the full version, in the hints and in the JS API alike
     const restarted = proxied.log.filter(e => e.path === '/xch')[1].hints;
     const full = proxied.page.he.uaFullVersion;
     assert.match(full, /^\d+\.0\.\d+\.\d+$/);
@@ -8168,13 +7708,9 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     assert.equal(restarted['sec-ch-ua-full-version-list'], proxied.page.he.fullVersionList.map(b => `"${b.brand}";v="${b.version}"`).join(', '));
     assert.deepEqual([restarted['sec-ch-ua-arch'], restarted['sec-ch-ua-bitness'], restarted['sec-ch-ua-model'], restarted['sec-ch-ua-platform-version']],
       [`"${proxied.page.he.architecture}"`, `"${proxied.page.he.bitness}"`, `"${proxied.page.he.model}"`, `"${proxied.page.he.platformVersion}"`]);
-    // a third party gets the three defaults only
     for (const e of proxied.log.filter(x => x.who === 'other')) assert.deepEqual(Object.keys(e.hints).sort(), ['sec-ch-ua', 'sec-ch-ua-mobile', 'sec-ch-ua-platform']);
   });
 
-  // ERRATA 84. Underneath, every frame is same-origin with its embedder: a cross-origin frame read every 'self' feature as
-  // allowed (Turnstile's: 61, natively 20), the top's notification permission and permission states, and the allowlists
-  // named the proxy origin. The permission status was a stand-in with own properties, `query` an own property.
   await t.test('a frame reads its feature policy and permissions as natively, cross-origin ones included (matches native)', async () => {
     const targetBase = `http://${targetHost}:${targetPort}`;
     const collect = async p => {
@@ -8202,12 +7738,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     assert.deepEqual(proxied, direct);
   });
 
-  // The helpers rewritten code calls by name receive the real global object, so whoever answers for a name received it:
-  // a page binding (`var __zp_get = f` in a function, a parameter), a bare or window write (the helpers were writable;
-  // `Reflect.set(window, '__ZP_EXEC_EVENT', f)` got `<body onmessage>`'s `this`, the window), the page's own `with`
-  // object (`with({__zp_get: f}) location`). The rewriter refuses a script that binds or writes a runtime name; the
-  // window does not take a write of one; a `with` body binds the helpers before its object can answer; the attribute
-  // reads its executor off the global object with nothing named, so expandos on the element or document cannot either.
   await t.test('the page cannot answer for the helpers rewritten code calls with the real window (escape)', async () => {
     const targetBase = `http://${targetHost}:${targetPort}`;
     const collect = async p => {
@@ -8237,9 +7767,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     for (const k of ['withRead', 'click', 'message', 'after']) assert.deepEqual(proxied[k], direct[k], k);
   });
 
-  // A direct `eval(x)` sees the bindings of the function it is called in. Inside the membrane that holds in the page's own
-  // realm for sloppy code and, since this test, for strict code; a frame the page writes into has a realm without a prelude
-  // of its own, where every direct eval used to run as global code and fail on the first local it read.
   await t.test('direct eval sees its caller\'s bindings, sloppy and strict, in the page and in a written frame (matches native)', async () => {
     const targetBase = `http://${targetHost}:${targetPort}`;
     const collect = async p => {
@@ -8267,9 +7794,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     assert.deepEqual(proxied.child, direct.child, 'the written frame\'s realm');
   });
 
-  // pushState and replaceState refuse every URL that is not the document's own up to path, query and fragment — with the
-  // browser's SecurityError and its sentence. Ours threw "Blocked by ZeroProxy policy", or the transport's own Error
-  // (TARGET_PROTOCOL_BLOCKED) for a scheme it does not carry, and took user info.
   await t.test('history.pushState refuses a foreign URL with the browser\'s own SecurityError (matches native)', async () => {
     const targetBase = `http://${targetHost}:${targetPort}`;
     const collect = async p => {
@@ -8297,10 +7821,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     assert.deepEqual(proxied, direct);
   });
 
-  // The membrane scans the DOM for itself — frames, scripts, styles, the URL attributes — and used to do it through the page's
-  // `node.querySelectorAll`, `createTreeWalker`, `encodeURIComponent`. A wrapper on those (a canary Cloudflare's challenge sets, and
-  // a page that wants to hide a frame or script from the sweep) saw every selector and every target URL and tab id the membrane
-  // used. Natively only the page's own calls arrive.
   await t.test('the membrane\'s own DOM scans do not run through the page\'s DOM methods (matches native)', async () => {
     const targetBase = `http://${targetHost}:${targetPort}`;
     const collect = async p => {
@@ -8325,10 +7845,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     assert.deepEqual(proxied, direct, 'a call the page did not make reached its wrapper');
   });
 
-  // A frame's own realm: code running inside it (`(0, eval)("Object")`, `Function("return this")()`) finds the frame's built-ins, its
-  // replaced functions are functions of the frame (`instanceof` its Function), the classes it shares are its own constructors, and
-  // the frame's own reflection lists no helper of ours. The frame's code used to be handed OUR eval and Function — it ran in the
-  // parent's realm — and every function the membrane put into the frame was a function of the parent's.
   await t.test('a frame the page makes has a realm of its own (matches native)', async () => {
     const targetBase = `http://${targetHost}:${targetPort}`;
     const collect = async p => {
@@ -8355,7 +7871,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     assert.deepEqual(proxied, direct);
   });
 
-  // What a page can read about the classes and functions the membrane stands in for.
   await t.test('replaced built-ins carry the constants, statics, names and lengths of the natives (matches native)', async () => {
     const targetBase = `http://${targetHost}:${targetPort}`;
     const collect = async p => {
@@ -8382,8 +7897,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     assert.deepEqual(proxied, direct);
   });
 
-  // The text of a page's own functions is what the page wrote — on the first read and on every later one (the membrane keeps its
-  // answer per function; it used to put the text back from the rewrite on each call, 65× the native read).
   await t.test('a page function\'s text is what the page wrote, on every read (matches native)', async () => {
     const targetBase = `http://${targetHost}:${targetPort}`;
     const collect = async p => {
@@ -8409,11 +7922,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     assert.deepEqual(proxied, direct);
   });
 
-  // The window's own attributes are the page's to redefine: a getter put on `frameElement`/`parent`/`opener`/`self`/`frames`/
-  // `name`/`navigation`/`history` answers, reads back as written, and an assignment to a replaceable one makes it a data
-  // property. The membrane answered from its own state whatever the page did (Cloudflare's challenge redefines frameElement
-  // and reads it back). Not compared: the message of a refused redefinition ("'defineProperty' on proxy…" — the window is a
-  // Proxy), which these probes do not trigger.
   await t.test('a page may redefine and assign its own window attributes (matches native)', async () => {
     const targetBase = `http://${targetHost}:${targetPort}`;
     const collect = async p => {
@@ -8441,10 +7949,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     assert.deepEqual(proxied, direct);
   });
 
-  // The sentences a window and a Location of another origin raise, word for word: a read names the property ("from"; an
-  // index by its number; a symbol by its description in brackets, Symbol.toPrimitive not at all), a write says "on", and
-  // in / delete / defineProperty / setPrototypeOf / preventExtensions are only the closing sentence. Ours said "on 'Window'"
-  // for all of them and "Blocked by ZeroProxy policy" for every Location.
   await t.test('a cross-origin window and Location refuse with the browser\'s own sentences (matches native)', async () => {
     const targetBase = `http://${targetHost}:${targetPort}`;
     const collect = async p => {
@@ -8472,9 +7976,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     assert.deepEqual(proxied, direct);
   });
 
-  // A cross-origin window answers for the names of its child frames: `parent['anchor']` is the sibling frame, not a
-  // SecurityError. reCAPTCHA's challenge frame finds its anchor frame that way; the membrane's cross-origin window took
-  // indices only and threw for a name (Reddit's "Prove your humanity" page: the challenge script died in `init`).
   await t.test('a cross-origin window answers for the names of its child frames (matches native)', async () => {
     const targetBase = `http://${targetHost}:${targetPort}`;
     const collect = async p => {
@@ -8496,7 +7997,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     }
     const proxied = await collect(await openProxiedPage(`${targetBase}/xnf`));
     fs.writeFileSync(path.join(artifacts, 'named-child-frames.json'), JSON.stringify({ direct, proxied }, null, 2));
-    // the reference: what a browser does
     assert.equal(direct['c.byName'], 'object', 'a frame reads its sibling by name through a cross-origin parent');
     assert.equal(direct['c.has'], 'threw:SecurityError', 'measured: `in` throws for a child name, `get` does not');
     assert.equal(direct['c.flags'], 'object,false,false,true');
@@ -8506,10 +8006,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     assert.deepEqual(proxied, direct);
   });
 
-  // The membrane keeps its state in Maps, Sets, WeakMaps and WeakSets — real windows and elements among the keys and
-  // values. They are built with a copy of each built-in's prototype taken before any page script, so a page that wraps
-  // `Map.prototype.get` (a tracing library, a polyfill) neither watches the tables nor loops the free-name lookup of an
-  // inline script, which reads one. Before this a wrapper that read a top-level variable recursed until the stack ended.
   await t.test('a page that wraps Map, Set, WeakMap and WeakSet methods neither sees the membrane\'s tables nor breaks it', async () => {
     const targetBase = `http://${targetHost}:${targetPort}`;
     const collect = async p => {
@@ -8540,10 +8036,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     }
   });
 
-  // `frameElement`, `parent`, `opener` are configurable own properties of a window, and the page's definition lands on the
-  // real one. The membrane read them there to answer for the page (and to find its embedder, its sandbox): a native
-  // function as the getter — `Object.prototype.valueOf` returns its receiver — handed the page the real window. It reads
-  // them through the getters the browser installed, captured before any page script.
   await t.test('a getter the page puts on its own window never hands it the real window (escape)', async () => {
     const targetBase = `http://${targetHost}:${targetPort}`;
     const collect = async p => {
@@ -8569,8 +8061,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     assert.deepEqual(proxied, ok, 'the page was handed a window that is not its own');
   });
 
-  // An empty script body rewrites to an empty script; the SW read that as a failed rewrite and served its policy stub,
-  // which throws (NYT: two uncaught NotSupportedErrors from an ad partner's empty user-sync script).
   await t.test('an empty external script runs as nothing (matches native)', async () => {
     const targetBase = `http://${targetHost}:${targetPort}`;
     const collect = async p => {
@@ -8595,8 +8085,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     assert.deepEqual(proxied, direct);
   });
 
-  // `innerHTML` on an element whose content is text sets text. The membrane read a script's code as markup:
-  // `n<i;n++)for(var o in t…` became a tag with attributes, and React Helmet's inline scripts (NYT's ad config) did not parse.
   await t.test('innerHTML on a script, textarea, title and noscript sets text (matches native)', async () => {
     const targetBase = `http://${targetHost}:${targetPort}`;
     const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
@@ -8624,9 +8112,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     assert.deepEqual(proxied, direct);
   });
 
-  // The browser's own HLS player fetches a playlist's variant, key and segment URLs itself, in the media stack, where the
-  // proxy's rewriting never reaches: they were absolute target URLs (or relative ones resolved against the proxy's own
-  // route), the CSP refused them and the video stayed blank. The playlist is rewritten on its way to a media element.
   await t.test('a playlist a media element loads has its URLs routed through the proxy (matches native)', async () => {
     const targetBase = `http://${targetHost}:${targetPort}`;
     const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
@@ -8652,15 +8137,11 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     const requested = r => Object.fromEntries(Object.entries(r).filter(([k]) => !k.startsWith('hls:ranged:')));
     assert.deepEqual(requested(direct), { 'hls:/xhls/master.m3u8': 'hit', 'hls:/xhls/v0.m3u8': 'hit', 'hls:/xhls/key.bin': 'hit', 'hls:/xhls/seg0.ts': 'hit' });
     assert.deepEqual(requested(proxied), requested(direct));
-    // A media element asks for a playlist with `Range: bytes=0-`, and a CDN may answer that with a 206 of the original bytes.
-    // The proxy asks upstream for the whole file (it rewrites the whole file) and answers the range itself.
+    // Media elements request playlists with Range: bytes=0-; the proxy fetches and rewrites the full playlist before slicing.
     assert.equal(direct['hls:ranged:/xhls/v0.m3u8'], 'bytes=0-');
     assert.equal(proxied['hls:ranged:/xhls/v0.m3u8'], null);
   });
 
-  // A complete document keeps its html/head/body tags. The page-side markup walker parsed in a <template>, which drops those
-  // tags: a srcdoc frame's inline script found document.body null (a creative's first act is document.body.appendChild),
-  // and <body class style>, <html lang> and the doctype were lost to DOMParser and srcdoc alike.
   await t.test('complete documents keep html, head and body when parsed by DOMParser and srcdoc (matches native)', async () => {
     const targetBase = `http://${targetHost}:${targetPort}`;
     const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
@@ -8688,9 +8169,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     assert.deepEqual(proxied, direct);
   });
 
-  // Inside an assignment target only the identifier that IS the target is a write; a global used as a member's receiver, a
-  // computed key or a default is read. The rewriter sent all of them to the write-only sink, which reads back undefined:
-  // `[,,,window.dotcom.data.k] = v` became `undefined.dotcom` and killed BBC's ad script.
   await t.test('globals read inside destructuring and for-of targets read through the membrane (matches native)', async () => {
     const targetBase = `http://${targetHost}:${targetPort}`;
     const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
@@ -8719,9 +8197,7 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     assert.deepEqual(proxied, direct);
   });
 
-  // A srcdoc frame is controlled for its fetches, yet `navigator.serviceWorker.controller` is null inside it: it cannot
-  // bind itself to its tab with a message, and its first script request reached the worker unattributed (503) — an
-  // external script in a srcdoc frame never ran, nor did anything that needed it.
+  // navigator.serviceWorker.controller is null inside srcdoc frames, so the parent binds the frame before its scripts fetch.
   await t.test('scripts in a srcdoc frame run in order, external ones included (matches native)', async () => {
     const targetBase = `http://${targetHost}:${targetPort}`;
     const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
@@ -8747,9 +8223,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     assert.deepEqual(proxied, direct);
   });
 
-  // A request states the length of its body — and a bodiless POST or PUT states 0 — as Chrome does. Servers that
-  // frame a body by its length refuse a request without one: Optimizely's event endpoint answered every HTTP/2 POST
-  // of CNN's page with 400 until the kernel's HTTP/2 path sent a content-length (it never did).
   await t.test('request bodies are framed as natively (Content-Length, no chunking)', async () => {
     const targetBase = `http://${targetHost}:${targetPort}`;
     const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
@@ -8782,8 +8255,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     assert.deepEqual(proxied, direct);
   });
 
-  // A frame written with document.write is no client of the worker, so a script element its own script creates asked the
-  // server directly and was refused (403): none of CNN's ad layer scripts ran in such frames. The relay answers for it.
   await t.test('a script a written frame creates is loaded, with its load event (matches native)', async () => {
     const targetBase = `http://${targetHost}:${targetPort}`;
     const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
@@ -8809,9 +8280,7 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     assert.deepEqual(proxied, direct);
   });
 
-  // A frame whose sandbox forbids scripts still asks for the scripts in its document (the browser's preload
-  // scanner does) — unless the document carries a CSP <meta>, which makes Chrome skip them (measured). The proxy
-  // used to put one beside the CSP header, so these frames requested nothing for their <script src>.
+  // Omit duplicate CSP <meta> tags so Chrome's preload scanner still requests scripts inside script-disabled sandboxed frames.
   await t.test('a script in a frame that may not run scripts is requested as natively', async () => {
     const targetBase = `http://${targetHost}:${targetPort}`;
     const readSeen = run => new Promise((resolve, reject) => http.get(`${targetBase}/xscr-seen?run=${run}`, res => { let b = ''; res.on('data', d => { b += d; }); res.on('end', () => resolve(JSON.parse(b))); }).on('error', reject));
@@ -8834,7 +8303,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
       await fresh.close();
     }
     fs.writeFileSync(path.join(artifacts, 'scriptless-frames.json'), JSON.stringify({ direct, proxied }, null, 2));
-    // The reference: every frame asks for its script and its image, scriptless or not.
     for (const tag of ['m-empty', 'm-same', 'm-forms', 'm-scripts', 'm-scripts-same', 'm-none', 'd-empty', 'd-same', 'd-scripts', 'h-empty']) {
       assert.ok(direct.includes(`${tag}-script`), `native fetches the script of ${tag}`);
       assert.ok(direct.includes(`${tag}-img`), `native fetches the image of ${tag}`);
@@ -8842,10 +8310,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     assert.deepEqual(proxied, direct);
   });
 
-  // CORS is not only for fetch(): an element that asks for it — `crossorigin` on <img>, <script> and <link>, a
-  // module script, a font from FontFace or @font-face — is held to the target's answer the same way, and the
-  // credentials it asks for decide whether cookies go along. The browser never sees the target's headers (the
-  // worker answers it), so the worker has to apply the rules.
   await t.test('crossorigin elements, modules and fonts obey CORS as natively', async () => {
     const targetBase = `http://${targetHost}:${targetPort}`;
     const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
@@ -8869,7 +8333,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     fs.writeFileSync(path.join(artifacts, 'cors-elements.json'), JSON.stringify({ direct, proxied }, null, 2));
     assert.ok(!direct.__fatal, `native reference died: ${direct.__fatal}`);
     assert.ok(!proxied.__fatal, `proxied fixture died: ${proxied.__fatal}`);
-    // The reference: the cases mean what their names say.
     assert.equal(direct['i-anon-acao'], 'load');
     assert.equal(direct['i-anon-missing'], 'error');
     assert.equal(direct['i-plain-missing'], 'load', 'an image without crossorigin needs no permission');
@@ -8902,11 +8365,7 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     assert.deepEqual(proxied, direct);
   });
 
-  // Sandboxed frames without allow-same-origin have an opaque origin. Every proxied site shares one
-  // physical origin, so the browser cannot give such a frame one for free: the proxy keeps the real
-  // sandbox flags, adds the one that lets it serve the frame, and the membrane emulates the opacity.
-  // This used to delete the frame at insertion (it could not be contained); when kept, its document
-  // got a 403 and its prelude died at localStorage.
+  // Proxied frames need allow-same-origin at the browser layer for SW routing, so the membrane emulates opaque-origin sandboxes.
   await t.test('sandboxed frames are opaque to the page and to each other, as natively', async () => {
     const targetBase = `http://${targetHost}:${targetPort}`;
     const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
@@ -8931,7 +8390,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     fs.writeFileSync(path.join(artifacts, 'sandboxed-frames.json'), JSON.stringify({ direct, proxied }, null, 2));
     assert.ok(!direct.__fatal, `native reference died: ${direct.__fatal}`);
     assert.ok(!proxied.__fatal, `proxied fixture died: ${proxied.__fatal}`);
-    // The reference itself: what the comparison stands on.
     const attr = direct['attr.report'];
     assert.match(attr, /^origin=null\n/, 'a sandboxed document speaks as "null"');
     for (const line of ['self.origin=null', 'localStorage=threw:SecurityError', 'sessionStorage=threw:SecurityError', 'document.cookie=threw:SecurityError',
@@ -8951,9 +8409,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     assert.match(direct['nav.scripts'], /top\.location\.href==threw:SecurityError/);
     assert.match(direct['nav.tampered'], /top\.location\.href==threw:SecurityError/);
     assert.equal(direct['nav.pathAfter'], '/xsandbox', 'the sandbox refused to navigate the top window');
-    // Every route a script has, tried from inside the sandbox, reached the upstream the way the page's own
-    // requests do — by the proxy, as the target's user agent — and nothing went anywhere else (the
-    // suite's last test checks every request the browser made).
     assert.ok(wireRequests.slice(wireBefore).some(u => u.startsWith(proxyOrigin + '/')), 'no proxy-origin wire request observed');
     for (const where of ['/xsb-egress-fetch', '/xsb-egress-xhr', '/xsb-egress-script.js', '/xsb-egress-style.css', '/xsb-egress-module.js', '/xsb-beacon']) {
       assert.ok(requests.some(r => r.url === where && r.userAgent === TARGET_UA), `${where}: not seen through the proxy: ${JSON.stringify(requests.filter(r => r.url === where))}`);
@@ -8963,7 +8418,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     assert.deepEqual(proxied, direct);
   });
 
-  // Frame load events and joint history against native (the /frame-loads fixture).
   await t.test('frame load events and history match native', async () => {
     const targetBase = `http://${targetHost}:${targetPort}`;
     const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
@@ -8982,7 +8436,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     fs.writeFileSync(path.join(artifacts, 'frame-loads.json'), JSON.stringify({ direct, proxied }, null, 2));
     assert.ok(!direct.__fatal, `native reference died: ${direct.__fatal}`);
     assert.ok(!proxied.__fatal, `proxied fixture died: ${proxied.__fatal}`);
-    // The reference itself: one load per navigation, one history entry per change.
     assert.deepEqual(direct, {
       staticOnload: '1', staticListener: '1',
       srcBeforeAppend: 'Lo', srcAfterAppend: 'LoLo', rapidSwap: 'LoLo|fh',
@@ -8991,8 +8444,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     assert.deepEqual(proxied, direct);
   });
 
-  // T1: 미검증 표면 실측 (`/surface-probes` fixture, window.__surfaceProbes).
-  // 첫 실행으로 실측값을 보고 divergence/누출을 핀한다.
   await t.test('surface suite', async t => {
     await page.evaluate(u => { __zp_get(globalThis, 'location').href = u; }, `http://${targetHost}:${targetPort}/surface-probes`);
     try {
@@ -9005,15 +8456,8 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     const errs = await page.evaluate(() => window.__surfaceErrs);
     fs.writeFileSync(path.join(artifacts, 'surface-probes.json'), JSON.stringify({ probes, errs }, null, 2));
     assert.ok(!probes.__fatal, `surface fixture died: ${probes.__fatal}`);
-    // The same fixture in plain Chrome. Every divergence below is deliberate
-    // (fail-closed by design) or a documented ERRATA residual, each with its
-    // reason; any other difference is a regression. Pins further down were
-    // once written from proxy-only runs — five of them encoded divergences.
     await t.test('surface probes match native Chrome except documented divergences', async () => {
-      // The native reference occasionally stalls (this fixture drives mailto:,
-      // WebAuthn and protocol-handler UIs that headless Chrome may sit on). It
-      // is the REFERENCE, not the system under test, so bound each attempt
-      // (hard kill) and retry once with a fresh browser — never the proxy side.
+      // Bound and retry the native reference browser in case headless Chrome stalls on protocol-handler or WebAuthn UI.
       const collectNative = async () => {
         const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 20000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
         const killer = setTimeout(() => { try { directBrowser.process().kill('SIGKILL'); } catch {} }, 40000);
@@ -9022,18 +8466,12 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
           // Native alert/confirm/prompt block the page; dismissing them yields
           // exactly the stubs' values (undefined / false / null).
           dp.on('dialog', d => { d.dismiss().catch(() => {}); });
-          // ★The fixture calls navigator.credentials.create({publicKey}). Natively
-          // on Windows that goes to the OS (Windows Security / passkey dialog,
-          // CredentialUIBroker.exe) — a system modal on the developer's desktop
-          // that a headless browser can never dismiss, and the stall behind the
-          // intermittent 140 s reference runs (2026-09-29). A CDP virtual
-          // authenticator keeps WebAuthn inside the browser. The proxied side
-          // never reaches native WebAuthn (the facade fails closed).
+          // Attach a CDP virtual authenticator so native navigator.credentials.create({publicKey}) does not block on an OS modal dialog.
           const cdp = await dp.target().createCDPSession();
           await cdp.send('WebAuthn.enable', { enableUI: false });
           await cdp.send('WebAuthn.addVirtualAuthenticator', { options: { protocol: 'ctap2', transport: 'internal', hasResidentKey: true, hasUserVerification: true, isUserVerified: true } });
           await dp.goto(`http://${targetHost}:${targetPort}/surface-probes`, { waitUntil: 'domcontentloaded', timeout: 15000 });
-          // Default `raf` polling starved in the background headless page (140 s).
+          // Use mutation polling instead of default raf polling, which can starve in background headless tabs.
           await dp.waitForFunction(() => window.__surfaceProbes && window.__surfaceProbes.done && window.__surfaceProbes.moduleDone, { timeout: 30000, polling: 100 });
           return await dp.evaluate(() => window.__surfaceProbes);
         } finally {
@@ -9048,20 +8486,16 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
       }
       fs.writeFileSync(path.join(artifacts, 'surface-differential.json'), JSON.stringify({ direct, proxied: probes }, null, 2));
       const expected = {
-        // Fail-closed by design (PHASE2_STATUS divergence table, ERRATA Q7).
         webAuthn: 'credentials.create → NotAllowedError: the RP would be the proxy origin',
         credGet: 'credentials.get → NotAllowedError, same reason',
         paSurfaces: 'Privacy Sandbox APIs removed: keyed to the proxy origin',
         swRegs: 'the virtual SW facade always reports one fake registration (D3 fail-soft)',
         dynamicBase: "base-uri 'none': a runtime <base> does not move the virtual base",
-        // Documented residuals (ERRATA).
         framesByName: 'a srcdoc child reports the parent virtual URL, not about:srcdoc',
         windowByName: 'same as framesByName',
         framesItem: 'V8 names the rewritten callee in "is not a function" messages',
         withEvalScope: 'direct eval inside with() does not see the with-object',
-        // Contained blank pages run page code through the membrane, so they
-        // report a virtual URL instead of about:blank. Raw — equal to native —
-        // they ran unrewritten code at the proxy origin (2026-10-01).
+        // Contained blank pages report a virtual URL instead of about:blank because they execute through the membrane.
         staleBlankEval: 'a contained about:blank child reports the parent virtual URL, as framesByName',
         pendingRouteEval: 'the blank page in front of a pending route is contained; it reports the destination',
         parseHTMLUnsafeHook: 'a base-less parsed document resolves anchor href against the virtual base',
@@ -9073,54 +8507,37 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
       const unexpected = Object.keys(direct).filter(k => probes[k] !== direct[k] && !(k in expected))
         .map(k => `${k}: native=${direct[k]} proxy=${probes[k]}`);
       assert.deepEqual(unexpected, [], unexpected.join('\n'));
-      // A documented divergence that stops diverging means the behavior moved —
-      // re-audit ERRATA instead of letting the entry rot.
       const healed = Object.keys(expected).filter(k => k !== 'realProps' && probes[k] === direct[k]);
       assert.deepEqual(healed, [], `now match native — update ERRATA and this list: ${healed.join(', ')}`);
     });
-    // T1-1: transformer 잔여 — 전부 리라이트/클린
-    // Read-back is deproxied like native text; the rewrite itself is proven by
-    // importmapBare (the module resolves through the proxy) and the wire check.
     assert.equal(probes.importmapText, 'v:raw');
     assert.equal(probes.specrulesText, 'v:raw');
     assert.match(probes.shadowDom, /^v:shadow-img:clean/);
     assert.match(probes.svgImage, /^v:clean:/);
     assert.match(probes.svgAnchor, /^v:clean:/);
     assert.match(probes.importmapBare, /^v:1\|http:\/\/localhost/);
-    // T1-2: clone/transfer — 네이티브처럼 DataCloneError (전송 불가 = fail-closed)
     for (const k of ['cloneLocation', 'portMsgLocation', 'cloneDocument', 'cloneWindow']) {
       assert.match(probes[k], /DataCloneError/, `${k}: ${probes[k]}`);
     }
     assert.equal(probes.weakRefLocation, 'v:same-proxy');
-    // T1-3: 명명/인덱스 프레임 — frames['nf']/window['nf'] 는 contained 자식
     assert.match(probes.framesByName, /^v:clean:/, `framesByName: ${probes.framesByName}`);
     assert.match(probes.windowByName, /^v:clean:/, `windowByName: ${probes.windowByName}`);
     assert.match(probes.selfIndex, /^v:clean/);
     assert.match(probes.thisIndex, /^v:clean/);
-    // frames.item 은 네이티브에도 없다 (Chrome: "frames.item is not a function")
     assert.match(probes.framesItem, /^threw:TypeError/);
-    // T1-4: 레거시 접근자 — location 재정의는 non-configurable 이라 TypeError (네이티브 parity)
     assert.match(probes.defineGetterLoc, /threw:TypeError/);
     assert.match(probes.defineSetterLoc, /threw:TypeError/);
     assert.equal(probes.lookupGetterLoc, 'v:fn');
     assert.equal(probes.lookupSetterLoc, 'v:fn');
-    // T1-5: getOwnPropertyNames(window) — 동작해야 하되 __zp_* 는 숨긴다
     assert.match(probes.ownKeysLeak, /^v:clean:\d+$/, `ownKeysLeak: ${probes.ownKeysLeak}`);
-    // T1-6: the browser never pings on its own (the attribute is stashed and
-    // E1 fires it through the proxy), yet every read surface answers like
-    // native: getAttribute/prop show the value, the data-zp marker stays hidden.
     assert.equal(probes.anchorPing, 'v:attr:https://evil.example/track|marker:none|prop:https://evil.example/track');
-    // import.meta.resolve 는 가상 타깃 URL 기준 해석
     assert.match(probes.importMetaResolve, /^v:http:\/\/localhost:\d+\/x$/, `importMetaResolve: ${probes.importMetaResolve}`);
-    // T1-7: document.write 두 번째 문서 — 스크립트가 가상 location 아래 실행
     assert.match(probes.docWriteFrame, /^v:clean:/);
-    // T1-8: iframe 잔여
     assert.match(probes.iframeCspAttr, /^v:attr:/);
     assert.equal(probes.iframeCredentialless, 'v:set');
     for (const k of ['targetFramename', 'baseTargetFrame']) {
       assert.match(probes[k], /^v:navigated:http:\/\/localhost:\d+\/frame-dest\|not found$/, `${k}: ${probes[k]}`);
     }
-    // target is read back as written (it used to come back '_self').
     assert.match(probes.targetFramenameAttr, /^v:navigated:http:\/\/localhost:\d+\/frame-dest\|not found\|tfn2\|tfn2$/, `targetFramenameAttr: ${probes.targetFramenameAttr}`);
     assert.equal(probes.targetAttrReadback, 'v:_blank|_blank|_top|x');
     assert.match(probes.parentTargetLink, /^v:navigated:http:\/\/localhost:\d+\/frame-plain\|plain$/, `parentTargetLink: ${probes.parentTargetLink}`);
@@ -9128,38 +8545,26 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     assert.match(probes.formTargetPost, /^v:navigated:http:\/\/localhost:\d+\/post-echo\|a=b\+c$/, `formTargetPost: ${probes.formTargetPost}`);
     assert.match(probes.popupRouted, /^v:fp\|(http:\/\/localhost:\d+\/frame-plain)\|\1$/, `popupRouted: ${probes.popupRouted}`);
     assert.match(probes.namedOpen, /^v:navigated:http:\/\/localhost:\d+\/frame-dest\|not found\|true$/, `namedOpen: ${probes.namedOpen}`);
-    // The child keeps its own membrane: both of its reads and the parent's.
     assert.match(probes.childLocAssign, /^v:(http:\/\/localhost:\d+\/frame-html)\|\1\|\1$/, `childLocAssign: ${probes.childLocAssign}`);
-    // Escapes: a routed page with no prelude anchor, a routed frame moved to
-    // about:blank, and the blank page in front of a pending route all ran page
-    // code raw at the proxy origin. Contained, `location` is virtual.
     assert.match(probes.routedPlainEval, /^v:http:\/\/localhost:\d+\/frame-plain$/, `routedPlainEval: ${probes.routedPlainEval}`);
     assert.match(probes.staleBlankEval, /^v:http:\/\/localhost:\d+\/surface-probes$/, `staleBlankEval: ${probes.staleBlankEval}`);
     assert.match(probes.pendingRouteEval, /^v:http:\/\/localhost:\d+\/frame-plain$/, `pendingRouteEval: ${probes.pendingRouteEval}`);
     assert.match(probes.childSharedWorker, /^v:clean:/, `childSharedWorker: ${probes.childSharedWorker}`);
-    // T2-1: with(obj) — own dangerous name 은 obj 우선, document 경유
-    // location 은 wrapped identity, document.location= 쓰기는 PutForwards.
     assert.equal(probes.withShadow, 'v:obj-first', `withShadow: ${probes.withShadow}`);
     assert.equal(probes.withDocIdentity, 'v:identity-ok', `withDocIdentity: ${probes.withDocIdentity}`);
     assert.match(probes.withDocWrite, /^v:forwarded/, `withDocWrite: ${probes.withDocWrite}`);
-    // eval 은 with 오브젝트를 못 본다 — pinned divergence.
     assert.equal(probes.withEvalScope, 'v:virtual', `withEvalScope: ${probes.withEvalScope}`);
-    // T2-2: 스코프 모델 — 선언이 있으면 로컬 우선 (호이스트/TDZ/catch/destructuring)
     assert.equal(probes.scopeHoistVar, 'v:threw:TypeError', `scopeHoistVar: ${probes.scopeHoistVar}`);
     assert.equal(probes.scopeTDZ, 'v:threw:ReferenceError', `scopeTDZ: ${probes.scopeTDZ}`);
     assert.equal(probes.scopeCatch, 'v:bound:42', `scopeCatch: ${probes.scopeCatch}`);
     assert.equal(probes.scopeDestructParam, 'v:bound', `scopeDestructParam: ${probes.scopeDestructParam}`);
-    // cross-script: var 지속은 물론 let/const/class 도 공유 전역 렉시컬 환경에 지속 (R1).
     assert.equal(probes.crossScriptVar, 'v:number:8', `crossScriptVar: ${probes.crossScriptVar}`);
     assert.equal(probes.crossScriptLet, 'v:number', `crossScriptLet: ${probes.crossScriptLet}`);
     assert.equal(probes.crossScriptConst, 'v:9', `crossScriptConst: ${probes.crossScriptConst}`);
     assert.equal(probes.crossScriptClass, 'v:function', `crossScriptClass: ${probes.crossScriptClass}`);
     assert.equal(probes.crossScriptLetWrite, 'v:42', `crossScriptLetWrite: ${probes.crossScriptLetWrite}`);
     assert.ok(probes.crossScriptConstWrite && probes.crossScriptConstWrite.startsWith('threw:TypeError'), `crossScriptConstWrite: ${probes.crossScriptConstWrite}`);
-    // let 재선언 + var-vs-const 충돌 — 둘 다 SyntaxError 로 죽어야 한다.
     assert.equal(probes.lexRedeclare, 'v:2', `lexRedeclare: ${probes.lexRedeclare} errs=${JSON.stringify(errs.slice(0, 4))}`);
-    // R2: direct eval 이 호출자 스코프를 본다 — desc 접근자 + 진짜 direct
-    // eval(헬퍼 파라미터 intrinsic)로 네이티브 parity.
     assert.equal(probes.evalCallerScope, 'v:LOCAL', `evalCallerScope: ${probes.evalCallerScope}`);
     assert.equal(probes.evalCallerWrite, 'v:7', `evalCallerWrite: ${probes.evalCallerWrite}`);
     assert.equal(probes.evalCallerVar, 'v:VV', `evalCallerVar: ${probes.evalCallerVar}`);
@@ -9172,91 +8577,47 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     assert.equal(probes.evalIndirectNoScope, 'v:global-only', `evalIndirectNoScope: ${probes.evalIndirectNoScope}`);
     assert.equal(probes.evalOptionalNoScope, 'v:global-only', `evalOptionalNoScope: ${probes.evalOptionalNoScope}`);
     assert.equal(probes.evalShadowed, 'v:shadow:x', `evalShadowed: ${probes.evalShadowed}`);
-    // R4: sloppy Annex B — 블록/레이블 함수 선언의 varEnv 바인딩이
-    // `typeof` 에 'function' 으로 보여야 한다(구버전은 가상 location
-    // object 를 돌려줬다 — strict 식 열화).
     assert.equal(probes.annexBSloppy, 'v:function', `annexBSloppy: ${probes.annexBSloppy}`);
     assert.equal(probes.labeledFnDecl, 'v:function', `labeledFnDecl: ${probes.labeledFnDecl}`);
-    // R3: sloppy eval 의 `var` 는 호출자 varEnv 에 호이스트 — 'number'.
     assert.equal(probes.evalVarLocal, 'v:number', `evalVarLocal: ${probes.evalVarLocal}`);
-    // T2-4: strict-mode `with` — 네이티브와 동일한 파스 에러 parity.
     assert.equal(probes.strictWith, 'v:SyntaxError', `strictWith: ${probes.strictWith}`);
-    // T2-8: CSS 잔여 — StyleSheet.href 는 가상 타깃으로 디프록시, url() 은
-    // 쓰기 시 프록시 + 되읽기 시 타깃 (round-trip).
     assert.match(probes.sheetHref, /\/site\.css$/, `sheetHref: ${probes.sheetHref}`);
     assert.ok(!/proxy\.localhost|\/zp\//.test(probes.sheetHref), `sheetHref leaked: ${probes.sheetHref}`);
     assert.ok(/css-leak\.example\/a\.png/.test(probes.insertRuleUrl) && !/\/zp\//.test(probes.insertRuleUrl), `insertRuleUrl: ${probes.insertRuleUrl}`);
     assert.ok(/css-leak\.example\/b\.png/.test(probes.styleAttrUrl) && !/\/zp\//.test(probes.styleAttrUrl), `styleAttrUrl: ${probes.styleAttrUrl}`);
-    // CSS url() 이 실제 fetch 를 프록시 경로로 보냈는지 — 직접 egress 금지.
     const cssDirect = wireRequests.filter(u => /^https?:\/\/css-leak\.example/.test(u));
     const cssProxied = wireRequests.filter(u => /css-leak\.example/.test(u) && u.includes('/zp/'));
     assert.equal(cssDirect.length, 0, `CSS direct egress: ${JSON.stringify(cssDirect)}`);
     assert.ok(cssProxied.length >= 1, `CSS url() not proxied: ${JSON.stringify(wireRequests.filter(u => /css-leak/.test(u)))}`);
-    // T3-1: sealing — mailto 는 외부 핸들러 경로로 살아남고, 다이얼로그는
-    // headless parity 스텁, 동적 base 는 CSP base-uri 'none' 이 차단.
     assert.match(probes.mailtoNav, /^v:(no-throw|e:\w+)/, `mailtoNav: ${probes.mailtoNav}`);
     assert.equal(probes.dialogStubs, 'v:alert:undefined|confirm:false|prompt:null', `dialogStubs: ${probes.dialogStubs}`);
-    // WebAuthn — 네이티브로 통과해 RP-ID=proxy 로 생성 거부돼야 한다
-    // (loud fail — silent credential 은 없어야 한다).
     assert.match(probes.webAuthn, /^v:(e:\w+|absent|created|pending)/, `webAuthn: ${probes.webAuthn}`);
     assert.ok(/localhost|t\.example/.test(probes.dynamicBase) && !/evil-base/.test(probes.dynamicBase), `dynamicBase: ${probes.dynamicBase}`);
-    // T3-2: identity/semantic parity — location identity 는 통일되어야 하고,
-    // optional-call/delete 는 네이티브 parity. new eval / anchorLiteral 은
-    // divergence 핀.
     assert.equal(probes.locIdentity, 'v:true', `locIdentity: ${probes.locIdentity}`);
     assert.equal(probes.optCallChain, 'v:undefined|undefined', `optCallChain: ${probes.optCallChain}`);
     assert.equal(probes.deleteLoc, 'v:false|false', `deleteLoc: ${probes.deleteLoc}`);
-    // `new eval()` — 네이티브는 TypeError(eval 은 생성자가 아님). R5 수정으로
-    // parity — new.target 가드가 TypeError 를 던진다.
     assert.equal(probes.newEval, 'v:e:TypeError', `newEval: ${probes.newEval}`);
-    // getAttribute('href') — R6 리터럴 stash 로 작성자 원문 parity.
     assert.equal(probes.anchorLiteral, 'v:/rel-x', `anchorLiteral: ${probes.anchorLiteral}`);
-    // T4-1: 지문 — String(location)/navigation entry.name 은 가상 URL.
-    // withDocWrite 프로브가 앞서 #withfrag 로 fragment nav 를 했으므로
-    // fragment suffix 는 허용 — 핵심은 proxy 오리진이 아니라는 것.
     const virtURL = `v:http://${targetHost}:${targetPort}/surface-probes`;
     assert.ok(probes.consoleString === virtURL || probes.consoleString === virtURL + '#withfrag', `consoleString: ${probes.consoleString}`);
-    // ── P0: 잔여 표면 가드 ──
-    // ShadowRealm — 이 Chrome 은 미탑재(absent). 탑재 브라우저에서는
-    // evaluate/importValue 가 fail-closed 여야 한다 — 어느 쪽이든 미리라이트
-    // 실행('evaluated:*')이나 직접 egress('imported')는 불허.
     assert.match(probes.shadowRealmEval, /^v:(absent|e:NotSupportedError)|^threw:NotSupportedError/, `shadowRealmEval: ${probes.shadowRealmEval}`);
     assert.match(probes.shadowRealmImport, /^v:(absent|e:|timeout)/, `shadowRealmImport: ${probes.shadowRealmImport}`);
-    // navigator.credentials — 저장소 접근은 NotAllowedError (프록시 오리진
-    // 공용 저장소 노출 방지). 'got:' 이 나오면 실제 저장소가 읽힌 것.
     assert.equal(probes.credGet, 'v:e:NotAllowedError', `credGet: ${probes.credGet}`);
-    // instantiateStreaming(문자열) — 네이티브도 TypeError (Promise<Response>
-    // 아님). egress 없음 확인 = parity 핀.
     assert.match(probes.wasmStreamUrl, /^v:(e:TypeError|absent)/, `wasmStreamUrl: ${probes.wasmStreamUrl}`);
-    // navigator.locks — 타깃 네임스페이스로 격리되며 정상 동작해야 한다.
     assert.equal(probes.navLocks, 'v:got:held', `navLocks: ${probes.navLocks}`);
-    // ── P4–P13: 가상 표면 감사 항목 ──
-    // P4: http://localhost 타깃은 네이티브도 potentially-trustworthy → true.
     assert.equal(probes.secureCtx, 'v:true', `secureCtx: ${probes.secureCtx}`);
-    // P5: webkitURL 은 ZPURL 별칭 — 가상 베이스로 해석, 프록시 URL 미노출.
     assert.equal(probes.webkitURLAlias, `v:http://${targetHost}:${targetPort}/wk-page`, `webkitURLAlias: ${probes.webkitURLAlias}`);
-    // P6: webkitIndexedDB — 이 Chrome 에는 네이티브 부재(not-alias)가 parity,
-    // 탑재 브라우저에서는 네임스페이스 파사드 별칭이어야 한다.
     assert.match(probes.webkitIDB, /^v:(alias|not-alias:undefined)$/, `webkitIDB: ${probes.webkitIDB}`);
-    // P7: 레거시 FS 진입점은 네이티브처럼 함수로 존재하되(없으면 "이 API 를 지운 브라우저" 로 읽힌다) 항상 SecurityError 로 거부한다 —
-    // 프록시 오리진 FS 를 열지 않는다. `webkitPersistentStorage`/`webkitTemporaryStorage` 는 navigator 에만 있고 거기서는 제거.
     assert.equal(probes.webkitFS, 'v:function|function|undefined|undefined', `webkitFS: ${probes.webkitFS}`);
-    // P9: fetchLater — 프록시 봉투 keepalive 에뮬레이션.
     if (probes.fetchLaterType !== 'v:absent') {
       assert.equal(probes.fetchLaterType, 'v:function', `fetchLaterType: ${probes.fetchLaterType}`);
       assert.match(probes.fetchLaterCall, /^v:activated:(true|false)/, `fetchLaterCall: ${probes.fetchLaterCall}`);
     }
-    // P10: OPFS — 타깃 해시 서브디렉터리 (마커/오리진 문자열 미노출).
     assert.match(probes.opfsName, /^v:name:$|^v:absent$/, `opfsName: ${probes.opfsName}`);
-    // P11: customElements — 네이티브 레지스트리 그대로. 레지스트리는 Window 마다
-    // 있고 문서를 넘지 않으므로(크롬 152 실측) 타깃별 접두어는 격리가 아니었다.
     assert.equal(probes.customEl, 'v:ctor:true|up:true|names:x-probe-el|X-PROBE-EL|qs:true|tag:1', `customEl: ${probes.customEl}`);
     assert.equal(probes.customElUpgrade, 'v:same:true|up:true|target:{"ok":1}|matches:true|w:7px', `customElUpgrade: ${probes.customElUpgrade}`);
-    // P12: permissions.query — 프록시 오리진 grant 미노출, 추적 권한은 prompt.
     assert.match(probes.permGeo, /^v:(state:prompt|state:denied|e:\w+|absent)/, `permGeo: ${probes.permGeo}`);
-    // P13: Privacy Sandbox — fail-closed. browsingTopics 는 빈 배열 게이트.
     assert.equal(probes.paSurfaces, 'v:undefined|fn:[]|undefined|undefined|undefined|fn-gated', `paSurfaces: ${probes.paSurfaces}`);
-    // P8: Sanitizer 경로도 transformHTML 경유 — href 게터는 가상 타깃으로 푼다.
     if (probes.setHTMLHook !== 'v:absent') {
       assert.equal(probes.setHTMLHook, `v:http://${targetHost}:${targetPort}/set-html-probe.png`, `setHTMLHook: ${probes.setHTMLHook}`);
     }
@@ -9267,37 +8628,27 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
       assert.match(probes.getHTMLClean, /^v:clean:/, `getHTMLClean: ${probes.getHTMLClean}`);
       assert.ok(!/data-zp-|\/zp\/|proxy\.localhost/.test(probes.getHTMLClean), `getHTML leaked internals: ${probes.getHTMLClean}`);
     }
-    // ShadowRealm importValue / wasmStreamUrl 이 직접 egress 를 낳았는지 wire 확인.
     const p0Direct = wireRequests.filter(u => /^https?:\/\/(sr-leak|wasm-leak)\.invalid/.test(u) && !u.includes('/zp/'));
     assert.equal(p0Direct.length, 0, `P0 direct egress: ${JSON.stringify(p0Direct)}`);
-    // The navigation entry keeps the LOAD url — a later hash write doesn't move it.
     assert.equal(probes.perfNavEntry, virtURL, `perfNavEntry: ${probes.perfNavEntry}`);
-    // getRegistrations 는 프록시 SW 자체를 보여선 안 되고 registerPH 는
-    // 프록시 오리진 등록이 거부돼야 한다.
     assert.match(probes.swRegs, /^v:(count:\d+|no-sw)/, `swRegs: ${probes.swRegs}`);
     assert.match(probes.registerPH, /^v:(e:\w+|ok|absent)/, `registerPH: ${probes.registerPH}`);
-    // E4: 가상 오리진 URL 등록은 silent-success — 브라우저 UI 에 프록시
-    // 오리진을 노출하지 않으면서 네이티브 검증(오리진 동일성)은 지킨다.
     assert.match(probes.registerPHSameOrigin, /^v:(ok|absent)/, `registerPHSameOrigin: ${probes.registerPHSameOrigin}`);
     assert.match(probes.realProps, /^v:(mem|no-mem)\|\d+\|(?:\d+|undefined)\|UTF-8\|/, `realProps: ${probes.realProps}`);
-    // 에러/거부 이벤트 인자에 프록시 표식이 없어야 한다
     for (const e of errs) {
       assert.ok(!/__zp_|\/zp\/api|proxy\.localhost|worker-script/.test(e), `error arg leaked: ${e}`);
     }
-    assert.ok(errs.some(e => e.startsWith('rej:')), 'unhandledrejection 인자가 관측되지 않았다');
-    assert.ok(errs.some(e => e.startsWith('err:')), 'window.onerror 인자가 관측되지 않았다');
-    // wire 수준 직접 egress 없음 — ping 도메인으로 나간 요청이 없어야 한다
+    assert.ok(errs.some(e => e.startsWith('rej:')), 'unhandledrejection argument was not observed');
+    assert.ok(errs.some(e => e.startsWith('err:')), 'window.onerror argument was not observed');
     const egress = wireRequests.filter(u => /evil\.example/.test(u));
     assert.equal(egress.length, 0, `ping egress: ${JSON.stringify(egress)}`);
   });
 
   await t.test('error and truncated documents still transform', async () => {
-    // 500 에러 문서 — 인라인 스크립트가 리라이트되어 location 이 가상이어야 한다.
     await page.evaluate(u => { __zp_get(globalThis, 'location').href = u; }, `http://${targetHost}:${targetPort}/err-doc`);
     await page.waitForFunction(() => window.__errDoc !== undefined, { timeout: 15000 });
     const errDoc = await page.evaluate(() => window.__errDoc);
     assert.ok(!String(errDoc).includes('proxy.localhost') && !String(errDoc).includes('/zp/'), `err-doc location leaked proxy: ${errDoc}`);
-    // 잘린 HTML — 닫힘 없는 문서도 변환 경로를 탄다.
     await page.evaluate(u => { __zp_get(globalThis, 'location').href = u; }, `http://${targetHost}:${targetPort}/trunc-doc`);
     await page.waitForFunction(() => window.__truncDoc !== undefined, { timeout: 15000 });
     const truncDoc = await page.evaluate(() => window.__truncDoc);
@@ -9329,7 +8680,7 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
 
   await t.test('target-authored srcdoc contains cross-origin top navigation', async () => {
     // This probe intentionally destroys its document. Never share its page or
-    // SW/tab state with the rest of E1, and never execute the attack via CDP.
+    // SW/tab state with other tests, and never execute the attack via CDP.
     const context = await browser.createBrowserContext();
     const probePage = await context.newPage();
     try {
@@ -9357,12 +8708,7 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     }
   });
 
-  // D3: SW facade is fail-soft — register() resolves to a fake registration
-  // so target init code doesn't crash, but the security invariant holds:
-  // no real SW controls the origin (controller === null) and the fake
-  // registration's .active is null (no actual worker bound). Sync /
-  // periodicSync register cleanly (no event ever fires; matches native
-  // throttling). Push subscribe rejects NotAllowedError (graceful denial).
+  // Service Worker facade resolves register() to an inert registration (controller === null, active === null) so target initialization succeeds without binding a worker.
   await t.test('service worker and push isolation', async () => {
   const serviceWorkerPolicy = await page.evaluate(async () => {
     const out = {
@@ -9391,11 +8737,8 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     return out;
   });
   assert.equal(serviceWorkerPolicy.exposed, true);
-  // Security invariants: no real SW controls the origin, fake reg's .active is null.
   assert.equal(serviceWorkerPolicy.controller, null);
   assert.equal(serviceWorkerPolicy.registeredActive, 'null', 'fake registration must have null .active (no real SW)');
-  // Fail-soft surface: register resolves, scope is virtual origin, sync
-  // registers no-op, push subscribe rejects gracefully, getSubscription null.
   assert.equal(serviceWorkerPolicy.registerError, '');
   assert.equal(serviceWorkerPolicy.registrationCount, 1, 'facade getRegistrations should surface the single fake reg');
   assert.match(serviceWorkerPolicy.registeredScope, /^https?:\/\//, 'registration.scope should be the virtual origin');
@@ -9471,8 +8814,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
   assert.ok(requests.some(r => r.url === '/next' && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
   });
   await t.test('anchor ping fires through proxy transport', async () => {
-  // E1: `<a ping>` 은 브라우저의 직접 POST 를 끊고(data-zp-blocked-ping 스태시)
-  // 클릭 시 프록시 transport 로 POST 'PING' 을 발사한다 — upstream 이 봐야 한다.
   await page.evaluate(base => {
     const a = document.createElement('a');
     a.href = base + '/ping-dest';
@@ -9482,17 +8823,15 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     document.body.appendChild(a);
   }, `http://${targetHost}:${targetPort}`);
   await page.click('#ping-a');
-  // ping 은 fire-and-forget — 클릭 직후 네비게이션과 독립적으로 upstream 에 도착.
   const deadline = Date.now() + 10000;
   while (!requests.some(r => r.url === '/ping-track')) {
     if (Date.now() > deadline) break;
     await new Promise(r => setTimeout(r, 100));
   }
   const ping = requests.find(r => r.url === '/ping-track');
-  assert.ok(ping, `ping 이 upstream 에 도착하지 않았다: ${JSON.stringify(requests.slice(-8))}`);
+  assert.ok(ping, `ping did not reach upstream: ${JSON.stringify(requests.slice(-8))}`);
   assert.equal(ping.method, 'POST');
   assert.equal(ping.contentType, 'text/ping');
-  // 직접 egress 없음 — ping 도 프록시 오리진 wire 만 탄다(최종 단언이 커버).
   });
   });
   await t.test('all browser and worker network stays on the proxy origin', () => {

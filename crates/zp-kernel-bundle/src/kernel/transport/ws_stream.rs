@@ -1,4 +1,4 @@
-//! `web_sys::WebSocket` → `futures::io::AsyncRead + AsyncWrite` adapter.
+//! `web_sys::WebSocket` to `futures::io::AsyncRead + AsyncWrite` adapter.
 //!
 //! The WebSocket API is event-driven: incoming binary frames fire `onmessage`
 //! callbacks asynchronously, and the only outgoing write surface is the
@@ -18,7 +18,7 @@
 //!
 //! ## Frame semantics
 //!
-//! Yamux, TLS records, and HTTP all see this stream as raw bytes — they
+//! Yamux, TLS records, and HTTP all see this stream as raw bytes; they
 //! don't care about WebSocket frame boundaries, and we don't preserve them.
 //! `poll_read` returns as many bytes as fit in the caller's buffer from the
 //! current pending frame; leftover bytes stay queued for the next read.
@@ -26,8 +26,8 @@
 //! ## Thread model
 //!
 //! WASM is single-threaded; the callbacks and the futures executor run on
-//! the same JS event loop. We use `Rc<RefCell<_>>` for shared state. No
-//! `Send + Sync` bounds. The `Waker` is stored as a plain field — the JS
+//! the same JS event loop. We use `Rc<RefCell<_>>` for shared state without
+//! `Send + Sync` bounds. The `Waker` is stored as a plain field so the JS
 //! callback wakes the executor synchronously on the same task queue.
 
 use std::cell::RefCell;
@@ -120,18 +120,12 @@ pub(crate) struct WsStream {
     _on_close: Closure<dyn FnMut(CloseEvent)>,
 }
 
-/// Cheap "is there still un-parsed inbound data?" probe, shared with the yamux
-/// driver (see `yamux::drive`). The driver owns the `Connection`, not the
-/// socket, so it cannot inspect `rx_buf` directly — this handle lets it decide
-/// whether parking is safe.
+/// Probe for un-parsed inbound data, shared with `yamux::drive`.
 ///
-/// Why it exists: `Connection::poll_next_inbound` returns `Pending` once it has
-/// consumed the frames it wants for this tick, even when more frames are still
-/// queued here. The driver used to park in that case (its `made_progress` flag
-/// only tracks new inbound streams / completed opens, neither of which happens
-/// for ordinary DATA frames), so the queued remainder sat untouched until the
-/// NEXT WebSocket message happened to arrive — for NAVER that was the upstream's
-/// 60 s keepalive PING. Hence documents that froze mid-parse for exactly 60 s.
+/// `Connection::poll_next_inbound` returns `Pending` once it has consumed
+/// the frames it needs for the current tick, even when more frames remain
+/// queued in `rx_buf`. Without checking `has_buffered()`, the yamux driver
+/// would park while ordinary DATA frames remain queued.
 #[derive(Clone)]
 pub(crate) struct RxPending(Rc<RefCell<Inner>>);
 
@@ -171,9 +165,8 @@ impl WsStream {
         ws.set_onopen(Some(on_open.as_ref().unchecked_ref()));
 
         // onmessage: extract bytes from ArrayBuffer (binaryType arraybuffer
-        // is set above) or, for string frames, the UTF-8 bytes — but we
-        // never expect string frames on this transport so a string frame is
-        // an error.
+        // is set above). Text frames are rejected as errors since the relay
+        // transport is strictly binary.
         let on_message = {
             let inner = inner.clone();
             Closure::wrap(Box::new(move |ev: MessageEvent| {
@@ -339,13 +332,11 @@ impl AsyncRead for WsStream {
     ) -> Poll<io::Result<usize>> {
         let mut g = self.inner.borrow_mut();
         // Drain the front frame first. Errors from `onclose`/`onerror` are
-        // surfaced ONLY after the buffered payload is fully drained — when an
+        // surfaced only after the buffered payload is fully drained: when an
         // HTTP/1.1 origin sends `Connection: close` it writes the response
         // body and immediately FINs, and the relay's `io.Copy` closes the WS
         // the moment it observes EOF in one direction. The close event can
-        // therefore fire while the last response frames are still queued; if
-        // we surfaced the error first we would TARGET_HTTP_FAILED valid
-        // responses for any non-keepalive origin.
+        // therefore fire while the last response frames are still queued.
         let (n, drained) = {
             match g.rx_buf.front() {
                 Some(front) => {

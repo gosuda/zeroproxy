@@ -3,8 +3,8 @@
 //!
 //! ```text
 //! fetch(target_url, method, headers, body)
-//!   ├─ parse target_url → host / port / scheme / path
-//!   ├─ pool::take((scheme,host,port))        ← reuses warm TLS+HTTP conn
+//!   ├─ parse target_url: host / port / scheme / path
+//!   ├─ pool::take((scheme,host,port))        (reuses warm TLS+HTTP conn)
 //!   │   │ MISS or stale:
 //!   │   └─ yamux::get_or_open(/zp/ws-pipe)    (shared WS, lazy)
 //!   │     ├─ session.open_stream()           (new yamux stream)
@@ -16,12 +16,9 @@
 //!
 //! ## Response contract
 //!
-//! * No redirect follow — surfaces 3xx to the caller. `kernel_fetch`'s
-//!   higher layer is the right place for that so the cookie jar / virtual
-//!   URL state stays consistent.
-//! * Auth::None: assumes the relay is launched with `-socks internal`.
-//!   Tor mode needs `Auth::UserPassword { user: isolation_token, pass: "x" }`
-//!   wiring through from the SW; deferred until end-to-end verified.
+//! * No redirect follow: surfaces 3xx to the caller. `kernel_fetch`'s
+//!   higher layer handles redirects so the cookie jar and virtual URL
+//!   state stay consistent.
 //! * H1 body consumption owns the connection; only complete framing and
 //!   successful decoding return it to the pool. Both HTTP versions stream.
 
@@ -40,12 +37,12 @@ use super::tls::TlsStream;
 /// rest and returns a JS `Response` for the SW to forward to the page.
 ///
 /// Connection sharing layers:
-/// 1. **Pool** — same (scheme,host,port) reuses an already-handshaken
+/// 1. **Pool**: same (scheme,host,port) reuses an already-handshaken
 ///    `TlsStream` + the live yamux stream beneath it. Zero round-trips
 ///    on cache hit.
-/// 2. **Yamux** — pool miss still skips the WebSocket+TCP handshake by
+/// 2. **Yamux**: pool miss still skips the WebSocket+TCP handshake by
 ///    multiplexing onto the singleton session. One yamux SYN per stream.
-/// 3. **WebSocket** — the singleton session opens its WS lazily on the
+/// 3. **WebSocket**: the singleton session opens its WS lazily on the
 ///    very first request and reuses it forever after.
 ///
 /// TLS runs *inside* each yamux stream regardless of pool hit/miss, so
@@ -75,7 +72,7 @@ pub(crate) async fn fetch(
 
     // Fastest path: live HTTP/2 client for this origin. h2 multiplex means
     // every concurrent fetch reuses the same TLS connection without any
-    // per-request handshake — the single biggest page-load win we have.
+    // per-request handshake.
     if let Some(client) = pool::get_http2(&key) {
         let t_req = now_ms();
         match http2::send_request(
@@ -244,7 +241,7 @@ async fn cold_request(
     }
 }
 
-/// Outcome of `open_fresh` — either we got an HTTP/1.1 byte stream the
+/// Outcome of `open_fresh`: either we got an HTTP/1.1 byte stream the
 /// caller drives one request at a time, or we landed on HTTP/2 and
 /// already have a cloneable client handle that serves N concurrent
 /// streams.
@@ -253,27 +250,8 @@ enum FreshConn {
     Http2(Http2Client),
 }
 
-/// Hosts where h2 is known to misbehave (GoAway after one stream, server
-/// rejects HEADERS frames with our HPACK ordering, etc). We don't even
-/// advertise the protocol in the ClientHello for these — pure h1 keeps
-/// the page rendering. Match is exact-host plus single-label suffix.
-///
-/// 2026-06-12: `www.naver.com` document 의 첫 H2 stream 이 정확히 60s
-/// hold 후 응답하는 회귀 측정 (rustTrace: 첫 fetch 60158ms, 같은 host
-/// 재사용은 33ms, 다른 host h2 는 <300ms). 결정적 비교: `curl
-/// https://www.naver.com/` 가 **HTTP/1.1 로 0.11s** 정상 — 즉 NAVER 의
-/// www document endpoint 가 fresh H2 connection 의 첫 stream 만 anti-bot
-/// 60s slow-lane 하고, HTTP/1.1 은 통과. nid.naver.com (full-request WAF
-/// reject) 과 달리 www 는 h1 다운그레이드로 즉시 해결됨. sub-resource
-/// CDN (ssl.pstatic.net / pm.pstatic.net) 은 h2 유지 (정상 빠름).
+/// Hosts where h2 is disabled and only `http/1.1` is advertised in ALPN.
 fn host_h2_denied(_host: &str) -> bool {
-    // 2026-06-13: h2-deny 로 naver.com 을 h1 강제했으나 h1 으로도 동일한
-    // 간헐적 60s 가 발생 (heavy probe: www.naver.com h1 60154ms) → 프로토콜
-    // 선택은 원인 아님. 게다가 yamux throughput fix (split_send_size 256KB +
-    // MaxStreamWindowSize 16MB) 적용 후엔 h2 multiplexing 이 유리하므로 h1
-    // 강제는 역효과. 간헐적 60s 는 별도 timeout+retry 트랙으로 처리.
-    // (이전 측정에서 "77ms 로 빨라졌다" 는 favicon 이었고 메인 document 가
-    // 아니었음 — false positive.)
     false
 }
 
@@ -288,7 +266,7 @@ fn delta_ms(t0: f64) -> u32 {
     (now_ms() - t0).max(0.0) as u32
 }
 
-/// Build a fresh `PooledConn` from scratch: yamux stream → SOCKS5 →
+/// Build a fresh `PooledConn` from scratch: yamux stream + SOCKS5 +
 /// (TLS if https). Retries once if the yamux session itself looks stale.
 /// `t0` is the parent caller's start time; we report each stage as a
 /// delta off t0 so it's easy to spot which layer dominates total latency.
@@ -298,8 +276,8 @@ async fn open_fresh(
     isolation_key: Option<&str>,
     t0: f64,
 ) -> Result<FreshConn, JsValue> {
-    // REFACTOR.md §3.2 — raw-byte dial은 주입 가능한 Dialer 뒤에 있다.
-    // 기본 RelayDialer 가 기존 yamux→SOCKS5 경로를 그대로 수행한다.
+    // Raw-byte dial sits behind the injectable Dialer; default RelayDialer
+    // runs the yamux + SOCKS5 path.
     let addr = TargetAddr {
         host: parsed.host.clone(),
         port: parsed.port,
@@ -309,13 +287,7 @@ async fn open_fresh(
 
     if parsed.scheme == "https" {
         let t_tls = now_ms();
-        // Per-host h2 deny list. Some origins (NAVER's nid.* family) send
-        // GoAway after the first stream completes, which our pool can't
-        // amortise — every fetch pays a fresh TLS+h2 handshake AND
-        // the parallel-burst cold-path race intermittently loses
-        // requests inside the h2 driver. Until we land per-host fallback
-        // detection, ALPN-advertise http/1.1 only for these origins so
-        // the proven h1+yamux path runs.
+        // Per-host h2 deny list. When active, ALPN-advertise http/1.1 only.
         let alpn_list: &[&[u8]] = if host_h2_denied(&parsed.host) {
             &[b"http/1.1"]
         } else {
@@ -379,8 +351,8 @@ struct ParsedUrl {
 }
 
 /// Parse `http[s]://host[:port]/path[?query]` via the browser's `URL`
-/// constructor. WHATWG semantics handle punycode / percent-encoding /
-/// default ports correctly — much safer than rolling our own.
+/// constructor. WHATWG semantics handle punycode, percent-encoding, and
+/// default ports.
 fn parse_url(url: &str) -> Result<ParsedUrl, String> {
     let u = Url::new(url).map_err(|_| format!("bad URL: {url}"))?;
     let proto = u.protocol(); // e.g. "https:"
@@ -432,10 +404,9 @@ fn host_header(u: &ParsedUrl) -> String {
 }
 
 /// Build the relay WebSocket URL from `self.location`. Targets the
-/// `/zp/ws-pipe` yamux endpoint — the server runs `yamuxconn.Server()`
+/// `/zp/ws-pipe` yamux endpoint; the server runs `yamuxconn.Server()`
 /// on the WebSocket and bridges each yamux stream through
-/// `bridgeTargetStream` (SOCKS5 → upstream). Step-14's intermediate
-/// `/zp/ws-tcp` (1 WS = 1 stream) was removed once yamux landed.
+/// `bridgeTargetStream` (SOCKS5 to upstream).
 pub(crate) fn pick_relay_url() -> Result<String, String> {
     let global = js_sys::global();
     let location = js_sys::Reflect::get(&global, &JsValue::from_str("location"))
@@ -484,11 +455,8 @@ fn build_js_response(
     init.set_headers(&headers);
 
     // A "null body status" (101/103/204/205/304) MUST be constructed with a
-    // null body — the Response constructor throws `Response with null body
-    // status cannot have body` otherwise, which surfaced to the page as a bare
-    // 502. NAVER's analytics beacon `POST https://nlog.naver.com/n` answers
-    // 204, so every beacon 502'd; conditional requests answering 304 hit the
-    // same path.
+    // null body; the Response constructor throws `Response with null body
+    // status cannot have body` otherwise.
     let response = if resp.null_body {
         Response::new_with_opt_buffer_source_and_init(None, &init)?
     } else {
@@ -544,13 +512,13 @@ fn build_response_headers(
         ));
         let _ = headers.append("X-ZP-Set-Cookie", &joined);
     }
-    // C4-adjacent: two-signal challenge-compat marker. Emitted ONLY when the
-    // SW armed this tab (operator opt-in via `X-ZP-Arm-Challenge-Compat: 1`,
-    // captured in `kernel/mod.rs` before x-zp-* strip) AND the response
-    // classifies as a Cloudflare challenge document. The SW `addCSP` consumes
-    // and deletes the marker before the page sees it (B4 strip obligation).
-    // Mirrors `internal/headers/ApplyChallengeCompat` on the Go side via the
-    // shared `zp_shared::is_challenge_document` predicate.
+    // Two-signal challenge-compat marker. Emitted ONLY when the SW armed this
+    // tab (operator opt-in via `X-ZP-Arm-Challenge-Compat: 1`, captured in
+    // `kernel/mod.rs` before x-zp-* strip) AND the response classifies as a
+    // Cloudflare challenge document. The SW `addCSP` consumes and deletes the
+    // marker before the page sees it. Mirrors
+    // `internal/headers/ApplyChallengeCompat` on the Go side via the shared
+    // `zp_shared::is_challenge_document` predicate.
     if armed_challenge_compat {
         let cf = resp_headers
             .iter()
@@ -618,7 +586,7 @@ fn build_streaming_js_response(
     init.set_status(resp.status);
     init.set_status_text(&resp.reason);
     init.set_headers(&headers);
-    // Same null-body-status rule as the buffered path — a streaming 204/304
+    // Same null-body-status rule as the buffered path; a streaming 204/304
     // would otherwise throw in the Response constructor and become a 502.
     let response = if is_null_body_status(resp.status) {
         Response::new_with_opt_readable_stream_and_init(None, &init)?
@@ -632,8 +600,8 @@ fn jserr_str(e: impl std::fmt::Display) -> JsValue {
     JsValue::from_str(&format!("{e}"))
 }
 
-/// `pub(crate)` — `dialer::RelayDialer` 재사용해 TARGET_CONNECT_FAILED:*
-/// 코드와 메시지가 싱글 소스로 유지되게 한다.
+/// Shared by `dialer::RelayDialer` so `TARGET_CONNECT_FAILED:*` codes and
+/// messages stay in one place.
 pub(crate) fn jserr(prefix: &str, e: &impl std::fmt::Display) -> JsValue {
     JsValue::from_str(&format!("{prefix}: {e}"))
 }

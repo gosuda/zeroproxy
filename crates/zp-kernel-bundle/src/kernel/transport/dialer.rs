@@ -1,9 +1,9 @@
-//! Embedding seam: pluggable raw-connection factory (REFACTOR.md §3.2).
+//! Embedding seam: pluggable raw-connection factory.
 //!
 //! ```text
 //! open_fresh(fetch.rs)
 //!   └─ Dialer::connect(target, relay_url, t0)
-//!        ├─ RelayDialer (default): yamux session → SOCKS5 CONNECT
+//!        ├─ RelayDialer (default): yamux session + SOCKS5 CONNECT
 //!        └─ host-injected Dialer: direct/Tor/CONNECT/in-process
 //! ```
 //!
@@ -41,7 +41,7 @@ pub struct TargetAddr {
 
 /// Pluggable raw-byte-connection factory.
 ///
-/// `t0` is the caller's `Date.now()` seed — implementations forward it to
+/// `t0` is the caller's `Date.now()` seed; implementations forward it to
 /// `push_trace` deltas so stage-level latency attribution keeps working.
 pub trait Dialer {
     fn connect<'a>(
@@ -60,7 +60,7 @@ fn delta_ms(t0: f64) -> u32 {
     (now_ms() - t0).max(0.0) as u32
 }
 
-/// Today's pipeline, verbatim: shared yamux session over `/zp/ws-pipe`,
+/// Default pipeline: shared yamux session over `/zp/ws-pipe`,
 /// one stream per connection, SOCKS5 `CONNECT` through the relay.
 pub struct RelayDialer;
 
@@ -156,7 +156,7 @@ pub(crate) fn dialer() -> Rc<dyn Dialer> {
         .unwrap_or_else(|| Rc::new(RelayDialer))
 }
 
-/// Embedder hook — install a custom `Dialer` before the first fetch.
+/// Embedder hook: install a custom `Dialer` before the first fetch.
 /// Deliberately not a `#[wasm_bindgen]` export: wasm hosts implement the
 /// trait in Rust and link it; the JS-side transport contract is unchanged.
 pub fn set_dialer(d: Rc<dyn Dialer>) {

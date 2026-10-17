@@ -24,15 +24,13 @@
   };
   const newWeakMap = () => sealedSetProto(new WeakMap(), SEALED_WEAKMAP);
   const newWeakSet = () => sealedSetProto(new WeakSet(), SEALED_WEAKSET);
-  // ── 네이티브 스냅숏 ── 훅을 걸기 전 이 realm 의 모습. 끝의 settleNatives 가 훅마다 네이티브가 있던 **자리**와
-  // 플래그, name·length·소스를 입힌다. 워커 전역 멤버 다수(fetch·setTimeout·importScripts·location·origin…)는
-  // 인스턴스가 아니라 WorkerGlobalScope.prototype 에 산다. 인스턴스에 훅을 걸면 브라우저에 없는 own 이름이 생기고,
-  // 네이티브는 프로토타입에 그대로 남아 `WorkerGlobalScope.prototype.setTimeout.call(self, '…')` 같은 리라이트
-  // 우회 문이 된다(2026-10-12 e2e `/xwenv` 로 측정).
+  // Snapshot of the worker realm's native globals and prototype members before installing hooks. Most worker globals
+  // (`fetch`, `setTimeout`, `importScripts`, `location`, `origin`) live on `WorkerGlobalScope.prototype` rather than
+  // `self`; `settleNatives` restores each hook to the native owner object with matching descriptor flags, `name`,
+  // `length`, and `toString` output so prototype calls cannot bypass hooks.
   const ZP_HIDDEN_RE = /^(?:__zp_|__ZP_|ZPBundle$|ZPPageBundleWBG$|ZeroProxyRT$|ZP$)/;
-  // The helpers rewritten code names — zp-rewriter RUNTIME_HELPERS (static-policy compares). Every `with` code runs in
-  // starts by binding them as block constants, read off the global object with nothing named: a with object answers for
-  // every free name first, on every lookup (see web/membrane/00-head.js).
+  // Runtime helpers referenced by rewritten code (`zp-rewriter` RUNTIME_HELPERS). Every `with` block binds these as
+  // block constants read off the global object so the `with` target proxy is not queried for helper names on each lookup.
   const ZP_WITH_HELPERS = ['__zp_get', '__zp_set', '__zp_call', '__zp_this', '__zp_assign', '__zp_update', '__zp_delete',
     '__zp_eval', '__zp_has', '__zp_oget', '__zp_ocall', '__zp_ocallv', '__zp_ochain', '__zp_odelete', '__zp_okeys',
     '__zp_rget', '__zp_rset', '__zp_ownKeys', '__zp_getOwnPropertyDescriptor', '__zp_getOwnPropertyDescriptors',
@@ -40,7 +38,7 @@
     '__zp_with_update', '__zp_with_delete', '__zp_with_d', '__zp_lex_decl', '__zp_lex_bind', '__zp_fast', '__zp_fastset'];
   const ZP_WITH_PROLOGUE = 'const{' + ZP_WITH_HELPERS.join(',') + '}=(function(){return this})();';
   const origFnToString = Function.prototype.toString;
-  // 훅 → 그것이 대신한 네이티브의 소스. Function.prototype.toString 훅(settleNatives)이 읽는다.
+  // Maps each wrapper function to the `toString()` text of the native function it replaces.
   const maskedSource = newWeakMap();
   const nativeSnapshot = (() => {
     const global = newMap();
@@ -49,7 +47,6 @@
         if (!global.has(k) && !ZP_HIDDEN_RE.test(k)) global.set(k, { owner: o, desc: Object.getOwnPropertyDescriptor(o, k) });
       }
     }
-    // 생성자의 정적 멤버·프로토타입 멤버, 그리고 네임스페이스 객체(Reflect·console…)의 멤버
     const members = newMap();
     const take = o => {
       if (!o || (typeof o !== 'object' && typeof o !== 'function') || members.has(o)) return;
@@ -64,37 +61,27 @@
     }
     return { global, members };
   })();
-  // module 워커에서 importScripts 는 "없음"이 아니라 **던지는 스텁**으로
-  // 존재한다(Chrome: 호출 시 TypeError) — `typeof` 가드로는 못 걸러서
-  // bootstrap 해시의 mod=1 로 명시 판정한다. 그쪽 부트스트랩이 zp-core 를
-  // import() 로 먼저 싣고 온다(이 줄은 classic 경로 전용).
-  // 실제 워커 location 은 부트스트랩 URL 이다 — prelude 내부가 프록시 오리진/
-  // 해시를 읽을 때 쓰는 진짜 핸들. 끝에서 `self.location` 을 가상 `base` 로
-  // 재정의하므로 내부 경로는 이 캡처값을 써야 한다.
+  // In module workers, `importScripts` exists on `WorkerGlobalScope` but throws a TypeError when called; detect module
+  // workers via `mod=1` in the bootstrap URL fragment (the module bootstrap loads `zp-core.js` beforehand).
+  // Capture the real bootstrap `location` before redefining `self.location` to the virtual target URL.
   const realLocation = self.location;
   const realProxyOrigin = realLocation.origin;
   const isModuleWorker = new URLSearchParams(realLocation.hash.slice(1)).get('mod') === '1';
   if (!isModuleWorker) importScripts('/zp/assets/zp-core.js');
   const nativeFetch = self.fetch.bind(self);
-  // 내부 파싱용 네이티브 생성자 — 아래에서 self.URL 을 가상 래퍼로 갈아 끼우면
-  // bare `new URL` 이 그걸 타게 되므로, 내부 경로 해석은 이 캡처를 쓴다.
+  // Capture the native URL constructor before replacing `self.URL` with the virtualizing wrapper.
   const NativeURLCtor = self.URL;
   const base = new NativeURLCtor(self.__ZP_WORKER_TARGET || 'https://invalid.local/');
   const tabId = String(self.__ZP_WORKER_TAB_ID || '');
-  // W8: blob:/data: 워커의 origin·secure-context·네임스페이스는 **생성자
-  // 문서**의 것을 상속한다 — 부트스트랩이 실어 주는 `ref` = 생성자의 가상
-  // 타깃 URL. http(s) 만 인정한다 (내부/비-웹 스킴 방어).
+  // `blob:` and `data:` workers inherit origin, secure-context state, and storage partitioning from their creator
+  // document (`__ZP_WORKER_REF`), restricted to `http:` and `https:` URLs.
   const creatorRef = (() => { try { const r = new NativeURLCtor(String(self.__ZP_WORKER_REF || '')); return r.protocol === 'http:' || r.protocol === 'https:' ? r : null; } catch { return null; } })();
   const contextURL = ((base.protocol === 'blob:' || base.protocol === 'data:') && creatorRef) ? creatorRef : base;
   const workerOrigin = base.protocol === 'data:' ? 'null' : contextURL.origin;
-  // 스토리지/채널 네임스페이스용 오리진 — data: 워커의 'null' 은 모든 타깃이
-  // 공유하므로, 이 경우엔 생성자 타깃 오리진으로 네임스페이스를 잡는다.
+  // Partition storage and BroadcastChannel by the creator's origin when `workerOrigin` is opaque `'null'` (`data:`).
   const storageOrigin = (workerOrigin === 'null' && creatorRef) ? creatorRef.origin : workerOrigin;
   const blockedDynamic = function(){ try { throw new DOMException('Blocked by ZeroProxy rewrite policy','NotSupportedError'); } catch(e) { throw e; } };
-  // ── 워커 재작성기 (W1/W2) ─────────────────────────────────────────────
-  // 부트스트랩이 `/zp/assets/zp-page-bundle.js` 를 싣는다 — self-contained
-  // (wasm 인라인 + initSync) 라 워커에서 `self.ZPBundle` 로 바로 선다. 부재
-  // 시 모든 동적 코드 경로는 기존처럼 fail-closed 다.
+  // Dynamic code rewriting via `self.ZPBundle` (loaded by the worker bootstrap); fails closed when unavailable.
   const nativeEval = self.eval;
   const NativeFunctionCtor = self.Function;
   const NativeAsyncFunctionCtor = (async function(){}).constructor;
@@ -109,10 +96,8 @@
     } catch {}
     blockedDynamic();
   }
-  // expression/statement 구분은 페이지 dynamicEval 과 같은 휴리스틱.
   const EXPR_STMT_RE = /^(?:function|class|var|let|const|if|for|while|do|switch|try|throw|return|break|continue|with|import|export|debugger)\b/;
-  // eval 이 컴파일하는 것: 문자열, 또는 TrustedScript 의 텍스트(크롬은 강제 여부와 무관하게 TrustedScript 를 코드로
-  // 본다 — 페이지 realm 의 evalSource 와 같다). 그 밖의 값은 평가하지 않고 그대로 돌려준다(PerformEval 1단계).
+  // `eval` compiles strings and `TrustedScript` instances; all other argument types are returned unchanged (ECMA-262 PerformEval step 2).
   const nativeTT = (() => { try { return { f: self.trustedTypes, is: TrustedTypePolicyFactory.prototype.isScript, text: TrustedScript.prototype.toString }; } catch { return null; } })();
   function evalSource(x) {
     if (typeof x === 'string') return x;
@@ -120,7 +105,6 @@
     return null;
   }
   function workerDynamicEval(source) {
-    // 네이티브 eval 은 생성자가 아니다 — `new eval()` 은 TypeError.
     if (new.target) throw new TypeError('eval is not a constructor');
     if (arguments.length === 0) return undefined;
     const text = evalSource(source);
@@ -132,9 +116,8 @@
         return Reflect.apply(expr, self, [scope]);
       } catch (e) { if (e && e.name === 'NotSupportedError') throw e; }
     }
-    // 문 형태는 전역(indirect) eval — top-level var/function 이 워커 전역에
-    // 살아야 한다 (페이지 execGlobalScript 와 같은 이유). eval 렉시컬
-    // 환경은 버려지므로 isEval=true.
+    // Execute statements via global indirect `eval` so top-level `var` and `function` declarations bind on `self`
+    // while `let`/`const`/`class` remain scoped to a per-eval lexical map (`isEval = true`).
     return workerExecGlobal(zpRewrite(text), true);
   }
   function workerDynamicFunction(ctor, args) {
@@ -149,8 +132,7 @@
     if (open < 0 || close <= open) blockedDynamic();
     const inner = code.slice(open + 1, close);
     const compiled = Reflect.construct(ctor, parts.concat([inner]));
-    // sloppy body 의 nullish this 는 진짜 globalThis 로 강제변환되어
-    // `this.location` 이 부트스트랩 URL 을 새게 한다 — scope 파사드로 대체.
+    // Sloppy functions coerce nullish `this` to the real global object; substitute `scope` so `this.location` stays virtualized.
     const sloppy = !/^\s*['"]use strict['"]/.test(body);
     const fn = function anonymous() {
       'use strict';
@@ -160,14 +142,11 @@
     try { Object.defineProperty(fn, 'prototype', { value: ctor.prototype, enumerable: false, configurable: false, writable: false }); } catch {}
     return fn;
   }
-  // strict 모드에서는 `function eval` 선언이 불법 — 이름은 디스크립터로 심는다.
-  // a method, like the native: no `prototype`, and `new eval()` is a TypeError by itself
+  // Define `workerEval` as a concise method so it has no `.prototype` and throws a TypeError on `new eval()`.
   const workerEval = ({ ['eval'](s) { return workerDynamicEval.apply(this, arguments); } })['eval'];
-  // ── R2: direct `eval(x)` 호출자 스코프 (페이지 zpDirectEval 와 동형) ──
-  // sloppy Function-ctor 헬퍼의 `eval` 파라미터가 intrinsic 이라
-  // `eval(__zp_src)` 가 진짜 direct eval 이 된다. desc 접근자는 call-site
-  // 어휘 위치에서 실행되어 호출자 지역을 노출하고, `.call(this)` 가 thisEnv
-  // 를 전달한다.
+  // Direct `eval(x)` helper: `zpDirectEvalRunner` is a sloppy function whose `eval` parameter receives the native
+  // `eval` intrinsic, making `eval(__zp_src)` a real direct eval. Call-site accessors on `desc` expose the caller's
+  // local bindings, and `.call(this)` preserves `this`.
   const zpDirectEvalRunner = Reflect.construct(NativeFunctionCtor, ['eval', '__zp_env', '__zp_src', 'return eval(__zp_src)']);
   var __zp_eval_desc = null;
   function workerDirectEval(callee, args, desc, callerStrict) {
@@ -200,7 +179,6 @@
           return Reflect.set(scope, p, v);
         },
       });
-      // sourceURL — eval 소스 에러 filename 을 가상 워커 URL 로 태깅.
       const body = strictSrc ? '"use strict";' + rewritten : 'with(__zp_env){' + ZP_WITH_PROLOGUE + rewritten + '\n}';
       return zpDirectEvalRunner.call(this, nativeEval, env, body + '\n//# sourceURL=' + base.href);
     } finally {
@@ -214,9 +192,8 @@
   const workerAsyncFunction = function AsyncFunction() { return workerDynamicFunction(NativeAsyncFunctionCtor, Array.prototype.slice.call(arguments)); };
   const workerGeneratorFunction = function GeneratorFunction() { return workerDynamicFunction(NativeGeneratorFunctionCtor, Array.prototype.slice.call(arguments)); };
   const workerAsyncGeneratorFunction = function AsyncGeneratorFunction() { return workerDynamicFunction(NativeAsyncGeneratorFunctionCtor, Array.prototype.slice.call(arguments)); };
-  // `.constructor` 로 native ctor 를 꺼내는 우회를 닫는다 —
-  // `({}).constructor.constructor === Function` 이 페이지와 같이 wrapper 를
-  // 가리키게 각 intrinsic prototype 의 constructor 를 바꿔 친다.
+  // Point each function prototype's `.constructor` at the rewriting wrapper so `fn.constructor` cannot reach the
+  // unrewritten native constructor, while keeping `.prototype` set to the real intrinsic prototype.
   for (const [ctor, wrapper] of [
     [NativeFunctionCtor, workerFunction],
     [NativeAsyncFunctionCtor, workerAsyncFunction],
@@ -225,15 +202,9 @@
   ]) {
     try { Object.defineProperty(ctor.prototype, 'constructor', { value: wrapper, enumerable: false, configurable: false, writable: true }); } catch {}
     try { Object.defineProperty(wrapper, 'name', { value: ctor.prototype.constructor.name || 'Function', configurable: true }); } catch {}
-    // `Function.prototype` 은 진짜 intrinsic 이어야 한다 — 래퍼의 기본 prototype
-    // (빈 객체)이 보이면 `Function.prototype.toString.call(f)` 가 "[object Function]"
-    // 이 되어 네이티브 판별(`/\[native code\]/`)이 전부 어긋났다.
     try { Object.defineProperty(wrapper, 'prototype', { value: ctor.prototype, writable: false, enumerable: false, configurable: false }); } catch {}
   }
-  // R1: 워커 스크립트의 top-level let/const/class 도 공유 전역 렉시컬
-  // 환경에 산다 — 페이지 zpLex 와 동형. eval 렉시컬 환경은 버려지므로
-  // 리라이터가 심은 __zp_lex_decl/__zp_lex_bind 가 accessor 클로저를
-  // 여기 보존하고, scope 프록시가 식별자 해석 시 먼저 consult 한다.
+  // Shared global lexical environment for top-level `let`, `const`, and `class` declarations across worker scripts.
   const zpLex = newMap();
   var __zp_lex_env = zpLex;
   const zpLexEntry = prop => (typeof prop === 'string' ? zpLex.get(prop) : undefined);
@@ -245,9 +216,8 @@
     if (!e.set) throw new TypeError('Assignment to constant variable.');
     e.set(value);
   };
-  // 충돌 이름을 반환(throw 는 방출 코드 — 페이지와 같은 이유: prelude
-  // 에서 던지면 에러 filename 이 prelude URL 을 샌다). 2-패스 부분 등록
-  // 방지.
+  // Returns any conflicting identifier name so the caller throws the SyntaxError from rewritten target code rather
+  // than exposing the prelude URL in the error stack. Validates all declarations before registering any entry.
   expose('__zp_lex_decl', (lexMap, varNames) => {
     const env = __zp_lex_env || zpLex;
     for (const n of varNames) {
@@ -275,14 +245,12 @@
     deleteProperty() { return false; },
   });
   expose('__zp_lex_scope', zpLexScope);
-  // 전역-스크립트 위치의 재작성 코드 실행 — sloppy 는 렉시컬 환경을
-  // with(lexScope) 로 에뮬레이션. isEval 면 버리는 환경(네이티브 eval
-  // 렉시컬 환경 의미). strict 소스는 with 불가 — 래핑 생략(잔여 gap).
+  // Executes rewritten global worker code, wrapping non-strict code in `with(__zp_lex_scope)` to expose shared
+  // top-level lexical bindings.
   const ZP_STRICT_DIRECTIVE_RE = /^(\s|\/\*[^]*?\*\/|\/\/[^\n]*)*('use strict'|"use strict")/;
   const workerExecGlobal = (code, isEval) => {
     const prevLexEnv = __zp_lex_env;
     if (isEval) __zp_lex_env = newMap();
-    // sourceURL — eval'd 코드의 에러 filename 이 가상 워커 URL 을 가리키게.
     const tagged = '\n//# sourceURL=' + base.href;
     try {
       if (ZP_STRICT_DIRECTIVE_RE.test(code)) return nativeEval.call(self, code + tagged);
@@ -291,15 +259,10 @@
       __zp_lex_env = prevLexEnv;
     }
   };
-  // ★`self`/`globalThis` 는 스코프 프록시다 — 거기서 꺼낸 네이티브 **메서드**를
-  // 그대로 돌려주면 수신자가 프록시가 되어 브랜드 체크가 실패한다:
-  // `self.addEventListener('message', …)`·`self.setTimeout`·`self.atob` 가 전부
-  // "Illegal invocation" 이었다(2026-09-29 실측, CNN 의 Permutive 워커). 페이지
-  // 멤브레인의 needsWindowReceiver 와 같은 규칙 — prototype 없는 네이티브
-  // 함수만 진짜 전역에 묶는다(생성자는 new 가 깨지고, 워커가 얹은 자기 함수는
-  // this 가 바뀌므로 건드리지 않는다). 함수별로 캐시해 `self.f === self.f`.
+  // Native methods read off `self` or `globalThis` must be bound to the real `WorkerGlobalScope` (`self`) so WebIDL
+  // brand checks do not fail with `Illegal invocation` when called on the `scope` proxy. Constructors (which have
+  // `.prototype`) and non-native functions remain unbound.
   const globalMethodBindings = newWeakMap();
-  // 런타임의 전역 `Function` 은 우리 래퍼다 — 네이티브 toString 을 잡아 둔다.
   const nativeFnToString = NativeFunctionCtor.prototype.toString;
   function globalReceiverValue(value) {
     if (typeof value !== 'function') return value;
@@ -309,16 +272,14 @@
     try { if (!/\{\s*\[native code\]\s*\}/.test(nativeFnToString.call(value))) return value; } catch { return value; }
     const bound = value.bind(self);
     try { Object.defineProperty(bound, 'name', { value: value.name, configurable: true }); } catch {}
-    // a bound function prints `function () { [native code] }` — it reads as the method it is bound from
+    // Preserve the unbound method's `toString()` text instead of `function () { [native code] }`.
     try { maskedSource.set(bound, nativeFnToString.call(value)); } catch {}
     globalMethodBindings.set(value, bound);
     return bound;
   }
-  // A worker's global has `self` and `globalThis` and NOT `window`, `top`, `parent`, `frames`, `document`: `typeof window` is
-  // the check libraries make to tell a worker from a page, and reCAPTCHA's worker took the `document.body` branch because
-  // ours answered (Reddit: "Cannot read properties of undefined (reading 'body')"). So this object answers for what the
-  // worker really has, plus the lexical bindings its scripts share. A name it does not answer for falls out of the `with`
-  // to the real global scope: `typeof window` is 'undefined' there, as natively (a bare read stays undefined, see `get`).
+  // A worker global exposes `self` and `globalThis` without `window`, `top`, `parent`, `frames`, or `document`.
+  // `scope` answers only for properties present on `WorkerGlobalScope` or in `zpLex` so `typeof window` evaluates
+  // to `'undefined'` as in a native worker.
   const scope = new Proxy(self, {
     has(target, prop) {
       if (prop === Symbol.unscopables) return false;
@@ -345,8 +306,7 @@
   function expose(name, value) { Object.defineProperty(self, name, { value, enumerable: false, configurable: false }); }
   function isWorkerGlobal(value) { return value === self || value === scope; }
   function workerTarget(value) { return value === scope ? self : value; }
-  // 워커 코드가 보는 `Error.prepareStackTrace` — V8 은 진짜 접근자로 정리기를 읽고, 리라이트된 코드는 이걸 본다(페이지
-  // realm 의 pageStackHook 과 같다). 네이티브에선 대입하기 전엔 없다. 정리기(installStackSanitizer)가 채운다.
+  // Tracks target code assignments to Error.prepareStackTrace while V8 reads our stack-sanitizing accessor.
   const stackHook = { ctor: null, exists: false, value: undefined, forget: null };
   const isStackHook = (target, prop) => prop === 'prepareStackTrace' && target === stackHook.ctor && target != null;
   const stackHookDesc = () => stackHook.exists ? { value: stackHook.value, writable: true, enumerable: true, configurable: true } : undefined;
@@ -360,8 +320,6 @@
           && Object.prototype.hasOwnProperty.call(d, prop)) return d[prop];
     }
     if (isWorkerGlobal(target)) {
-      // R1: bare 식별자 경로는 전역 렉시컬 우선 — `self.x` 멤버 읽기가
-      // 렉시컬을 보는 잔여 divergence 는 허용(동형 이름 let 선언 필요).
       const le = zpLexEntry(prop);
       if (le) return zpLexRead(le, prop);
       if (prop === 'self' || prop === 'globalThis') return scope;
@@ -436,11 +394,7 @@
     return Reflect.getOwnPropertyDescriptor(Object(workerTarget(target)), prop);
   }
   function ownKeys(target) { return withoutStackHook(target, Reflect.ownKeys(Object(workerTarget(target)))); }
-  // ★리라이터는 워커에도 페이지와 **같은 헬퍼**를 낸다 — `Object.keys(o)` 는
-  // `__zp_okeys(o)`, `delete o[k]` 는 `__zp_delete(o,k)`, `o?.[k]` 는
-  // `__zp_oget(o,k)`. b602610(2026-09-22)이 페이지에만 정의해서 워커에서는
-  // 이 흔한 코드가 전부 ReferenceError 였다(2026-09-29 실측, 11개 중 10개).
-  // 의미는 07-membrane.js 와 같고 대상 해석만 워커 규칙(workerTarget)을 쓴다.
+  // Membrane helpers emitted by zp-rewriter for property deletion, optional chaining, Reflect traps, and with-scopes.
   function del(target, prop) {
     if (typeof prop !== 'symbol') prop = String(prop);
     {
@@ -462,7 +416,6 @@
     if (fn == null && (flags & 1)) return undefined;
     return Reflect.apply(fn, workerTarget(target), Array.isArray(args) ? args : []);
   }
-  // 옵셔널 체인 연속 — 07-membrane.js 의 ochain/ocallv 와 같은 의미.
   function ochain(target, cont) { return target == null ? undefined : cont(target); }
   function ocallv(target, prop) {
     if (target == null) throw new TypeError("Cannot read properties of " + target + " (reading '" + String(prop) + "')");
@@ -471,8 +424,6 @@
     const self = workerTarget(target);
     return function () { return Reflect.apply(fn, self, arguments); };
   }
-  // Reflect.get/set 의 receiver — 전역이 끼면 가상화 경로(get/set)로, 아니면
-  // 네이티브 receiver 의미 그대로.
   function rget(target, prop, receiver) {
     if (receiver === undefined || receiver === target) return get(target, prop);
     if (isWorkerGlobal(receiver)) return get(receiver, prop);
@@ -492,7 +443,6 @@
     for (const k of ownKeys(target)) out[k] = getOwnPropertyDescriptor(target, k);
     return out;
   }
-  // `with(obj)` — 객체 우선, 그다음 바깥(fb). 워커 전역이 obj 면 가상화 경로로.
   function unscopablesHidden(obj, prop) {
     const uns = obj == null ? null : obj[Symbol.unscopables];
     return uns != null && !!uns[prop];
@@ -561,37 +511,25 @@
     if (!spec.startsWith('/') && !spec.startsWith('./') && !spec.startsWith('../') && !/^[A-Za-z][A-Za-z0-9+.-]*:/.test(spec)) throw new TypeError('Blocked by ZeroProxy rewrite policy');
     const u = new NativeURLCtor(spec, referrer || base.href);
     if (u.protocol !== 'http:' && u.protocol !== 'https:') throw blockedDynamic();
-    // Proxy-origin ABSOLUTE. A root-relative path resolves against the
-    // worker's virtualized base (the target origin), so the request would be
-    // sent to the target host and 404. `realLocation` here is the real worker
-    // script URL on the proxy origin — captured before any virtualization.
-    // `tab=` 도 싣는다 — 워커 클라이언트는 referrer 문맥이 없어 ctx 해석이
-    // 안 되므로, 바인딩이 어긴 경로에서도 명시 탭 파라미터로 탭을 찾게 한다.
+    // Return a proxy-origin absolute URL (with explicit tab ID) because root-relative URLs in a worker resolve
+    // against the virtualized target base.
     return realProxyOrigin + '/zp/api/script?kind=module&tab=' + encodeURIComponent(tabId) + '&u=' + encodeURIComponent(u.href);
   });
-  // eval/Function 은 rewrite-then-execute — ZPBundle 부재 시 zpRewrite 가
-  // NotSupportedError 로 fail-closed 된다 (기존 blockedDynamic 과 같은 답).
   try { self.eval = workerEval; } catch {}
   try { self.Function = workerFunction; } catch {}
-  // Keep in lockstep with ZP.TARGET_USER_AGENT (web/zp-core.js) and the
-  // captured Chrome 148 TLS spec. A Worker reporting a different Chrome version
-  // (was 134) than the main realm (148) is a cross-context inconsistency an
-  // anti-bot can profile — every realm must claim the SAME Chrome build.
-  // zp-core.js 의 TARGET_USER_AGENT 와 반드시 같은 값 (여기는 워커라 ZP 가 없다).
+  // Must match ZP.TARGET_USER_AGENT in web/zp-core.js so worker and window realms report identical User-Agent strings.
   const TARGET_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36';
   const TARGET_APP_VERSION = TARGET_USER_AGENT.replace(/^Mozilla\//, '');
   const TARGET_PLATFORM = 'Win32';
   const nav = self.navigator;
   if (nav) {
-    // 네이티브가 사는 WorkerNavigator.prototype 에만 — 인스턴스에도 얹던 동안 `Object.getOwnPropertyNames(navigator)` 가
-    // 브라우저에 없는 세 이름을 내놨다. 플래그·이름·소스는 settleNatives 가 네이티브 것으로 맞춘다.
+    // Define navigator getters on WorkerNavigator.prototype rather than the instance so Object.getOwnPropertyNames(navigator) stays empty.
     const proto = self.WorkerNavigator && self.WorkerNavigator.prototype || Object.getPrototypeOf(nav);
     const getterOf = (key, value) => Object.getOwnPropertyDescriptor({ get [key]() { return value; } }, key).get;
     for (const [key, value] of [['userAgent', TARGET_USER_AGENT], ['appVersion', TARGET_APP_VERSION], ['platform', TARGET_PLATFORM]]) {
       try { Object.defineProperty(proto, key, { get: getterOf(key, value), enumerable: true, configurable: true }); } catch {}
     }
-    // userAgentData — 페이지 realm(virtualUserAgentData)과 같은 브랜드 목록. 엔진의 실제 목록이 페르소나와 같으면(진짜
-    // Chrome) 네이티브를 그대로 둔다; 다르면(WebView2 의 Edge 브랜드) 페이지가 말하는 목록과 워커가 갈라졌었다.
+    // Install a NavigatorUAData shim when the host browser's brand list differs from the target Chrome persona.
     try {
       const persona = [];
       const re = /"([^"]+)";v="([^"]+)"/g;
@@ -621,8 +559,7 @@
   function blocked(){ try { throw new DOMException('Blocked by ZeroProxy policy','NotSupportedError'); } catch(e) { throw e; } }
   const NativeRequest = self.Request;
   const decodeFetchResponse = ZP.createFetchResponseAdapter(self.Response, self.Headers);
-  // `/zp/api/v2/fetch` 바이너리 봉투 우선, 구 SW(메타 헤더 없는 404)면
-  // v1 base64-in-JSON 으로 내려앉는다 — 페이지 postRuntimeEnvelope 와 같은 규칙.
+  // Prefer the binary `/zp/api/v2/fetch` envelope and fall back to JSON `/zp/api/fetch` on 404.
   let v2FetchOK = true;
   self.fetch = async (input, init = {}) => {
     const raw = input && typeof input.url === 'string' ? input.url : String(input);
@@ -643,7 +580,7 @@
         });
         if (r.status === 404 && !r.headers.get('X-ZP-Fetch-Meta')) { v2FetchOK = false; try { r.arrayBuffer().catch(() => {}); } catch {} }
         else return decodeFetchResponse(r);
-      } catch (e) { /* v1 폴백 */ }
+      } catch (e) {}
     }
     payload.init.body = bodyBytes ? ZP.bytesToBase64Url(bodyBytes) : null;
     const response = await nativeFetch('/zp/api/fetch', {
@@ -653,15 +590,7 @@
     v2FetchOK = false;
     return decodeFetchResponse(response);
   };
-  // ── XHR-over-fetch shim ──────────────────────────────────────────────
-  // Workers have no in-realm rewriter, but they DO have the proxied
-  // self.fetch above — an async XHR emulation on top of it restores
-  // axios/pdf.js/emscripten-style loaders without opening a new egress.
-  //
-  // Synchronous XHR (W3): 네이티브 sync XHR 은 워커에서 합법이다 — 같은
-  // 오리진(프록시)의 `/zp/api/sync-fetch` 로 던지면 Go 가 park 하고 SW 가
-  // transportFetch 로 실제 전송한다 (페이지 sendSyncThroughRelay 와 같은
-  // 릴레이). 진짜 블로킹 의미가 보존되고 egress 는 여전히 프록시 경유다.
+  // Worker XMLHttpRequest shim backed by proxied `self.fetch` for async requests and `/zp/api/sync-fetch` for synchronous requests.
   const NativeWorkerXHR = self.XMLHttpRequest;
   const XHR_EVENTS = ['readystatechange', 'loadstart', 'progress', 'load', 'error', 'timeout', 'abort', 'loadend'];
   class WorkerXHRUpload extends EventTarget {}
@@ -772,8 +701,6 @@
         this._fire('loadend');
       });
     }
-    // 동기 경로 — `/zp/api/sync-fetch` 로 park-릴레이 (페이지와 같은 봉투).
-    // 네이티브 sync XHR 은 dedicated worker 에서 합법이라 진짜로 블로킹된다.
     _sendSyncRelay(body) {
       this._fire('loadstart');
       try {
@@ -822,10 +749,7 @@
   }
   for (const e of XHR_EVENTS) WorkerXHR.prototype['on' + e] = null;
   self.XMLHttpRequest = WorkerXHR;
-  // ── Storage namespacing ──────────────────────────────────────────────
-  // Real indexedDB/caches live on the PROXY origin — two targets would
-  // read each other's databases. Namespace every key by the virtual
-  // target origin so each target sees only its own store.
+  // Namespace IndexedDB and Cache Storage keys by target origin so targets sharing the proxy origin cannot read each other's data.
   const ns = 'ZP|' + storageOrigin + '|';
   const nsOf = name => ns + String(name);
   const unNs = name => name.startsWith(ns) ? name.slice(ns.length) : name;
@@ -839,9 +763,7 @@
         list.filter(d => typeof d.name === 'string' && d.name.startsWith(ns))
             .map(d => ({ name: unNs(d.name), version: d.version })));
     }
-    // `indexedDB` 는 worker 전역의 getter-only 접근자 — 모듈(strict) 워커에서
-    // `self.indexedDB = …` 대입은 TypeError 로 부팅이 죽는다. 접근자를
-    // 프로퍼티로 갈아 끼운다 (네이티브는 configurable 이라 허용).
+    // `self.indexedDB` is a getter-only accessor on WorkerGlobalScope; replace it via Object.defineProperty.
     Object.defineProperty(self, 'indexedDB', { value: idb, writable: true, enumerable: true, configurable: true });
   }
   if (self.caches) {
@@ -851,8 +773,7 @@
     cs.has = name => nativeCaches.has(nsOf(name));
     cs.delete = name => nativeCaches.delete(nsOf(name));
     cs.keys = () => nativeCaches.keys().then(list => list.filter(k => k.startsWith(ns)).map(unNs));
-    // match() opens every cache looking for the request — restrict to
-    // our namespace by iterating keys() instead of the global index.
+    // Restrict `caches.match` to caches within the current target's namespace.
     cs.match = (request, options) => cs.keys().then(async keys => {
       for (const k of keys) {
         const c = await nativeCaches.open(nsOf(k));
@@ -863,11 +784,7 @@
     });
     Object.defineProperty(self, 'caches', { value: cs, writable: true, enumerable: true, configurable: true });
   }
-  // cookieStore: in workers the real store reads PROXY-origin cookies —
-  // a cross-target bleed. Give each worker an in-memory jar with the
-  // CookieStore surface; there is no page-realm channel to sync against.
-  // 브라우저에 있을 때만 — CookieStore 는 Window·ServiceWorker 에만 노출된다. 전용/공유 워커에 얹으면 네이티브에 없는
-  // 이름이 하나 는다(e2e `/xwenv`).
+  // Replace `cookieStore` (when exposed on the global scope) with an isolated in-memory store so proxy-origin cookies do not leak.
   if ('cookieStore' in self) {
     const jar = newMap();
     const parseExpires = o => o && o.expires ? Number(o.expires) : null;
@@ -893,15 +810,10 @@
     cookieStore.onchange = null;
     Object.defineProperty(self, 'cookieStore', { value: cookieStore, writable: true, enumerable: true, configurable: true });
   }
-  // ── String timers: rewrite-then-schedule (W6) ───────────────────────
-  // setTimeout('code') 는 발화 시점에 전역 스코프에서 평가된다 — 미리라이트
-  // 컴파일은 우회이므로 ZPBundle 로 재작성한 뒤 indirect eval 로 감싼다.
-  // ZPBundle 부재 시 zpRewrite 가 fail-closed(NotSupportedError) — 기존과
-  // 같은 답이다. 문자열 핸들러에는 timeout 인자가 안 넘어간다(네이티브 의미).
+  // Rewrite non-function timer handlers (`setTimeout(code)` / `setInterval(code)`) through `ZPBundle` before scheduling.
   const nativeSetTimeout = self.setTimeout.bind(self);
   const nativeSetInterval = self.setInterval.bind(self);
-  // 함수가 아닌 핸들러는 전부 코드다 — 문자열, TrustedScript 의 텍스트, 그 밖의 값은 String() 결과(네이티브도 그렇다).
-  // 문자열만 잡던 동안 `setTimeout({ toString() { … } })` 는 네이티브 타이머가 **리라이트 없이** 컴파일했다.
+  // Coerce non-function handlers (strings, TrustedScript, or arbitrary objects) to source text before rewriting.
   const compileTimerString = handler => {
     let code = evalSource(handler);
     if (code === null) code = String(handler);
@@ -916,11 +828,7 @@
     if (typeof handler !== 'function') return nativeSetInterval(compileTimerString(handler), timeout);
     return nativeSetInterval(handler, timeout, ...args);
   };
-  // ── EventSource over proxied fetch ───────────────────────────────────
-  // SSE is a streaming GET — our fetch pipes the transport body through,
-  // so events arrive as the stream delivers them. WebSocket stays
-  // blocked: the yamux kernel lives in the service worker and a dedicated
-  // worker has no SW message channel, so there is no transport to hook.
+  // EventSource implementation backed by streaming proxied `self.fetch`.
   class WorkerEventSource extends EventTarget {
     constructor(url) {
       super();
@@ -977,16 +885,12 @@
   WorkerEventSource.CONNECTING = 0; WorkerEventSource.OPEN = 1; WorkerEventSource.CLOSED = 2;
   WorkerEventSource.prototype.CONNECTING = 0; WorkerEventSource.prototype.OPEN = 1; WorkerEventSource.prototype.CLOSED = 2;
   self.EventSource = WorkerEventSource;
-  // ── W4: 워커 WebSocket — 페이지 중계 SW 스트림 ─────────────────────
-  // 워커에는 navigator.serviceWorker 가 없어 SW 와 직접 통신할 수 없다.
-  // 페이지가 브로커다: `__zp:'zp-broker'` 메시지를 postMessage 하면 페이지의
-  // 워커 훅이 SW 에 ZP_WS_OPEN 을 보내고, 스트림 MessagePort 를
-  // `__zp:'zp-broker-reply'` 로 되돌려 준다(포트는 worker 로 transfer).
-  // prelude 가 타깃 스크립트보다 먼저 실행되므로 이 리스너가 먼저 등록되고,
-  // 제어 메시지는 stopImmediatePropagation 으로 타깃의 onmessage 에 숨긴다.
+  // Workers lack direct `navigator.serviceWorker` access, so WebSocket connections broker through the parent page via
+  // `__zp: 'zp-broker'` messages and receive a transferred `MessagePort`. Registering the reply listener in the
+  // prelude before target scripts run lets `stopImmediatePropagation()` hide control replies from target `onmessage` handlers.
   const brokerPending = newMap();
   let brokerSeq = 0;
-  const canBroker = typeof self.postMessage === 'function'; // SharedWorker 는 port 기반 — 미지원 유지
+  const canBroker = typeof self.postMessage === 'function'; // Dedicated workers only; SharedWorker uses MessagePort.
   if (canBroker) {
     self.addEventListener('message', ev => {
       const m = ev && ev.data;
@@ -1009,7 +913,7 @@
     });
   }
   if (canBroker) {
-    // RFC 6455 경계 parity — 페이지 installWebSocket 과 같은 검증 규칙.
+    // RFC 6455 subprotocol token and close-frame validation.
     const WS_TOKEN_RE = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
     const wsProtocolList = protocols => {
       if (protocols == null) return [];
@@ -1060,9 +964,7 @@
         super();
         if (arguments.length < 1) throw new TypeError("Failed to construct 'WebSocket': 1 argument required, but only 0 present.");
         let u;
-        // 네이티브는 상대 URL 을 베이스로 풀고 http→ws/https→wss 를 매핑한다 —
-        // ws-스킴 베이스로 resolve 해서 같은 결과를 얻는다. ws/wss 외 스킴과
-        // 파싱 실패는 SyntaxError parity.
+        // Resolve relative URLs against the worker base and map http(s) schemes to ws(s).
         try { u = ZP.canonicalWebSocketURL(String(url), base.href.replace(/^http/, 'ws')); }
         catch (e) { throw new DOMException(String(e && e.message || e), 'SyntaxError'); }
         this._url = u.href;
@@ -1156,17 +1058,11 @@
     self.WebSocket = function(){ blocked(); };
   }
   self.WebSocketStream = function(){ blocked(); };
-  // ── W5: WebTransport / RTCPeerConnection — 페이지와 같은 게이트웨이 정책 ──
-  // 부트스트랩 해시(wtg/rtcg/ice)로 전달된 게이트웨이가 있으면 네이티브
-  // 인스턴스를 게이트웨이 URL 로 래핑하고, 없으면 rejected stub.
-  // 네이티브 자체가 없으면(RTCPeerConnection 은 워커에 [Exposed=Window] 라
-  // 오늘의 Chrome 에선 부재) 네이티브 parity 대로 undefined 를 둔다 —
-  // undefined 표면에는 fail-close 할 것이 없다.
+  // Route WebTransport and RTCPeerConnection through the configured gateway or TURN relay when provisioned; otherwise
+  // install a stub that rejects connection attempts without exposing the client IP.
   const wtGateway = String(self.__ZP_WORKER_WT_GATEWAY || '');
   const rtcICEServers = Array.isArray(self.__ZP_WORKER_RTC_ICE) ? self.__ZP_WORKER_RTC_ICE : [];
   function workerGatewayStub(name, code, kind) {
-    // 페이지 makeVirtualGateway 의 워커 축약판 — 생성은 되고 메서드는
-    // 같은 의미로 reject/throw 한다.
     const reason = name + ' requires the ZeroProxy ' + kind + ' gateway, which is not yet provisioned (' + code + ').';
     const gwErr = () => { const e = new DOMException(reason, 'NotSupportedError'); try { e.zpCode = code; e.zpReason = reason; } catch {} return e; };
     const rejected = () => { const p = Promise.reject(gwErr()); try { p.catch(() => {}); } catch {} return p; };
@@ -1214,8 +1110,6 @@
           let parsed;
           try { parsed = new NativeURLCtor(target); } catch { throw new DOMException('Invalid URL', 'SyntaxError'); }
           if (parsed.protocol !== 'https:' && parsed.protocol !== 'wt:') throw new DOMException('Invalid URL scheme', 'SyntaxError');
-          // Same request as the page realm (ZP.webTransportGatewayRequest):
-          // target pins go to the gateway, the gateway's pin from the boot.
           const req = ZP.webTransportGatewayRequest(wtGateway, target, tabId, opts, self.__ZP_WORKER_WT_GATEWAY_HASHES || []);
           this._native = new NativeWT(req.url, req.options);
         }
@@ -1238,9 +1132,6 @@
       self.WebTransport = workerGatewayStub('WebTransport', 'WT_UNSUPPORTED', 'WebTransport');
     }
   }
-  // RTCPeerConnection: 네이티브가 있는 워커만(크롬은 [Exposed=Window] 라 보통
-  // 없다). 페이지와 같은 규칙 — TURN 자격이 있으면 relay 전용 네이티브, 없으면
-  // 스텁. 공통 규칙은 ZP.relayOnlyRTCConfiguration.
   if (typeof self.RTCPeerConnection === 'function') {
     const NativeRTC = self.RTCPeerConnection;
     const ice = rtcICEServers.filter(x => x && x.urls);
@@ -1260,10 +1151,7 @@
     }
     if (typeof self.webkitRTCPeerConnection === 'function') self.webkitRTCPeerConnection = self.RTCPeerConnection;
   }
-  // ── 잔여 표면 가드 (페이지 realm 의 installSurfaceGuards 와 같은 정책) ──
-  // ShadowRealm: evaluate()/importValue() 가 미리라이트 JS 를 realm 에서
-  // 실행한다 — 이 워커에는 재작성기가 없으므로 fail-closed. 생성자/typeof
-  // parity 는 남긴다.
+  // Fail closed on `ShadowRealm.prototype.evaluate` and `importValue` to prevent unrewritten code execution.
   try {
     if (typeof self.ShadowRealm === 'function' && self.ShadowRealm.prototype) {
       const denyEval = function evaluate() { blocked(); };
@@ -1272,8 +1160,7 @@
       Object.defineProperty(self.ShadowRealm.prototype, 'importValue', { value: denyImport, enumerable: true, configurable: false });
     }
   } catch {}
-  // navigator.credentials: 저장소는 프록시 오리진 키라 타깃 간 공유된다 —
-  // get/store 는 NotAllowedError, WebAuthn 가용성 질의는 "인증기 없음".
+  // Block `navigator.credentials` access because the browser credential store is keyed by the proxy origin.
   try {
     const nav = self.navigator;
     if (nav && nav.credentials) {
@@ -1293,7 +1180,7 @@
       }
     }
   } catch {}
-  // navigator.locks: 실오리진 단위 잠금 공간 — 타깃별 프리픽스로 격리.
+  // Prefix `navigator.locks` names with the target origin namespace to isolate lock scopes across targets.
   try {
     const nav = self.navigator;
     const lm = nav && nav.locks;
@@ -1311,10 +1198,8 @@
       }
     }
   } catch {}
-  // ── Error.stack sanitizer ────────────────────────────────────────────
-  // 워커 에러 프레임의 파일명은 `/zp/api/worker-script?u=…`·bootstrap·prelude
-  // 라우트라 그대로 새어 나간다(ERRATA G). 페이지 realm 과 같은 방식으로
-  // prepareStackTrace 를 감싸 프레임 텍스트를 타깃 URL 로 되돌린다.
+  // Sanitize `Error.stack` and `CallSite` filenames so proxy worker routes (`/zp/api/worker-script?u=...`) and
+  // internal `__zp_` helper names are replaced with virtual target URLs and `<anonymous>`.
   (function installStackSanitizer() {
     const E = self.Error;
     if (!E) return;
@@ -1329,12 +1214,8 @@
       } catch {}
       return m;
     }
-    // URL 만이 아니라 프레임 함수명(`at Proxy.__zp_dyn__`)도 `__zp_` 를 샌다 —
-    // 페이지 realm 과 같이 중립 식별자로 지운다.
     const sanitize = v => v == null ? v : String(v).replace(scanRE, deproxyOne).replace(/\b__zp_[A-Za-z0-9_$]*/g, '<anonymous>');
     let userPrepare = null;
-    // 저장/복원(`Error.prepareStackTrace = p`)과 체이닝 훅이 zpPrepare 로 되돌아와
-    // 자기 자신을 부르지 않게 — 페이지 realm(06-install.js)과 같은 가드.
     let inUserPrepare = false;
     const zpPrepare = function (error, frames) {
       const wrapped = frames.map(f => new Proxy(f, {
@@ -1357,7 +1238,6 @@
       for (const f of wrapped) { try { out += '\n    at ' + f.toString(); } catch {} }
       return out;
     };
-    // V8 은 늘 zpPrepare 를 읽고, 워커 코드가 대입한 값은 stackHook 에 남긴다. 대입하면 네이티브처럼 열거되고 delete 면 다시 숨는다.
     const listHook = enumerable => { try { Object.defineProperty(E, 'prepareStackTrace', { enumerable }); } catch {} };
     try {
       Object.defineProperty(E, 'prepareStackTrace', {
@@ -1375,14 +1255,9 @@
     } catch {}
   })();
 
-  // module 워커에는 네이티브 importScripts 가 없다 — 대입 자체가
-  // WorkerGlobalScope 에 새 프로퍼티를 만들 뿐이니 가드 없이 두면 .bind 에서
-  // 부팅이 죽는다. 없는 환경에서는 프록시 경유 셈만 심어 둔다(호출하면 네이티브와
-  // 같이 모듈 워커 부재 오류가 아니라 우리 경로로 프록시된다 — importScripts 를
-  // 지원하지 않는 워커에서 호출돼도 fail-open 은 아니다).
+  // Guard `.bind` when `self.importScripts` is absent in module workers.
   const nativeImportScripts = typeof self.importScripts === 'function' ? self.importScripts.bind(self) : null;
-  // blob: URL → Blob 레지스트리. 워커의 createObjectURL 은 네이티브라
-  // SW 에도 blob 본문이 없다 — importScripts(blob:) 는 이 맵으로만 풀린다.
+  // Track `Blob` objects created in this worker realm so `importScripts(blob:)` can read their source synchronously.
   const blobURLObjects = newMap();
   try {
     const NativeURL = self.URL;
@@ -1405,8 +1280,6 @@
       }
     }
   } catch {}
-  // data:/blob: 소스를 읽어 재작성 후 전역 스코프에서 동기 실행한다 —
-  // importScripts 의 네이티브 의미(전역 스코프·동기·실패 시 throw)와 같다.
   function readVirtualScriptSource(parsed) {
     if (parsed.protocol === 'data:') {
       const href = parsed.href;
@@ -1425,15 +1298,14 @@
     if (parsed.protocol === 'blob:') {
       const blob = blobURLObjects.get(parsed.href);
       if (blob) return new FileReaderSync().readAsText(blob);
-      // 페이지 realm 이 만든 blob — 이 워커의 레지스트리엔 없지만 같은
-      // 오리진이면 워커 sync XHR 로 읽힌다(D5 blob: Worker 소스 경로).
+      // Fall back to a synchronous XHR for same-origin `blob:` URLs minted in the parent page realm.
       try {
         const nx = new NativeWorkerXHR();
         nx.open('GET', parsed.href, false);
         nx.send();
         if (nx.status === 200 || nx.status === 0) return nx.responseText;
       } catch {}
-      blockedDynamic();  // 출처 불명 blob — 읽을 수 없으니 fail-closed
+      blockedDynamic();
     }
     blockedDynamic();
   }
@@ -1447,10 +1319,7 @@
   self.importScripts = (...urls) => {
     if (!nativeImportScripts) blocked();
     for (const raw of urls) {
-      // 프록시 내부 경로는 타깃 기준으로 풀기 **전에** 통과시킨다 — 부트스트랩의
-      // `importScripts('/zp/assets/zp-page-bundle.js')` 와 `/zp/api/worker-script`
-      // 가 이 경로를 탄다. srcu/src 워커는 base 가 blob:/data: 라 상대경로가
-      // 그쪽으로 풀려 스크립트 라우트를 통째로 삼키는 함정이 있었다.
+      // Pass internal proxy routes directly to `nativeImportScripts` before resolving relative to a `blob:` or `data:` worker base URL.
       let internal = null;
       try { internal = new NativeURLCtor(String(raw), realLocation.href); } catch {}
       if (internal && internal.origin === realProxyOrigin &&
@@ -1460,7 +1329,7 @@
         continue;
       }
       const parsed = new NativeURLCtor(String(raw), base.href);
-      // module 워커는 네이티브가 TypeError 를 던진다 — 우회하지 않고 그대로 위임.
+      // Delegate to `nativeImportScripts` in module workers so the browser throws its native `TypeError`.
       if (!isModuleWorker && (parsed.protocol === 'data:' || parsed.protocol === 'blob:')) {
         workerExecGlobal(zpRewrite(readVirtualScriptSource(parsed)), false);
       } else {
@@ -1468,39 +1337,22 @@
       }
     }
   };
-  // 워커의 `self.location` 은 가상 타깃이다 — 네이티브는 워커 URL(여기선
-  // `u`, 즉 타깃/blob:/data:)을 보여주고 우리도 그것을 보여준다. with-scope
-  // 파사드의 `location` 조회(위 getOwnPropertyDescriptor/get 트랩)와 같은
-  // `base` 객체를 써서 `location === self.location` 이 성립한다.
+  // Share the same `base` object with the `with`-scope facade so `location === self.location` holds.
   try {
     Object.defineProperty(self, 'location', { value: base, writable: false, enumerable: true, configurable: true });
   } catch {}
-  // ── W8–W12: WorkerGlobalScope 가상 표면 ──────────────────────────────
-  // `origin`/`isSecureContext`/`new URL(rel)`/`BroadcastChannel`/`webkit*`
-  // 별칭/OPFS 는 전부 실 프록시 오리진 상태다 — 페이지 realm 과 같은
-  // 누출·격리 문제. blob:/data: 워커는 `u` 가 프록시 blob 이라 컨텍스트
-  // 판정이 틀어지므로 부트스트랩이 실어 주는 `ref`(생성자 가상 URL)로
-  // 판정한다 — 네이티브 blob: 워커의 origin·secure-context 도 생성자 문서의
-  // 것을 상속하므로 동일한 규칙이다.
-  // creatorRef/contextURL/workerOrigin 은 파일 상단(base 정의 직후)에서
-  // 계산된다 — 스토리지 네임스페이스(`ns`)가 여기보다 먼저 실행되기 때문.
+  // Derive `isSecureContext` from `contextURL` (`creatorRef` for `blob:`/`data:` workers) rather than the proxy origin.
   const workerSecureContext = contextURL.protocol === 'https:' || contextURL.protocol === 'wss:' || contextURL.protocol === 'file:'
     || /^(localhost|127\.0\.0\.1|\[::1\])$/i.test(contextURL.hostname) || /\.localhost$/i.test(contextURL.hostname);
   try { Object.defineProperty(self, 'origin', { get: () => workerOrigin, enumerable: true, configurable: true }); } catch {}
   try { Object.defineProperty(self, 'isSecureContext', { get: () => workerSecureContext, enumerable: true, configurable: true }); } catch {}
-  // `self.name` — SharedWorker 이름은 `zp:w:<hash>:` 프리픽스가 붙어 온다.
-  // 페이지가 요청한 이름만 보여야 하니 벗긴다. 전용 워커는 opts.name 이
-  // 네이티브에 그대로 전달돼 이미 정답이고, 패턴이 안 맞으면 그대로다.
+  // Strip the internal `zp:w:<hash>:` partition prefix from `self.name` in `SharedWorker` realms.
   try {
     const realName = self.name;
     const stripped = /^zp:w:[0-9a-f]{8}:/.test(realName) ? realName.replace(/^zp:w:[0-9a-f]{8}:/, '') : realName;
     if (stripped !== realName) Object.defineProperty(self, 'name', { value: stripped, writable: false, enumerable: true, configurable: true });
   } catch {}
-  // `new URL(rel)` — 네이티브는 워커 스크립트 URL(우리 부트스트랩 = 프록시
-  // 오리진)을 base 로 쓴다. 페이지의 ZPURL 과 같은 규칙: base 미지정 상대
-  // 입력은 가상 베이스로 풀고, 내부 라우팅 URL 은 unwrap 한다. blob: 워커는
-  // `blob:<proxy>/<uuid>` 를 `blob:<target>/<uuid>` 로 바꿔서 base 로 쓴다
-  // (네이티브와 같은 문자열 형태). data: 는 네이티브가 어차피 base 로 못 쓴다.
+  // Unwrap proxy routing URLs passed to `new URL(...)` and synthesize a virtual-origin `blob:` base for `blob:` workers.
   try {
     const NativeURLCtor = self.URL;
     const urlBase = (() => {
@@ -1519,9 +1371,6 @@
     };
     const ZPWorkerURL = function URL(input, b) {
       const inp = unleashed(input);
-      // 네이티브 parity: base 인자 없는 상대 입력은 그대로 TypeError — URL
-      // 생성자에 암묵 베이스는 없다(페이지 ZPURL 과 같은 규칙). 프록시 URL
-      // 입력만 unwrap 하고 나머지는 네이티브 판정에 맡긴다.
       return b !== undefined ? new NativeURLCtor(inp, unleashed(b)) : new NativeURLCtor(inp);
     };
     try { ZPWorkerURL.prototype = NativeURLCtor.prototype; } catch {}
@@ -1536,8 +1385,7 @@
     Object.defineProperty(self, 'URL', { value: ZPWorkerURL, writable: true, enumerable: true, configurable: true });
     if (self.webkitURL) try { Object.defineProperty(self, 'webkitURL', { value: ZPWorkerURL, writable: true, enumerable: true, configurable: true }); } catch {}
   } catch {}
-  // BroadcastChannel — 페이지와 같은 `zp:b:<fnv(origin)>:` 프리픽스. 워커 쪽이
-  // 네이티브 그대로면 같은 프록시 오리진의 다른 타깃 채널이 보인다.
+  // Partition `BroadcastChannel` names by virtual origin (`zp:b:<fnv(origin)>:`) to match the page realm.
   try {
     const NativeBC = self.BroadcastChannel;
     if (NativeBC) {
@@ -1554,30 +1402,22 @@
       Object.defineProperty(self, 'BroadcastChannel', { value: ZPWorkerBC, writable: true, enumerable: true, configurable: true });
     }
   } catch {}
-  // webkit* 레거시 별칭 — `webkitIndexedDB` 만 열기 경로라 네임스페이스
-  // 파사드로, 나머지 IDB* 는 동작 동일한 실생성자에 그대로 매핑한다.
   try {
     if (self.webkitIndexedDB && self.indexedDB) {
       Object.defineProperty(self, 'webkitIndexedDB', { value: self.indexedDB, writable: true, enumerable: true, configurable: true });
     }
   } catch {}
-  // OPFS — `navigator.storage.getDirectory()` 는 실 프록시 오리진 루트라
-  // 타깃 간 공유된다. 타깃별 서브디렉터리 핸들을 돌려준다 — 그 아래 모든
-  // getDirectoryHandle/getFileHandle/removeEntry 는 자연히 네임스페이스 안에서
-  // 동작한다.
+  // Scope `navigator.storage.getDirectory()` to a per-target-origin OPFS subdirectory and mask its `.name` as `""`.
   try {
     const storageMgr = self.navigator && self.navigator.storage;
     if (storageMgr && typeof storageMgr.getDirectory === 'function') {
       const nativeGetDirectory = storageMgr.getDirectory.bind(storageMgr);
-      // 핸들 `.name` 이 페이지에 보이므로 마커+오리진 원문 대신 해시를 쓴다.
       let oh = 0x811c9dc5;
       for (let i = 0; i < storageOrigin.length; i++) { oh ^= storageOrigin.charCodeAt(i); oh = Math.imul(oh, 16777619); }
       const opfsRoot = 'zp:o:' + ('00000000' + (oh >>> 0).toString(16)).slice(-8);
       storageMgr.getDirectory = function getDirectory() {
         return nativeGetDirectory().then(d => d.getDirectoryHandle(opfsRoot, { create: true }));
       };
-      // 루트 핸들 `.name` 은 네이티브에서 '' 다 — 서브디렉터리 이름
-      // 'zp:o:<hash>' 가 그대로 보였다(페이지 realm 과 같은 마스크).
       const FSH = self.FileSystemHandle && self.FileSystemHandle.prototype;
       const nameDesc = FSH && Object.getOwnPropertyDescriptor(FSH, 'name');
       if (nameDesc && typeof nameDesc.get === 'function' && nameDesc.configurable) {
@@ -1589,29 +1429,23 @@
       }
     }
   } catch {}
-  // 레거시 웹킷 FS/quota — 프록시 오리진 파일시스템을 그대로 노출하므로
-  // fail-closed (페이지 realm 과 같은 답).
+  // Block legacy WebKit filesystem and quota APIs that bypass OPFS origin partitioning.
   for (const legacy of ['webkitRequestFileSystem', 'webkitResolveLocalFileSystemURL', 'webkitRequestFileSystemSync', 'webkitResolveLocalFileSystemURLSync']) {
     try { if (self[legacy]) Object.defineProperty(self, legacy, { value: function() { throw new DOMException('Blocked by ZeroProxy policy', 'NotSupportedError'); }, writable: true, enumerable: true, configurable: true }); } catch {}
   }
   for (const legacy of ['webkitPersistentStorage', 'webkitTemporaryStorage']) {
     try { if (self[legacy]) Object.defineProperty(self, legacy, { value: undefined, writable: true, enumerable: true, configurable: true }); } catch {}
   }
-  // D5: srcu 워커 — blob:/data: 소스는 네트워크 요청이 없으므로 부트스트랩이
-  // worker-script import 를 싣지 않는다. 여기서 소스를 읽어 재작성 후 실행한다.
+  // Execute or import `blob:`/`data:` worker entrypoints passed via `__ZP_WORKER_SRC_URL`.
   const srcuSource = String(self.__ZP_WORKER_SRC_URL || '');
   if (srcuSource) {
     if (!isModuleWorker) {
-      // classic 워커는 부트스트랩이 prelude → zp-page-bundle 순으로 동기
-      // importScripts 한다 — prelude 본문이 끝난 시점엔 번들이 아직 없다.
-      // 실행 함수만 노출하고 부트스트랩의 후미 호출이 번들 로드 후 돌린다.
       self.__zp_runSrcu = function () {
         try { workerExecGlobal(zpRewrite(readVirtualScriptSource(new NativeURLCtor(srcuSource))), false); }
         catch (e) { setTimeout(() => { throw e; }, 0); }
       };
     } else {
-      // module 워커는 import/export 문법 때문에 eval 이 안 된다 — 소스를 읽어
-      // 페이지 브로커로 SW stash 에 넣고 srctok 라우트를 import 한다.
+      // Module workers cannot evaluate module syntax via `eval`, so stash the source in the SW via the page broker and `import()` the `srctok` route.
       (async () => {
         const r = await nativeFetch(srcuSource);
         const src = await r.text();
@@ -1621,16 +1455,13 @@
       })().catch(e => { setTimeout(() => { throw e; }, 0); });
     }
   }
-  // ── performance ── 워커의 리소스 타이밍에 프렐류드·zp-core·번들·worker-script·blob 소스가 프록시 이름 그대로 있었다.
-  // 네이티브 워커는 자기 스크립트도 항목으로 갖지 않는다. 타깃을 실은 경로는 그 타깃 이름으로, 나머지 우리 것은 없앤다
-  // (페이지 realm 의 isInfraEntry 와 같은 규칙).
+  // Rewrite proxy resource timing entry names back to virtual target URLs and filter out internal proxy infrastructure entries.
   try {
     const entryProto = self.PerformanceEntry && self.PerformanceEntry.prototype;
     const nameDesc = entryProto && Object.getOwnPropertyDescriptor(entryProto, 'name');
     const perfProto = self.Performance && self.Performance.prototype;
     if (nameDesc && typeof nameDesc.get === 'function' && perfProto) {
       const rawName = e => Reflect.apply(nameDesc.get, e, []);
-      // 타깃을 실은 프록시 경로 → 그 타깃, 그 밖의 우리 것 → null(인프라), 남의 것 → 그대로
       const targetOf = n => {
         if (typeof n !== 'string') return n;
         if (n.lastIndexOf('blob:' + realProxyOrigin, 0) === 0) return null;
@@ -1654,7 +1485,6 @@
       const nativeGetEntries = perfProto.getEntries, nativeByType = perfProto.getEntriesByType;
       perfProto.getEntries = ({ getEntries() { return shown(Reflect.apply(nativeGetEntries, this, [])); } }).getEntries;
       perfProto.getEntriesByType = ({ getEntriesByType(type) { return shown(Reflect.apply(nativeByType, this, [type])); } }).getEntriesByType;
-      // the native index holds proxy names; page code asks by the names it sees
       perfProto.getEntriesByName = ({ getEntriesByName(name, type) {
         const wanted = String(name);
         const all = type === undefined ? Reflect.apply(nativeGetEntries, this, []) : Reflect.apply(nativeByType, this, [type]);
@@ -1680,7 +1510,7 @@
       }
     }
   } catch {}
-  // ── 우리 이름 숨기기 ── `__ZP_WORKER_*`(부트스트랩), `__zp_*`, ZP·ZPBundle… 는 키 목록에서 빠지고 열거되지 않는다.
+  // Hide internal `__ZP_WORKER_*`, `__zp_*`, and `ZP` globals from key enumeration and descriptor queries.
   const nativeGOPN = Object.getOwnPropertyNames, nativeOwnKeys = Reflect.ownKeys, nativeGOPDs = Object.getOwnPropertyDescriptors;
   const isGlobalTarget = t => t === self || t === scope;
   const visibleKey = k => typeof k !== 'string' || !ZP_HIDDEN_RE.test(k);
@@ -1701,7 +1531,7 @@
     } }).getOwnPropertyDescriptors;
   } catch {}
   hideZPNames();
-  // ── settleNatives ── 훅이 대신한 네이티브의 자리·플래그·name·length·소스를 입힌다(파일 머리의 스냅숏).
+  // Restore pre-prelude prototype placement, descriptor flags, `name`, `length`, and `Function.prototype.toString` output on wrapped globals.
   (function settleNatives() {
     const toStringHook = ({ toString() { const m = maskedSource.get(this); return m !== undefined ? m : Reflect.apply(origFnToString, this, []); } }).toString;
     try { Object.defineProperty(Function.prototype, 'toString', { value: toStringHook, writable: true, enumerable: false, configurable: true }); } catch {}
@@ -1711,7 +1541,6 @@
       try { Object.defineProperty(fn, 'name', { value: nat.name, configurable: true }); } catch {}
       try { Object.defineProperty(fn, 'length', { value: nat.length, configurable: true }); } catch {}
     };
-    // a member that differs from the snapshot keeps its value and takes the native's flags, name, length and source
     const settle = (obj, key, nat) => {
       const cur = Object.getOwnPropertyDescriptor(obj, key);
       if (!cur || !nat) return;
@@ -1729,7 +1558,6 @@
       for (const [k, nat] of natMap) if (Object.prototype.hasOwnProperty.call(obj, k)) settle(obj, k, nat);
     };
     for (const [key, { owner, desc: nat }] of nativeSnapshot.global) {
-      // a hook made an own name where the browser has none: it moves to where the native lives, in the native's shape
       const own = owner === self ? null : Object.getOwnPropertyDescriptor(self, key);
       if (own && own.configurable) {
         let moved;
@@ -1744,7 +1572,6 @@
         try { delete self[key]; Object.defineProperty(owner, key, moved); } catch {}
       }
       settle(owner, key, nat);
-      // a replaced constructor: its statics and prototype members read as the native's
       const cur = Object.getOwnPropertyDescriptor(owner, key);
       const natV = nat.value, curV = cur && cur.value;
       if (typeof natV === 'function' && typeof curV === 'function' && curV !== natV) {
@@ -1752,10 +1579,10 @@
         try { if (curV.prototype && natV.prototype && curV.prototype !== natV.prototype) settleMembers(curV.prototype, nativeSnapshot.members.get(natV.prototype)); } catch {}
       }
     }
-    // members hooked where they live: WorkerNavigator/Performance/Function prototypes, Object/Reflect statics, …
     for (const [obj, natMap] of nativeSnapshot.members) settleMembers(obj, natMap);
     mirror(toStringHook, origFnToString);
   })();
-  // 부트스트랩이 번들을 실은 뒤, 대상 스크립트 전에 부른다 — 번들이 얹은 전역(ZPBundle…)도 열거되지 않게.
+  // Re-run `hideZPNames` after the bootstrap loads `zp-page-bundle.js` so `ZPBundle` is also non-enumerable.
   expose('__zp_settle', hideZPNames);
 })();
+

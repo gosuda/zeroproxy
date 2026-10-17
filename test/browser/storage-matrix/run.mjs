@@ -1,24 +1,14 @@
-// 스토리지/쿠키 격리 축.
-//
-// 프록시는 서로 다른 타깃을 **같은 브라우저 오리진**(프록시 오리진)에 담는다.
-// 그래서 진짜 웹이라면 오리진이 갈라 주던 것을 우리가 직접 갈라야 한다:
-// 타깃 A 가 쓴 것을 타깃 B 가 읽으면 그건 실제 웹에는 없는 누출이다.
-//
-// 축 셋을 동시에 본다:
-//   ① 격리   — A 가 쓴 것을 B 가 읽는가                 (읽히면 누출)
-//   ② 지속성 — A 로 돌아왔을 때 A 의 것이 그대로인가      (사라지면 격리가 과했다)
-//   ③ 위생   — 페이지가 우리 내부 키를 볼 수 있는가       (보이면 프록시 정체 노출)
-//
-// 실행 전제: 프록시(18080)와 픽스처 서버(18099/18098)가 떠 있을 것.
+// Verify storage and cookie partitioning across two distinct target origins (A and B)
+// hosted under the same browser proxy origin:
+//   (1) isolation: values written by A must not be readable by B,
+//   (2) persistence: values written by A must persist when revisiting A,
+//   (3) hygiene: internal proxy storage keys must not be visible to page scripts.
 import { execFileSync } from 'node:child_process';
 
 const ID = 'zp';
 const PROXY = 'http://proxy.localhost:18080';
-// ★A/B 는 **호스트명이 달라야** 한다. 처음엔 127.0.0.1 의 두 포트로 잡았는데,
-// 쿠키는 원래 포트를 구분하지 않아서 `document.cookie` 가 LEAK 으로 찍혔다 —
-// 대조군(프록시 없이 직접 로드)에서도 똑같이 공유되는 것을 확인했다. 즉 프록시가
-// 브라우저와 **같게** 동작한 것이지 결함이 아니었다. 픽스처가 틀린 것이다.
-// localhost vs 127.0.0.1 은 호스트 문자열이 달라 쿠키가 안 섞인다(대조군 확인).
+// Use distinct hostnames (`localhost` vs `127.0.0.1`) because RFC 6265 cookies are
+// host-scoped rather than port-scoped.
 const A = 'http://localhost:18099/page';
 const B = 'http://127.0.0.1:18098/page';
 const tw = (...a) => {
@@ -41,8 +31,7 @@ async function open(target) {
   await sleep(9000);
 }
 
-// A 가 남기는 흔적. 이름 기반 접근(`localStorage.x = …`)도 섞는다 — 아주 흔한
-// 관용구이고, 예전에 그 경로가 조용히 삼켜진 적이 있다(주석에 기록됨).
+// Exercise both `setItem` and named property assignment (`localStorage.zp_probe_named = ...`).
 const WRITE = `
   localStorage.setItem('zp_probe_local', 'A-local');
   localStorage.zp_probe_named = 'A-named';
@@ -97,7 +86,7 @@ const READ = `
       rq.onerror = () => res(null);
     });
   } catch (e) { out.idb = 'err:' + e.name; }
-  // 위생: 페이지가 보는 키 목록에 우리 내부 이름이 섞이면 안 된다.
+  // Hygiene check: internal proxy keys must not appear in localStorage enumeration.
   const keys = [];
   for (let i = 0; i < localStorage.length; i++) keys.push(localStorage.key(i));
   out.visibleKeys = keys;
@@ -108,10 +97,7 @@ const READ = `
 const FIELDS = ['local', 'named', 'session', 'cookie', 'cache', 'idb'];
 const EXPECT_A = { local: 'A-local', named: 'A-named', session: 'A-session', cookie: 'A-cookie', cache: 'A-cache', idb: 'A-idb' };
 
-// ★깨끗한 상태에서 시작한다. 이게 없으면 **앞 실행의 잔재**를 이번 실행의
-// 누출로 오독한다 — 실제로 처음에 그랬다: 픽스처를 고치기 전 실행이 남긴
-// 쿠키(도메인 127.0.0.1)가 SW 저장소에 남아 다음 실행의 B 로 흘러들어갔고,
-// 그걸 새 누출로 읽을 뻔했다. 상태를 안 지우는 측정은 자기 과거를 잰다.
+// Clear site data before starting so residual storage from earlier runs does not skew results.
 tw('navigate', '-i', ID, '--url', PROXY + '/zp/');
 await sleep(1500);
 tw('clear-site-data', '-i', ID, '--types', 'all');
@@ -120,7 +106,7 @@ await sleep(2500);
 
 await open(A);
 const wrote = evalJS(WRITE);
-console.log('A 기록:', wrote);
+console.log('A write:', wrote);
 const readA1 = json(evalJS(READ));
 
 await open(B);
@@ -130,25 +116,25 @@ await open(A);
 const readA2 = json(evalJS(READ));
 
 const pad = (s, n) => String(s).padEnd(n);
-console.log('\n' + pad('항목', 10), pad('A 쓴 직후', 12), pad('B 에서', 12), pad('A 재방문', 12), '판정');
+console.log('\n' + pad('field', 10), pad('after A', 12), pad('on B', 12), pad('revisit A', 12), 'verdict');
 const leaks = [], lost = [];
 for (const f of FIELDS) {
   const a1 = readA1[f], b = readB[f], a2 = readA2[f];
   const leaked = b != null && String(b) === EXPECT_A[f];
   const persisted = a2 != null && String(a2) === EXPECT_A[f];
-  // sessionStorage 는 탭 세션 스코프라 재방문(같은 탭 내 내비게이션)에도 남는 것이 정상.
+  // sessionStorage is tab-scoped, so values persist across same-tab navigations.
   let verdict = 'ok';
   if (leaked) { verdict = 'LEAK'; leaks.push(f); }
-  else if (!persisted) { verdict = '유실'; lost.push(f); }
+  else if (!persisted) { verdict = 'LOST'; lost.push(f); }
   console.log(pad(f, 10), pad(a1 === null ? '-' : a1, 12), pad(b === null ? '-' : b, 12), pad(a2 === null ? '-' : a2, 12), verdict);
 }
-console.log('\n[격리] 타깃 A 의 값을 타깃 B 가 읽은 것:', leaks.length ? leaks.join(', ') : '없음');
-console.log('[지속성] A 로 돌아왔을 때 사라진 것:', lost.length ? lost.join(', ') : '없음');
+console.log('\n[isolation] target A values read by target B:', leaks.length ? leaks.join(', ') : 'none');
+console.log('[persistence] lost on returning to target A:', lost.length ? lost.join(', ') : 'none');
 const internal = readA2.internalVisible || [];
-console.log('[위생] 페이지에 보이는 우리 내부 키:', internal.length ? internal.join(', ') : '없음');
-console.log('       (페이지가 보는 전체 키:', (readA2.visibleKeys || []).join(', ') || '없음', ')');
-// 계측이 자기 상태를 말하게 한다: A 가 애초에 못 썼으면 격리 0 은 증거가 아니다.
+console.log('[hygiene] internal proxy keys visible to page:', internal.length ? internal.join(', ') : 'none');
+console.log('          (all visible keys:', (readA2.visibleKeys || []).join(', ') || 'none', ')');
+// Flag fields that failed to write on target A so missing values on B are not misread as isolation.
 const wroteNothing = FIELDS.filter(f => readA1[f] == null);
 if (wroteNothing.length) {
-  console.log(`\n[!] A 에서 애초에 안 써진 항목이 있다: ${wroteNothing.join(', ')} — 그 항목의 "누출 없음" 은 증거가 아니다.`);
+  console.log(`\n[!] Failed to write on target A: ${wroteNothing.join(', ')}; absence on B is not evidence of isolation.`);
 }

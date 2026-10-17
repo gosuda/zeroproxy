@@ -21,9 +21,9 @@ function loadRewriter() {
   return bundle;
 }
 
-// R1: the rewriter plants `__zp_lex_decl`/`__zp_lex_bind` around classic
-// top-level let/const/class. Their runtime side lives in the prelude; run the
-// real source rather than a look-alike stub, injecting only its free variables.
+// The rewriter plants `__zp_lex_decl`/`__zp_lex_bind` around classic
+// top-level let/const/class. Run their real prelude source rather than a stub,
+// injecting only its free variables.
 let lexHelpersSource;
 function installLexHelpers(ctx, realmGlobal) {
   if (!lexHelpersSource) {
@@ -301,11 +301,8 @@ test('member target wrappers retain automatic semicolon insertion and conditiona
   assert.equal(ctx.window.result, 9);
 });
 
-// Optional chains: a `?.` short-circuits the WHOLE chain and never evaluates
-// keys/arguments to its right (2026-09-29). Link-by-link helper calls broke
-// both — `e.poster?.[!e.poster.mobile …]` evaluated its key on an undefined
-// poster and killed GitHub's landing page. Each case runs natively and
-// rewritten; result, evaluation log and error class must agree.
+// Optional chains short-circuit the entire chain without evaluating keys or arguments to their right.
+// Compare native and rewritten evaluation order, return value, and error class across each case.
 test('optional chains keep native short-circuit and evaluation order', () => {
   const cases = [
     'let n = null; r = n?.[log("k")];',
@@ -332,7 +329,6 @@ test('optional chains keep native short-circuit and evaluation order', () => {
     'r = [1, 2]?.[log(0)] + [3]?.[log(0)];',
     'let x = null; r = x?.[log("k")] ?? log("dflt");',
     'let x = null; r = typeof x?.[log("k")];',
-    // GitHub landing: image items carry no poster.
     'r = [{ url: { desktop: "d" } }].map((e) => e.url[!e.url.mobile ? "desktop" : "mobile"] + "|" + e.poster?.[!e.poster.mobile ? "desktop" : "mobile"]).join();',
   ];
   const run = (ctx, code) => {
@@ -364,10 +360,8 @@ test('optional chains keep native short-circuit and evaluation order', () => {
   }
 });
 
-// Inline guards (zp-rewriter guard_claim): a computed member read, write or call keeps its native access when the base is
-// data, its operands in function temps. Whatever arm runs, the program must not notice: same results, each operand
-// evaluated once and in native order, a method read before its arguments run, `this` the base, nested and sibling sites
-// apart, generators and recursion through the temps, a line before a statement-start site left alone.
+// Inline guards (zp-rewriter guard_claim): a computed member read, write, or call keeps its native access when the base is
+// data, storing operands in function temporaries while preserving evaluation order, receiver binding, and generator/recursion state.
 test('inline-guarded members behave exactly as the native ones', () => {
   const program = `
     const trace = [];
@@ -410,10 +404,8 @@ test('inline-guarded members behave exactly as the native ones', () => {
   assert.equal(ctx.window.result, native.window.result);
 });
 
-// `new Function(params, body)`: the prelude rewrites the body inside a wrapper and slices it back out. With inline guards
-// the wrapper's closing brace comes back after the temps the guards declare; NYT's dynamic functions were refused
-// ("Blocked by ZeroProxy rewrite policy") when the slice wanted the bare closing brace. A body binding a runtime name is
-// a SyntaxError, as any body the constructor cannot compile.
+// `new Function(params, body)` rewrites the body inside a wrapper and slices it back out,
+// preserving inline guard temporaries while rejecting bodies that bind internal runtime names.
 test('the prelude slices a rewritten Function body back out, guards and refusals included', () => {
   const src = preludeSource().split('\r\n').join('\n');
   const grab = (start, end) => { const a = src.indexOf(start); const b = src.indexOf(end, a); assert.ok(a >= 0 && b > a, start); return src.slice(a, b); };

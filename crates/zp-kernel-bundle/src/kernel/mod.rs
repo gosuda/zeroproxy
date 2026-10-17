@@ -1,19 +1,10 @@
-//! ZeroProxy WASM kernel — JS-facing surface.
+//! ZeroProxy WASM kernel: JS-facing surface.
 //!
 //! Lives inside the SW (or a Worker). Exposes `kernelFetch` as the one
 //! async entry point that the rest of the JS shell calls; the actual
 //! transport plumbing (SOCKS5 + TLS + HTTP/1.1, all client-side) lives in
-//! the [`transport`] submodule.
-//!
-//! ## Step 14: server-TLS regression restoration
-//!
-//! Step 13 shipped a JSON-envelope relay over `/zp/relay` where the
-//! browser sent plaintext `(url, method, headers, body)` to the server
-//! and the server did the TLS handshake. That broke the security
-//! invariant documented in README.md ("the relay does not parse target HTTP,
-//! TLS, redirects, cookies, or HTML"). Step 14 restored it: the WASM
-//! kernel speaks SOCKS5 + TLS + HTTP/1.1 itself, and the relay only sees
-//! encrypted bytes. See `.ai/trap-notebook/transport-regression.md`.
+//! the [`transport`] submodule. The WASM kernel speaks SOCKS5 + TLS + HTTP
+//! itself so the relay only sees encrypted bytes.
 
 #![cfg(target_arch = "wasm32")]
 
@@ -44,9 +35,7 @@ pub fn kernel_echo_sync(arg: JsValue) -> JsValue {
     arg
 }
 
-/// Initialize the Rust kernel. Today a no-op — `kernelFetch` opens a
-/// fresh WS per request. A persistent yamux session shared across calls
-/// is the deferred perf follow-up.
+/// Initialize the Rust kernel.
 #[wasm_bindgen(js_name = kernelInit)]
 pub fn kernel_init() -> String {
     format!(
@@ -55,13 +44,11 @@ pub fn kernel_init() -> String {
     )
 }
 
-/// Phase 4 JA3 mirror: install a captured browser TLS ClientHello so
-/// every subsequent upstream handshake replays its shape. Input is the
-/// base64-encoded JSON spec served by `/zp/api/fp` (see
-/// `internal/fpcapture` for the wire format). On parse failure the
-/// kernel silently falls through to the rustls fork's hardcoded
-/// Chrome 134 fallback, so a malformed/empty argument here just means
-/// "fingerprint capture unavailable, use the phase 2 layout instead".
+/// Install a captured browser TLS ClientHello so every subsequent upstream
+/// handshake replays its shape. Input is the base64-encoded JSON spec served
+/// by `/zp/api/fp` (see `internal/fpcapture` for the wire format). On parse
+/// failure the kernel falls through to the rustls fork's hardcoded Chrome 134
+/// fallback.
 ///
 /// Called once during SW boot from inside `initBundle`. Idempotent in
 /// the sense that the rustls thread_local takes last-write-wins
@@ -107,8 +94,8 @@ pub fn kernel_set_captured_spec(b64_json: &str) {
     rustls::ja3::set_captured_spec(spec);
 }
 
-/// Phase 5.9 diagnostic: read the named_groups dump set inside
-/// apply_chrome_ja3_shape. Returns "default=…;captured=…" so the SW's
+/// Diagnostic: read the named_groups dump set inside
+/// apply_chrome_ja3_shape. Returns "default=...;captured=..." so the SW's
 /// `/zp/api/diag/trace` (or any caller) can include it in the
 /// diagnostic report.
 #[wasm_bindgen(js_name = kernelLastNamedGroups)]
@@ -122,7 +109,7 @@ pub fn kernel_last_named_groups() -> String {
 /// `NamedGroup`, `ExtensionType`) because rustls's wire codecs operate
 /// on those; unknown values get filtered (`From<u16>` falls through
 /// to the catch-all variants which rustls treats as no-ops). Returns
-/// `None` only if the JSON is missing required arrays — partial / empty
+/// `None` only if the JSON is missing required arrays; partial or empty
 /// arrays still install (with the corresponding emit list being empty).
 fn captured_spec_from_json(j: &serde_json::Value) -> Option<rustls::ja3::CapturedSpec> {
     use base64::Engine;
@@ -200,7 +187,7 @@ pub async fn kernel_fetch(request_js: JsValue) -> Result<JsValue, JsValue> {
     ));
 
     let mut headers_owned: Vec<(String, String)> = Vec::new();
-    // Prefer `headerEntries` — a plain `[[k,v], ...]` array the SW builds
+    // Prefer `headerEntries`, a plain `[[k,v], ...]` array the SW builds
     // manually so it can include Sec-Fetch-*, sec-ch-ua-* and other
     // "forbidden header names" that the Fetch-spec Request constructor
     // would strip. NAVER's WAF (nid.naver.com / pay.naver.com) silently
@@ -240,11 +227,9 @@ pub async fn kernel_fetch(request_js: JsValue) -> Result<JsValue, JsValue> {
         "kernel_fetch:captured headers={}",
         headers_owned.len()
     ));
-    // X-ZP-* sidechannel promotion + strip. Mirrors zphttp.BuildHTTP1Request
-    // (Go server-side) since the Step-14 client-TLS cutover bypasses that
-    // helper entirely — upstream now receives whatever this kernel writes,
-    // and anti-CSRF / WAF endpoints reject requests with unknown X-* internal
-    // headers or with no real Referer / User-Agent.
+    // X-ZP-* sidechannel promotion + strip. Anti-CSRF / WAF endpoints reject
+    // requests with unknown X-* internal headers or with no real Referer /
+    // User-Agent.
     let mut promoted_referer: Option<String> = None;
     let mut promoted_origin: Option<String> = None;
     let mut promoted_ua: Option<String> = None;
@@ -254,17 +239,10 @@ pub async fn kernel_fetch(request_js: JsValue) -> Result<JsValue, JsValue> {
     // side `X-ZP-Challenge-Compat: 1` marker when the response classifies as
     // a Cloudflare challenge. Mirrors `internal/headers/ApplyChallengeCompat`.
     let mut armed_challenge_compat = false;
-    // 2026-08-13 — Cookie 를 여기서 통째로 버리고 있었다. "framing-controlled"
-    // 목록에 들어 있었지만 Cookie 는 framing 이 아니고, 이 커널 아래에는 쿠키를
-    // 다시 채워 줄 계층이 없다 (Go 릴레이는 쿠키를 관리하지 않는다 — jarFor 는
-    // 이 경로에서 호출되지 않는다). 유일한 권위는 SW 의 RFC 6265 jar 이고,
-    // SW 는 페이지가 직접 넣은 cookie 헤더를 이미 제거한 뒤 자기 jar 의 값만
-    // 싣는다 (sw.js `kl === 'cookie'` skip). 따라서 여기서 살려 보내도 감옥
-    // 불변식은 그대로다. 증상: 모든 업스트림 요청이 쿠키 없이 나가 로그인
-    // 세션이 절대 유지되지 않았다 (NAVER "브라우저 설정 오류").
-    //
-    // 실제 Chrome 은 cookie 를 헤더 목록 맨 끝에 보낸다. promoted 헤더들이
-    // 뒤에 push 되므로, 여기서 뽑아 두었다가 마지막에 다시 붙여 순서를 맞춘다.
+    // The SW's RFC 6265 jar is the sole authority for cookies; the SW strips
+    // page-supplied cookie headers and attaches only its jar value (sw.js skips
+    // `kl === 'cookie'`). Extract it here and re-append it after promoted
+    // headers so Cookie sits at the end of the header list like real Chrome.
     let mut promoted_cookie: Option<String> = None;
     // The SW's order for this request (lowercase names, comma-separated): Chrome's order depends on the kind of
     // request and on the client hints it carries, which only the SW knows.
@@ -304,13 +282,9 @@ pub async fn kernel_fetch(request_js: JsValue) -> Result<JsValue, JsValue> {
             }
             // Strip all remaining x-zp-* internal sidechannel headers.
             s if s.starts_with("x-zp-") => false,
-            // Strip framing-controlled headers — let the transport set
-            // them from canonical sources. Phase 5.8: user-agent is NOT
-            // stripped because the SW now emits exactly one (canonical
-            // ZP.TARGET_USER_AGENT, positioned by the Chrome 148 header
-            // order pass). The old X-ZP-User-Agent promotion path
-            // appended UA at the end of the list — visibly wrong in the
-            // h2 frame at tls.peet.ws.
+            // Strip framing-controlled headers so the transport sets them from
+            // canonical sources. `user-agent` is not stripped because the SW
+            // emits `ZP.TARGET_USER_AGENT` in its header-order position.
             "cookie" => {
                 promoted_cookie = Some(v.clone());
                 false
@@ -335,7 +309,7 @@ pub async fn kernel_fetch(request_js: JsValue) -> Result<JsValue, JsValue> {
         "Accept-Encoding".to_string(),
         "gzip, deflate, br, zstd".to_string(),
     ));
-    // Chrome 순서: cookie 가 맨 마지막.
+    // Chrome header order places Cookie last.
     if let Some(v) = promoted_cookie {
         headers_owned.push(("Cookie".to_string(), v));
     }
@@ -361,7 +335,7 @@ pub async fn kernel_fetch(request_js: JsValue) -> Result<JsValue, JsValue> {
     }
 
     // Drain the request body for non-GET/HEAD methods. Without this, every
-    // POST/PUT/PATCH/DELETE reaches upstream with an empty body — target
+    // POST/PUT/PATCH/DELETE reaches upstream with an empty body; target
     // endpoints that validate the body (anti-CSRF /api/v1/collect/*, etc)
     // 400 because they expect JSON they never receive.
     let method_upper = method.to_ascii_uppercase();
@@ -389,11 +363,11 @@ pub async fn kernel_fetch(request_js: JsValue) -> Result<JsValue, JsValue> {
     .await
 }
 
-/// Target-side WebSocket bridge. Opens a yamux → SOCKS5 → optional TLS
-/// → RFC 6455 client handshake to `arg.url`, then returns a JS object
+/// Target-side WebSocket bridge. Opens a yamux + SOCKS5 + optional TLS
+/// + RFC 6455 client handshake to `arg.url`, then returns a JS object
 /// (`WsClient`) with `protocol`, `bufferedAmount`, `send`, `setHandlers`,
 /// `close`, and `abort`. The SW (`web/sw.js` `openRuntimeStream`) drives it. Returns
-/// a `Promise<WsClient>` — the resolved value is the same JS class
+/// a `Promise<WsClient>`; the resolved value is the same JS class
 /// instance regardless of how `Promise` unwraps it.
 #[wasm_bindgen(js_name = kernelStream)]
 pub fn kernel_stream(arg: JsValue) -> js_sys::Promise {
@@ -436,9 +410,7 @@ pub fn kernel_cookie_set(_payload: &str) -> bool {
     false
 }
 
-// ---------------------------------------------------------------------------
 // JS request decoders (shared by `kernel_fetch` and any future entry points)
-// ---------------------------------------------------------------------------
 
 pub(crate) fn push_trace(msg: &str) {
     let global = js_sys::global();

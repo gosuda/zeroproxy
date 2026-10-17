@@ -7,12 +7,9 @@ license.workspace = true
 [lib]
 crate-type = ["cdylib", "rlib"]
 
-# 2026-06-08 split-bundle (c.3): rewriter half of the former monolithic
-# zp-bundle. Kernel + transport stack moved to the sibling
-# `zp-kernel-bundle` crate so its wasm gets fetched + instantiated lazily
-# (on first `transportFetch`) instead of blocking SW `activate`. This
-# crate retains only what runs on the eager critical path — every script
-# / CSS / HTML response gets transformed here.
+# Service Worker rewriter WASM bundle (HTML, CSS, JS, and CSP transformation).
+# Transport and TLS live in `zp-kernel-bundle` so they load lazily on first
+# `transportFetch` rather than blocking Service Worker activation.
 
 [dependencies]
 zp-shared = { workspace = true }
@@ -21,8 +18,6 @@ zp-css = { workspace = true }
 zp-htmltx = { workspace = true }
 zp-engine = { workspace = true }
 
-# CSS rewriter (SWC + url) — ported from the deleted rewriter-rs/ in
-# split-bundle (c.1) Step 4.
 swc_common = { version = "23.0.0", default-features = false }
 swc_css_ast = { version = "23.0.0", default-features = false }
 swc_css_parser = { version = "23.0.0", default-features = false }

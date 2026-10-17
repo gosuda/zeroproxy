@@ -1,9 +1,5 @@
-//! 2026-06-08 split-bundle (c.1) Step 4: SWC-based CSS rewriter ported from
-//! the (now-deleted) `rewriter-rs/` crate. Same surface as before:
-//! `rewrite_css(source, base_url, control_prefix, proxy_origin)` → rewrites `url(...)` and
-//! `@import` references to route through the proxy's `/zp/api/fetch?url=...`
-//! endpoint. The wasm-bindgen export `rewriteCSS` (see `lib.rs`) is what
-//! `web/sw.js` (and Step 4-onwards page realm if needed) calls.
+//! SWC-based CSS rewriter: rewrites `url(...)`, `@import`, and `image-set(...)`
+//! references to route through the proxy's `/zp/api/fetch?url=...` endpoint.
 
 use swc_css_ast::{DeclarationOrAtRule, ImportHref, ListOfComponentValues, Str, Stylesheet, UrlValue};
 use swc_css_visit::{Visit, VisitWith};
@@ -46,14 +42,10 @@ fn proxied_css_url(
     if abs.scheme() != "http" && abs.scheme() != "https" {
         return None;
     }
-    // 프록시 오리진 절대 URL 을 낸다. 맨 `/zp/api/fetch?url=…` 는 소비 컨텍스트의
-    // base 로 풀리는데 멤브레인이 문서 base 를 **타깃 오리진**으로 가상화하므로,
-    // 프록시된 iframe 안에서 NAVER 의 웹폰트/스프라이트가
-    // `https://spastatic.naver.com/zp/api/fetch?url=…`(404) 이 돼 조용히 사라졌다.
-    //
-    // 빌더 자체는 zp-shared 단일 소스다. 예전에는 여기서 `form_urlencoded` 로
-    // 직접 만들었고, 그래서 (a) 공백이 `+` 가 되고 (b) **프래그먼트를 파라미터
-    // 안으로 삼켰다** — `url(sprite.svg#icon)` 이 조각을 잃는다.
+    // Emit an absolute proxy-origin URL when `proxy_origin` is provided so
+    // references inside proxied iframes do not resolve against a virtualized
+    // target `<base>`. `zp_shared::subresource_proxy_url` preserves URL
+    // fragments (`sprite.svg#icon`) outside the encoded `url=` query parameter.
     Some(zp_shared::subresource_proxy_url(
         abs.as_str(),
         proxy_origin,
@@ -178,11 +170,10 @@ impl Visit for CssUrlCollector<'_> {
         }
     }
 
-    // `image-set()` 는 `url("…")` 없이 **맨 문자열**도 받는다:
+    // `image-set()` accepts bare string literal arguments without `url("...")`:
     //   background-image: image-set("a.png" 1x, "a@2x.png" 2x)
-    // 그 문자열은 AST 에서 `Url` 노드가 아니라 그냥 `Str` 이라 위 visit_url 이
-    // 못 본다 — 원본 URL 이 그대로 남아 `img-src 'self'` 에 걸린다(csp-only).
-    // 함수 이름이 image-set 계열일 때만 문자열 인자를 URL 로 취급한다.
+    // Those strings parse as `Str` nodes rather than `Url` nodes in the AST, so
+    // rewrite them directly when visiting `image-set` or `-webkit-image-set`.
     fn visit_function(&mut self, node: &swc_css_ast::Function) {
         let name = match &node.name {
             swc_css_ast::FunctionName::Ident(i) => i.value.to_string(),
@@ -245,12 +236,9 @@ mod tests {
         assert!(out.code.contains("/zp/api/fetch?url=https%3A%2F%2Fexample.com%2Fstyles%2Freset.css"));
     }
 
-    // Pin: with a proxy origin the emitted references are ABSOLUTE. Root-
-    // relative ones resolve against the consuming context's base, which the
-    // membrane virtualises to the target origin — inside a proxied iframe the
-    // browser then asked the TARGET host for `/zp/api/fetch?url=…` and got 404
-    // (this is why NAVER's webfonts and shopping sprites silently disappeared).
-    // Target-agnostic: the origin is whatever the proxy is served on at runtime.
+    // With a non-empty `proxy_origin`, emitted references must be absolute so
+    // they do not resolve against a virtualized target `<base>` inside proxied
+    // iframes.
     #[test]
     fn proxy_origin_makes_urls_absolute() {
         let (base, prefix) = opts();
@@ -291,21 +279,19 @@ mod tests {
 mod image_set_tests {
     use super::*;
 
-    // `image-set()` 의 맨 문자열 인자. `url()` 형태는 원래 되고 있었는데
-    // 문자열 형태만 새고 있었다(2026-08-20, 인벤토리 대조에서 발견).
     #[test]
     fn image_set_bare_strings_rewritten() {
         let css = r#"#x{background-image:image-set("https://t.example/a.png" 1x, "https://t.example/a2.png" 2x)}"#;
         let out = rewrite_css(css, "https://example.com/", "/zp/", "https://p.example");
-        assert!(out.ok, "rewrite 실패");
+        assert!(out.ok, "rewrite failed");
         assert!(
             !out.code.contains("t.example/a.png"),
-            "1x 후보가 원본으로 남았다 -> {}",
+            "1x candidate was not rewritten: {}",
             out.code
         );
         assert!(
             !out.code.contains("t.example/a2.png"),
-            "2x 후보가 원본으로 남았다 -> {}",
+            "2x candidate was not rewritten: {}",
             out.code
         );
     }
@@ -314,16 +300,15 @@ mod image_set_tests {
     fn webkit_image_set_also_rewritten() {
         let css = r#"#x{background-image:-webkit-image-set("https://t.example/a.png" 1x)}"#;
         let out = rewrite_css(css, "https://example.com/", "/zp/", "https://p.example");
-        assert!(!out.code.contains("\"https://t.example"), "-webkit- 접두 형태 -> {}", out.code);
-        assert!(out.code.contains("api/fetch?url="), "프록시 경로가 아니다 -> {}", out.code);
+        assert!(!out.code.contains("\"https://t.example"), "-webkit- prefixed form not rewritten: {}", out.code);
+        assert!(out.code.contains("api/fetch?url="), "expected proxy path, got: {}", out.code);
     }
 
-    // url() 형태는 원래대로 동작해야 한다 — 새 visitor 가 기존 경로를 밀어내면 안 된다.
     #[test]
     fn image_set_url_form_still_rewritten() {
         let css = r#"#x{background-image:image-set(url(https://t.example/a.png) 1x)}"#;
         let out = rewrite_css(css, "https://example.com/", "/zp/", "https://p.example");
-        assert!(!out.code.contains("(https://t.example"), "url() 형태 회귀 -> {}", out.code);
-        assert!(out.code.contains("api/fetch?url="), "프록시 경로가 아니다 -> {}", out.code);
+        assert!(!out.code.contains("(https://t.example"), "url() form regression: {}", out.code);
+        assert!(out.code.contains("api/fetch?url="), "expected proxy path, got: {}", out.code);
     }
 }

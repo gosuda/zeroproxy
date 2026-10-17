@@ -1,17 +1,11 @@
 #!/usr/bin/env node
-// Rewrites every script a page load fetched and checks that the rewritten OUTPUT parses in V8.
-//
-// A rewriter bug that emits invalid syntax kills the whole script file, and tests built from hand-written snippets miss the
-// shapes real sites use (`for(;;e++)` shipped broken through every unit test and was found on NYT's video player). This runs
-// the rewriter over what real pages actually load.
+// Rewrite every script URL from a taskweaver network tape or URL list and verify that the output parses in V8.
 //
 //   node --experimental-vm-modules scripts/rewrite-corpus-check.cjs <tape.json | urls.txt>...
 //
-// Inputs: a taskweaver network tape (`taskweaver start --record`, load the site through the proxy, then
-// `taskweaver dump-recording --filter network --output tape.json`) — the script URLs are the `u=` of its
-// `/zp/api/script?` requests — or a text file with one script URL per line (`kind=classic`; `module <url>` for a module).
-// Needs a built `dist/web/zp-page-bundle.js` (`node scripts/build.mjs`). Downloads are cached by URL under the OS temp dir.
-// Exit status 1 if any rewritten script does not parse.
+// Inputs: a taskweaver network tape (extracting `u=` from `/zp/api/script?` requests)
+// or a text file with one script URL per line (`kind=classic` by default; `module <url>` for ES modules).
+// Requires `dist/web/zp-page-bundle.js` (`node scripts/build.mjs`).
 'use strict';
 const fs = require('node:fs');
 const os = require('node:os');
