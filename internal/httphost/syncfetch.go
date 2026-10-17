@@ -89,21 +89,38 @@ type syncFetchLegacyResult struct {
 }
 
 type syncFetchHub struct {
-	mu    sync.Mutex
-	jobs  map[string]*syncFetchJob
-	queue chan *syncFetchJob
+	mu        sync.Mutex
+	jobs      map[string]*syncFetchJob
+	queue     chan *syncFetchJob
+	closed    chan struct{}
+	closeOnce sync.Once
 }
 
 func newSyncFetchHub() *syncFetchHub {
 	return &syncFetchHub{
-		jobs:  make(map[string]*syncFetchJob),
-		queue: make(chan *syncFetchJob, syncFetchQueueCap),
+		jobs:   make(map[string]*syncFetchJob),
+		queue:  make(chan *syncFetchJob, syncFetchQueueCap),
+		closed: make(chan struct{}),
 	}
+}
+
+func (h *syncFetchHub) close() {
+	if h == nil {
+		return
+	}
+	h.closeOnce.Do(func() {
+		close(h.closed)
+	})
 }
 
 func (h *syncFetchHub) enqueue(j *syncFetchJob) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	select {
+	case <-h.closed:
+		return errQueueFull
+	default:
+	}
 	if _, exists := h.jobs[j.ID]; exists {
 		return errDuplicateJobID
 	}
@@ -222,6 +239,9 @@ func (s *server) handleSyncFetch(w http.ResponseWriter, r *http.Request) {
 	case <-time.After(syncFetchWait):
 		s.syncHub.take(job.ID)
 		s.safeError(w, r, "SYNC_NO_WORKER", http.StatusGatewayTimeout)
+	case <-s.syncHub.closed:
+		s.syncHub.take(job.ID)
+		s.safeError(w, r, "SW_NOT_READY", http.StatusServiceUnavailable)
 	case <-r.Context().Done():
 		s.syncHub.take(job.ID)
 	}
@@ -280,6 +300,8 @@ func (s *server) handleSyncFetchPoll(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(jobs)
 	case <-time.After(syncFetchPollWait):
+		w.WriteHeader(http.StatusNoContent)
+	case <-s.syncHub.closed:
 		w.WriteHeader(http.StatusNoContent)
 	case <-r.Context().Done():
 	}

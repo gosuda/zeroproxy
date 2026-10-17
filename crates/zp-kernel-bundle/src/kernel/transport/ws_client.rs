@@ -123,7 +123,10 @@ async fn open_target_stream(
         port,
         isolation_key: isolation_key.filter(|k| !k.is_empty()).map(str::to_string),
     };
-    let stream = dialer().connect(&addr, &relay_url, 0.0).await?;
+    let stream = dialer()
+        .connect(&addr, &relay_url)
+        .await
+        .map_err(|e| e.into_js_error())?;
     if !secure {
         return Ok(PooledConn::Plain(stream));
     }

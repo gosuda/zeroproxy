@@ -8,7 +8,7 @@
 
 #![cfg(target_arch = "wasm32")]
 
-pub(crate) mod transport;
+pub mod transport;
 
 use js_sys::{Array, ArrayBuffer, Function, Promise, Reflect, Uint8Array};
 use wasm_bindgen::prelude::*;

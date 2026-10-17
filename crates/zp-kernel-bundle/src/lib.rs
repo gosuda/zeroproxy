@@ -13,6 +13,8 @@ pub mod membrane;
 pub mod rtcgw_client;
 pub mod wtproxy_client;
 
+pub use kernel::transport::dialer;
+
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen(start)]

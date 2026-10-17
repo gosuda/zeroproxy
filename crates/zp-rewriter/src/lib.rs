@@ -37,10 +37,39 @@ pub enum ScriptKind {
 }
 
 impl ScriptKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ScriptKind::Classic => "classic",
+            ScriptKind::ClassicLocal => "classic-local",
+            ScriptKind::Module => "module",
+            ScriptKind::EventHandler => "event-handler",
+            ScriptKind::Eval => "eval",
+            ScriptKind::Function => "function",
+            ScriptKind::Worker => "worker",
+        }
+    }
+
     fn source_type(self) -> SourceType {
         match self {
             ScriptKind::Module => SourceType::mjs(),
             _ => SourceType::cjs(),
+        }
+    }
+}
+
+impl std::str::FromStr for ScriptKind {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "classic" => Ok(ScriptKind::Classic),
+            "classic-local" => Ok(ScriptKind::ClassicLocal),
+            "module" => Ok(ScriptKind::Module),
+            "event-handler" => Ok(ScriptKind::EventHandler),
+            "eval" => Ok(ScriptKind::Eval),
+            "function" => Ok(ScriptKind::Function),
+            "worker" => Ok(ScriptKind::Worker),
+            other => Err(other.to_string()),
         }
     }
 }
@@ -1752,6 +1781,44 @@ impl RewriterInstance {
 
         Ok(RewriteResult {
             code,
+            patches,
+            diagnostics: visitor.diagnostics,
+        })
+    }
+
+    /// Patch-mode rewrite reusing the persistent bump arena. Returns the
+    /// sorted patch list without allocating or emitting the full output string.
+    pub fn rewrite_patches(
+        &mut self,
+        source: &str,
+        opts: &RewriteOpts,
+    ) -> Result<RewriteResult, RewriteError> {
+        let (ret, kind) = parse_for_kind(&self.allocator, source, opts.kind);
+
+        if !ret.errors.is_empty() && opts.strict {
+            let msg = ret
+                .errors
+                .iter()
+                .map(|e| e.to_string())
+                .collect::<Vec<_>>()
+                .join("; ");
+            self.allocator.reset();
+            return Err(RewriteError::ParseFailed(msg));
+        }
+
+        let mut visitor =
+            RewriteVisitor::new(opts.target_url.clone(), opts.proxy_origin.clone(), kind);
+        visitor.local_this = opts.kind == ScriptKind::ClassicLocal;
+        visitor.visit_program(&ret.program);
+        visitor.refuse_reserved_names(&ret.program, source.len());
+
+        let mut patches = visitor.patches;
+        patches.sort_by_key(|p| p.start);
+
+        self.allocator.reset();
+
+        Ok(RewriteResult {
+            code: String::new(),
             patches,
             diagnostics: visitor.diagnostics,
         })

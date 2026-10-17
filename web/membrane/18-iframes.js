@@ -145,11 +145,13 @@
               rec = { shadow, list: d.get.call(shadow) };
               const frame = this;
               try {
-                new MO(() => {
+                const obs = new MO(() => {
                   const now = Native.getAttribute.call(shadow, 'sandbox');
                   if (now === null || sandboxShadows.get(frame) !== rec) return;
                   if (frameSandboxMeta.get(frame) !== now) setFrameSandboxAttribute(frame, now);
-                }).observe(shadow, { attributes: true, attributeFilter: ['sandbox'] });
+                });
+                obs.observe(shadow, { attributes: true, attributeFilter: ['sandbox'] });
+                activeObservers.add(obs);
               } catch {}
               sandboxShadows.set(this, rec);
             }

@@ -7,7 +7,7 @@
     const MO = (doc.defaultView && doc.defaultView.MutationObserver) || root.MutationObserver;
     if (!MO || !doc.documentElement) return;
     try {
-      new MO(records => {
+      const obs = new MO(records => {
         try { zpTrace('mo', 'n=' + records.length); } catch {}
         // Cache URL classification and canonicalization within a single MutationObserver batch.
         tickURLCache = newMap();
@@ -31,7 +31,9 @@
         } finally {
           tickURLCache = null;
         }
-      }).observe(doc.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['href', 'xlink:href', 'src', 'srcdoc', 'action', 'formaction', 'poster', 'integrity', 'type', 'rel', 'target', 'data', 'http-equiv', 'content', 'ping'] });
+      });
+      obs.observe(doc.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['href', 'xlink:href', 'src', 'srcdoc', 'action', 'formaction', 'poster', 'integrity', 'type', 'rel', 'target', 'data', 'http-equiv', 'content', 'ping'] });
+      activeObservers.add(obs);
       observedDocuments.add(doc);
     } catch {}
   }

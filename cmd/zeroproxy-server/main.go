@@ -14,9 +14,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gosuda/zeroproxy/internal/httphost"
-	"github.com/gosuda/zeroproxy/internal/rtcgw"
-	"github.com/gosuda/zeroproxy/internal/wtproxy"
+	"github.com/gosuda/zeroproxy/pkg/httphost"
+	"github.com/gosuda/zeroproxy/pkg/rtcgw"
+	"github.com/gosuda/zeroproxy/pkg/wtproxy"
 )
 
 func main() {
@@ -73,6 +73,7 @@ func main() {
 		if err != nil {
 			log.Fatalf("rtcgw: embedded TURN: %v", err)
 		}
+		defer turnSrv.Close()
 		cfg.RtcTURN = turnSrv
 		log.Printf("rtcgw: embedded TURN listening on %s (public %s, realm %q)", rtcTurnAddr, turnSrv.PublicAddr(), rtcTurnRealm)
 		if cfg.SocksAddr != "internal" {
@@ -106,12 +107,17 @@ func main() {
 		if err != nil {
 			log.Fatalf("wtproxy: %v", err)
 		}
+		defer wtListener.Close()
 		cfg.WtGatewayCertHashes = wtListener.CertHashes()
 		if cfg.SocksAddr != "internal" {
 			log.Printf("wtproxy: WARNING WebTransport egress is DIRECT (not via %s): targets see this server's address, and the gateway terminates WebTransport TLS (sees stream plaintext)", cfg.SocksAddr)
 		}
 	}
-	h := httphost.NewHandler(cfg)
+	zpServer, err := httphost.NewServer(cfg)
+	if err != nil {
+		log.Fatalf("httphost: %v", err)
+	}
+	defer zpServer.Close()
 	if wtListener != nil {
 		go func() {
 			if err := wtListener.Run(context.Background()); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -122,7 +128,7 @@ func main() {
 
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           h,
+		Handler:           zpServer,
 		ReadHeaderTimeout: 15 * time.Second,
 		IdleTimeout:       120 * time.Second,
 		MaxHeaderBytes:    1 << 20,

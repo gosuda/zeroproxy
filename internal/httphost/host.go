@@ -31,10 +31,32 @@ import (
 	"github.com/gosuda/zeroproxy/internal/yamuxconn"
 )
 
-// Config holds the parameters for NewHandler.
+// TransportMode selects how the relay bridges outbound streams.
+type TransportMode uint8
+
+const (
+	// TransportAuto infers the transport mode from Config.SocksAddr: "internal"
+	// dials directly (permitting private targets unless DisallowPrivateTargets
+	// is set), "direct" dials directly (blocking private targets unless
+	// AllowPrivateTargets is set), and a host:port address dials an upstream
+	// SOCKS5 proxy.
+	TransportAuto TransportMode = iota
+	// TransportSOCKS5 bridges yamux streams to an upstream SOCKS5 proxy at
+	// Config.SocksAddr (such as a Tor client listener).
+	TransportSOCKS5
+	// TransportDirect terminates the inner SOCKS5 handshake in-process and
+	// dials resolved target addresses directly over TCP. Non-public target IPs
+	// are rejected unless Config.AllowPrivateTargets is true.
+	TransportDirect
+)
+
+// Config holds the parameters for NewServer and NewHandler.
 type Config struct {
-	WebDir       string // built static web asset directory (dist/web)
-	SocksAddr    string // Tor SOCKS5 addr, "internal", or "direct"
+	WebDir string // built static web asset directory (dist/web)
+	// Transport selects the outbound relay mode. When left at TransportAuto,
+	// the mode is inferred from SocksAddr.
+	Transport    TransportMode
+	SocksAddr    string // upstream SOCKS5 host:port, "internal", or "direct"
 	WtGatewayURL string // public WT gateway URL the page reads; empty hides it
 	// WtGatewayCertHashes pins a self-signed dev gateway certificate
 	// (base64url SHA-256). Nil for an operator certificate that the browser
@@ -42,41 +64,141 @@ type Config struct {
 	WtGatewayCertHashes []string
 	// RtcTURN is the embedded TURN server for relay-only WebRTC.
 	RtcTURN *rtcgw.TURNServer
+	// AllowPrivateTargets permits loopback and RFC 1918 private target IPs when
+	// dialing directly (TransportDirect). Link-local and unspecified addresses
+	// remain blocked regardless of this setting.
+	AllowPrivateTargets bool
 	// DisallowPrivateTargets rejects private, loopback, and non-public target
-	// IPs when dialing in "internal" or "direct" mode.
+	// IPs even when SocksAddr is set to the legacy "internal" mode.
 	DisallowPrivateTargets bool
 	// TrustProxyHeaders trusts X-Forwarded-Proto from non-loopback peers.
 	TrustProxyHeaders bool
 }
 
-// NewHandler builds the ZeroProxy HTTP handler: static assets, /zp/*
-// routes, ws-pipe bridge, sync-fetch hub, and CSP report wrapped in the
-// security-headers middleware.
-func NewHandler(cfg Config) http.Handler {
-	s := &server{
-		webDir:                 cfg.WebDir,
-		socksAddr:              cfg.SocksAddr,
-		wtGatewayURL:           cfg.WtGatewayURL,
-		wtCertHashes:           cfg.WtGatewayCertHashes,
-		rtcTURN:                cfg.RtcTURN,
-		disallowPrivateTargets: cfg.DisallowPrivateTargets || strings.EqualFold(strings.TrimSpace(cfg.SocksAddr), directSOCKSMode),
-		trustProxyHeaders:      cfg.TrustProxyHeaders,
-		syncHub:                newSyncFetchHub(),
-	}
-	mux := http.NewServeMux()
-	mux.HandleFunc("/", s.handle)
-	return s.securityHeaders(mux)
-}
-
-type server struct {
+// Server implements the ZeroProxy HTTP host and manages active relay sessions
+// and the synchronous XHR hub. Callers should invoke Close on shutdown to
+// terminate open yamux sessions and unblock parked sync-fetch requests.
+type Server struct {
 	webDir                 string
+	transport              TransportMode
 	socksAddr              string
 	wtGatewayURL           string
 	wtCertHashes           []string
 	rtcTURN                *rtcgw.TURNServer
+	allowPrivateTargets    bool
 	disallowPrivateTargets bool
 	trustProxyHeaders      bool
 	syncHub                *syncFetchHub
+	handler                http.Handler
+
+	mu        sync.Mutex
+	sessions  map[*yamuxconn.Session]struct{}
+	closed    chan struct{}
+	closeOnce sync.Once
+}
+
+type server = Server
+
+// NewServer validates cfg and constructs a Server ready to serve HTTP requests.
+func NewServer(cfg Config) (*Server, error) {
+	if err := validateConfig(cfg); err != nil {
+		return nil, err
+	}
+	return newUncheckedServer(cfg), nil
+}
+
+func validateConfig(cfg Config) error {
+	socks := strings.TrimSpace(cfg.SocksAddr)
+	switch cfg.Transport {
+	case TransportAuto:
+		if socks != "" && !strings.EqualFold(socks, internalSOCKSMode) && !strings.EqualFold(socks, directSOCKSMode) {
+			if _, _, err := net.SplitHostPort(socks); err != nil {
+				return fmt.Errorf("httphost: invalid SocksAddr %q: %w", cfg.SocksAddr, err)
+			}
+		}
+	case TransportSOCKS5:
+		if socks == "" || strings.EqualFold(socks, internalSOCKSMode) || strings.EqualFold(socks, directSOCKSMode) {
+			return fmt.Errorf("httphost: TransportSOCKS5 requires a host:port SocksAddr, got %q", cfg.SocksAddr)
+		}
+		if _, _, err := net.SplitHostPort(socks); err != nil {
+			return fmt.Errorf("httphost: invalid SocksAddr %q: %w", cfg.SocksAddr, err)
+		}
+	case TransportDirect:
+		if socks != "" && !strings.EqualFold(socks, internalSOCKSMode) && !strings.EqualFold(socks, directSOCKSMode) {
+			return fmt.Errorf("httphost: TransportDirect cannot be combined with upstream SocksAddr %q", cfg.SocksAddr)
+		}
+	default:
+		return fmt.Errorf("httphost: unknown TransportMode %d", cfg.Transport)
+	}
+	return nil
+}
+
+func newUncheckedServer(cfg Config) *Server {
+	s := &Server{
+		webDir:                 cfg.WebDir,
+		transport:              cfg.Transport,
+		socksAddr:              cfg.SocksAddr,
+		wtGatewayURL:           cfg.WtGatewayURL,
+		wtCertHashes:           cfg.WtGatewayCertHashes,
+		rtcTURN:                cfg.RtcTURN,
+		allowPrivateTargets:    cfg.AllowPrivateTargets,
+		disallowPrivateTargets: cfg.DisallowPrivateTargets,
+		trustProxyHeaders:      cfg.TrustProxyHeaders,
+		syncHub:                newSyncFetchHub(),
+		sessions:               make(map[*yamuxconn.Session]struct{}),
+		closed:                 make(chan struct{}),
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", s.handle)
+	s.handler = s.securityHeaders(mux)
+	return s
+}
+
+// NewHandler builds the ZeroProxy HTTP handler: static assets, /zp/*
+// routes, ws-pipe bridge, sync-fetch hub, and CSP report wrapped in the
+// security-headers middleware. The returned http.Handler is a *Server and
+// also implements io.Closer.
+func NewHandler(cfg Config) http.Handler {
+	return newUncheckedServer(cfg)
+}
+
+// ServeHTTP dispatches requests through the security-headers middleware and
+// host route mux.
+func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if s.handler != nil {
+		s.handler.ServeHTTP(w, r)
+		return
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", s.handle)
+	s.securityHeaders(mux).ServeHTTP(w, r)
+}
+
+// Close shuts down the synchronous XHR hub and closes all active yamux relay
+// sessions. Safe for concurrent and repeated calls.
+func (s *Server) Close() error {
+	if s == nil {
+		return nil
+	}
+	s.closeOnce.Do(func() {
+		if s.closed != nil {
+			close(s.closed)
+		}
+	})
+	if s.syncHub != nil {
+		s.syncHub.close()
+	}
+	s.mu.Lock()
+	sessions := make([]*yamuxconn.Session, 0, len(s.sessions))
+	for sess := range s.sessions {
+		sessions = append(sessions, sess)
+	}
+	s.sessions = nil
+	s.mu.Unlock()
+	for _, sess := range sessions {
+		_ = sess.Close()
+	}
+	return nil
 }
 
 const (
@@ -431,6 +553,25 @@ const (
 
 func (s *server) acceptStreams(ctx context.Context, sess *yamuxconn.Session) {
 	defer sess.Close()
+	if s.closed != nil {
+		select {
+		case <-s.closed:
+			return
+		default:
+		}
+	}
+	s.mu.Lock()
+	if s.sessions != nil {
+		s.sessions[sess] = struct{}{}
+	}
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		if s.sessions != nil {
+			delete(s.sessions, sess)
+		}
+		s.mu.Unlock()
+	}()
 	sem := make(chan struct{}, maxConcurrentStreamsPerSession)
 	for {
 		stream, err := sess.Accept(ctx)
@@ -460,9 +601,29 @@ func (s *server) acceptStreams(ctx context.Context, sess *yamuxconn.Session) {
 	}
 }
 
-func (s *server) bridgeTargetStream(ctx context.Context, stream net.Conn) {
+func (s *server) isDirectTransport() bool {
+	if s.transport == TransportDirect {
+		return true
+	}
+	if s.transport == TransportSOCKS5 {
+		return false
+	}
 	mode := strings.ToLower(strings.TrimSpace(s.socksAddr))
-	if mode == internalSOCKSMode || mode == directSOCKSMode {
+	return mode == internalSOCKSMode || mode == directSOCKSMode
+}
+
+func (s *server) disallowsPrivateTargets() bool {
+	if s.disallowPrivateTargets {
+		return true
+	}
+	if s.allowPrivateTargets {
+		return false
+	}
+	return s.transport == TransportDirect || strings.EqualFold(strings.TrimSpace(s.socksAddr), directSOCKSMode)
+}
+
+func (s *server) bridgeTargetStream(ctx context.Context, stream net.Conn) {
+	if s.isDirectTransport() {
 		s.bridgeInternalSOCKS(ctx, stream)
 		return
 	}
@@ -504,7 +665,7 @@ func (s *server) bridgeInternalSOCKS(ctx context.Context, stream net.Conn) {
 }
 
 func (s *server) resolveInternalTarget(ctx context.Context, host, port string) (string, error) {
-	disallowPrivate := s.disallowPrivateTargets || strings.EqualFold(strings.TrimSpace(s.socksAddr), directSOCKSMode)
+	disallowPrivate := s.disallowsPrivateTargets()
 	var ips []net.IPAddr
 	if ip := net.ParseIP(host); ip != nil {
 		ips = []net.IPAddr{{IP: ip}}

@@ -278,6 +278,9 @@
   let activeShareVersion = 0;
   let documentCookie = String(boot.documentCookie || '');
   const documentCookieRecords = [];
+  const activeObservers = newSet();
+  let realmDisposed = false;
+  let __zpHeartbeatTimer = null;
   // Live view of realm state exposed via root.__zp_realm for embedder inspection
   // and bridge attachment.
   const ctx = {
@@ -295,6 +298,7 @@
     get activeProxyFragment() { return activeProxyFragment; }, set activeProxyFragment(v) { activeProxyFragment = v; },
     get activeShareVersion() { return activeShareVersion; }, set activeShareVersion(v) { activeShareVersion = v; },
     get documentCookie() { return documentCookie; }, set documentCookie(v) { documentCookie = v; },
+    get disposed() { return realmDisposed; },
   };
   initDocumentCookieRecords(documentCookie);
   const urlMeta = newWeakMap();
@@ -501,7 +505,7 @@
   } catch {}
   try {
     let __zpBeats = 0;
-    setInterval(() => {
+    __zpHeartbeatTimer = setInterval(() => {
       __zpBeats++;
       try { __zpNativeStorage && __zpNativeStorage.setItem('__zp_hb', JSON.stringify({ n: __zpBeats, t: Date.now() })); } catch {}
     }, 100);

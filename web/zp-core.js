@@ -486,7 +486,25 @@
       return result;
     };
   }
-  const api = Object.freeze({ CONTROL_PREFIX, ASSET_PREFIX, TARGET_USER_AGENT, TARGET_SEC_CH_UA, TARGET_CHROME_FULL_VERSION, TARGET_UA_HIGH_ENTROPY, uaHighEntropyValues, clientEnvOf, chromeBrandList, bytesToBase64Url, base64UrlToBytes, webTransportGatewayRequest, relayOnlyRTCConfiguration, ENVELOPE_MIME,encodeEnvelope, decodeEnvelope, encryptShareURL, decryptShareURL, makeShareURL, makeSharePath, makeShareFragment, defaultRelayServer, relayServersForShare, isSharePath, shareRouteKey, controlPath, assetPath, assetURL, versionedAsset, apiPath, errorPath, INTERNAL_ASSET_SCRIPTS, isInternalAssetScriptPath, isInternalPath, canonicalTargetURL, canonicalWebSocketURL, encodeTargetURL, decodeTargetURL, randomId, fixedCSP, filterMetaCSP, parseRelayServersFromFragment, normalizeRelayServers, isLoopbackHost, redirectMethod, createFetchResponseAdapter, ERRORS, errorInfo, MSG });
+  function configureBridge(win, factoryOrBridge) {
+    const w = win === undefined ? globalThis : win;
+    if (!w || (typeof w !== 'object' && typeof w !== 'function')) {
+      throw new TypeError('ZP.configureBridge requires a window object');
+    }
+    if (typeof factoryOrBridge !== 'function' && (!factoryOrBridge || typeof factoryOrBridge.send !== 'function')) {
+      throw new TypeError('ZP.configureBridge requires a bridge factory function or an object with send(msg)');
+    }
+    const factory = typeof factoryOrBridge === 'function' ? factoryOrBridge : () => factoryOrBridge;
+    const realm = w.__zp_realm;
+    if (realm && typeof realm.setBridge === 'function') {
+      const next = factory(realm);
+      if (next && typeof next.send === 'function') realm.setBridge(next);
+      return next;
+    }
+    Object.defineProperty(w, '__zp_bridge_factory', { value: factory, configurable: true, enumerable: false, writable: true });
+    return null;
+  }
+  const api = Object.freeze({ CONTROL_PREFIX, ASSET_PREFIX, TARGET_USER_AGENT, TARGET_SEC_CH_UA, TARGET_CHROME_FULL_VERSION, TARGET_UA_HIGH_ENTROPY, uaHighEntropyValues, clientEnvOf, chromeBrandList, bytesToBase64Url, base64UrlToBytes, webTransportGatewayRequest, relayOnlyRTCConfiguration, ENVELOPE_MIME,encodeEnvelope, decodeEnvelope, encryptShareURL, decryptShareURL, makeShareURL, makeSharePath, makeShareFragment, defaultRelayServer, relayServersForShare, isSharePath, shareRouteKey, controlPath, assetPath, assetURL, versionedAsset, apiPath, errorPath, INTERNAL_ASSET_SCRIPTS, isInternalAssetScriptPath, isInternalPath, canonicalTargetURL, canonicalWebSocketURL, encodeTargetURL, decodeTargetURL, randomId, fixedCSP, filterMetaCSP, parseRelayServersFromFragment, normalizeRelayServers, isLoopbackHost, redirectMethod, createFetchResponseAdapter, configureBridge, ERRORS, errorInfo, MSG });
   // `configurable: true` allows the page prelude to delete `globalThis.ZP` after capturing it into a closure binding,
   // preventing `Object.getOwnPropertyNames(window)` from exposing `ZP` to target scripts.
   Object.defineProperty(globalThis, 'ZP', { value: api, enumerable: false, configurable: true, writable: false });

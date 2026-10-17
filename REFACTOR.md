@@ -14,7 +14,7 @@ ZeroProxy separates policy and transformation, network transport, realm containm
 | **`zp-engine`** | [`crates/zp-engine`](crates/zp-engine), [`crates/zp-bundle`](crates/zp-bundle) | Unified Rust library facade over OXC script rewriting, streaming `lol_html` transformation, SWC CSS rewriting, and Source Map v3 composition. |
 | **`zp-transport`** | [`crates/zp-kernel-bundle`](crates/zp-kernel-bundle) | Browser-side transport kernel with an injectable `Dialer` trait backing TLS (`rustls`), HTTP/1.1, HTTP/2, WebSocket streams, and cookie storage. |
 | **`zp-membrane`** | [`web/membrane/`](web/membrane), [`web/worker-prelude.js`](web/worker-prelude.js) | Virtual browser realm (`ctx` state object and `ctx.bridge` adapter) isolating `window`, `location`, `document`, storage, and networking. |
-| **`zp-host`** | [`web/sw.js`](web/sw.js), [`internal/httphost`](internal/httphost), [`cmd/zeroproxy-server`](cmd/zeroproxy-server) | Service Worker request router and embeddable Go `http.Handler` serving static assets, WebSocket relay tunnels, and optional gateways. |
+| **`zp-host`** | [`web/sw.js`](web/sw.js), [`pkg/httphost`](pkg/httphost), [`pkg/wtproxy`](pkg/wtproxy), [`pkg/rtcgw`](pkg/rtcgw), [`cmd/zeroproxy-server`](cmd/zeroproxy-server) | Service Worker request router and embeddable Go HTTP host serving static assets, WebSocket relay tunnels, and optional WebTransport and TURN gateways. |
 
 ## 2. Component Boundaries
 
@@ -22,17 +22,18 @@ Each layer exposes an explicit boundary so embedders and test suites can use ind
 
 ### 2.1 `zp-engine` (Rust Transformation Facade)
 
-[`crates/zp-engine`](crates/zp-engine) provides a single native Rust API over [`crates/zp-rewriter`](crates/zp-rewriter), [`crates/zp-htmltx`](crates/zp-htmltx), [`crates/zp-css`](crates/zp-css), and [`crates/zp-shared`](crates/zp-shared). It owns a reusable `RewriterInstance` arena (`TransformEngine`) alongside `DocCtx`, `EngineError`, `parse_script_kind`, and `patches_to_json`.
+[`crates/zp-engine`](crates/zp-engine) provides a single native Rust API over [`crates/zp-rewriter`](crates/zp-rewriter), [`crates/zp-htmltx`](crates/zp-htmltx), [`crates/zp-css`](crates/zp-css), and [`crates/zp-shared`](crates/zp-shared). It owns a reusable `RewriterInstance` arena (`TransformEngine`) for both full-source and patch-envelope script rewrites, alongside `DocCtx`, `ScriptKind`, `EngineError`, `parse_script_kind`, and `patches_to_json`.
 
 - **Service Worker WASM bundle ([`crates/zp-bundle`](crates/zp-bundle))**: Exports thin `wasm-bindgen` shims (`rewriteScriptPatches`, `transformHtml`, `HtmlTxn`, `rewriteCSS`, `buildCSP*`, `isChallengeDocument`, `composeSourceMap*`) backed by a thread-local `TransformEngine`.
 - **Native Rust callers**: Link `zp-engine` directly for server-side transformation benchmarks or native conformance tests without WebAssembly overhead.
-- **Page-realm bundle exception ([`crates/zp-page-bundle`](crates/zp-page-bundle))**: Links `zp-rewriter` directly rather than `zp-engine`. Avoiding `zp-htmltx` (`lol_html`) and `zp-css` (SWC) in the page bundle keeps `zp_page_bundle_bg.wasm` at 375 KB, under the 500 KB per-navigation budget.
+- **Page-realm bundle exception ([`crates/zp-page-bundle`](crates/zp-page-bundle))**: Links `zp-rewriter` directly rather than `zp-engine` and reuses a thread-local `RewriterInstance`. Avoiding `zp-htmltx` (`lol_html`) and `zp-css` (SWC) in the page bundle keeps `zp_page_bundle_bg.wasm` at 375 KB, under the 500 KB per-navigation budget.
 
 ### 2.2 `Dialer` Seam in the Transport Kernel
 
-[`crates/zp-kernel-bundle/src/kernel/transport/dialer.rs`](crates/zp-kernel-bundle/src/kernel/transport/dialer.rs) decouples connection establishment from upper-layer TLS, HTTP/1.1, HTTP/2, and WebSocket framing:
+[`crates/zp-kernel-bundle/src/kernel/transport/dialer.rs`](crates/zp-kernel-bundle/src/kernel/transport/dialer.rs) (publicly re-exported at `zp_kernel_bundle::dialer`) decouples connection establishment from upper-layer TLS, HTTP/1.1, HTTP/2, and WebSocket framing:
 
 - `AsyncIo` is the stream trait used by `PooledConn` across the connection pool.
+- `DialError` provides structured failure classifications (`RelaySession`, `TargetConnect`, and `Custom`).
 - `Dialer` defines how the kernel opens a byte stream to a `TargetAddr`.
 - `RelayDialer` is the default implementation, multiplexing streams over `yamux` and framing SOCKS5 `CONNECT` requests over the relay WebSocket.
 - `set_dialer` lets WASM embedders inject a custom `Dialer` (such as an in-memory pipe or custom tunnel) while keeping [`fetch.rs`](crates/zp-kernel-bundle/src/kernel/transport/fetch.rs) and [`ws_client.rs`](crates/zp-kernel-bundle/src/kernel/transport/ws_client.rs) unchanged.
@@ -45,7 +46,7 @@ The page membrane source is organized into 23 ordered fragments under [`web/memb
 | :--- | :--- |
 | `00-head.js`, `01-boot.js` | IIFE entry, global scrub, boot config parsing, native API capture, and live `ctx` state view. |
 | `02-masking.js`, `03-urls.js` | Function `toString` branding, descriptor helpers, share/proxy URL encoding, and attribute URL policy. |
-| `04-navigation.js`, `05-messaging.js` | Virtual `history`/`location` navigation, `BridgeAdapter` (`ctx.bridge`), and Service Worker `postMessage` channel. |
+| `04-navigation.js`, `05-messaging.js` | Virtual `history`/`location` navigation, `BridgeAdapter` (`ctx.bridge`, `ctx.setBridge`, `ctx.dispose`), and Service Worker `postMessage` channel. |
 | `06-install.js`, `07-membrane.js` | Installation step runner, error stack sanitizer, and core `window`/`location`/`document` membrane. |
 | `08-http.js`, `09-nav-net.js`, `10-swless.js` | Virtual `fetch`, XHR, `WebSocket`, `EventSource`, beacon, client hints, popup/frame `postMessage`, and SW-less fallback. |
 | `11-cookies.js`, `12-storage.js` | Virtual cookie jar, `cookieStore`, `localStorage`, `sessionStorage`, IndexedDB, Cache Storage, OPFS, and permissions. |
@@ -66,82 +67,97 @@ To avoid the 33% payload size overhead and CPU cost of base64-encoding request b
 - **Protocol negotiation**: The page and worker realms send `POST /zp/api/v2/fetch` first. If an older Service Worker responds with HTTP `404` without an `X-ZP-Fetch-Meta` header, the realm automatically downgrades to the legacy JSON `/zp/api/fetch` endpoint for the remainder of its lifetime. Upstream `404` responses from target servers always include `X-ZP-Fetch-Meta`, keeping detection unambiguous.
 - **Backward compatibility**: The v1 `/zp/api/fetch` endpoint (including `GET /zp/api/fetch?url=...` subresource loads) remains active and unchanged.
 
-### 2.5 `internal/httphost` (Go HTTP Host Library)
+### 2.5 `pkg/httphost`, `pkg/wtproxy`, and `pkg/rtcgw` (Go Host Packages)
 
-[`internal/httphost`](internal/httphost) encapsulates the Go HTTP server surface: static asset delivery, WebSocket-to-SOCKS5 stream bridging, synchronous XHR relay coordination, CSP violation reporting, and `/zp/api/config` generation. [`cmd/zeroproxy-server/main.go`](cmd/zeroproxy-server/main.go) parses CLI flags, initializes optional WebTransport and TURN gateways, and mounts `httphost.NewHandler(cfg)`.
+[`pkg/httphost`](pkg/httphost), [`pkg/wtproxy`](pkg/wtproxy), and [`pkg/rtcgw`](pkg/rtcgw) expose the public Go embedding surface backed by [`internal/httphost`](internal/httphost), [`internal/wtproxy`](internal/wtproxy), and [`internal/rtcgw`](internal/rtcgw). `httphost.Server` implements both `http.Handler` and `io.Closer`: it serves static assets, bridges WebSocket-to-SOCKS5 yamux streams, coordinates synchronous XHR relay requests, reports CSP violations, and serves `/zp/api/config`. [`cmd/zeroproxy-server/main.go`](cmd/zeroproxy-server/main.go) parses CLI flags, initializes optional WebTransport and TURN gateways, and mounts `httphost.NewServer(cfg)`.
 
 ## 3. Embedding Interfaces
 
 Host applications can integrate ZeroProxy at four boundaries depending on their runtime environment.
 
-### 3.1 JavaScript: Custom Membrane Bridge
+### 3.1 JavaScript: Custom Membrane Bridge and Lifecycle
 
-Set `window.__zp_bridge_factory` before evaluating `dist/web/runtime-prelude.js` to intercept control messages between the membrane and the host without requiring a Service Worker controller:
+Use `ZP.configureBridge(win, factoryOrBridge)` (or set `win.__zp_bridge_factory`) before evaluating `dist/web/runtime-prelude.js` to intercept control messages between the membrane and the host without requiring a Service Worker controller. After prelude evaluation, `win.__zp_realm` exposes `setBridge(nextBridge)` for hot-swapping the active bridge and `dispose()` for tearing down background intervals and `MutationObserver` instances:
 
 ```js
-// Configure the custom bridge factory before evaluating the prelude:
-win.__zp_bridge_factory = (ctx) => ({
+// Configure the custom bridge before evaluating the prelude:
+ZP.configureBridge(win, (ctx) => ({
   send: (msg) => Promise.resolve({ ok: true /* reply fields */ }),
   onMessage: (fn) => myChannel.on("data", fn), // optional inbound listener
-});
+  dispose: () => myChannel.close(),            // optional cleanup hook
+}));
 
 // After evaluating dist/web/runtime-prelude.js inside the realm:
 const realm = win.__zp_realm;        // live context handle (virtualURL, baseURL, documentCookie, ...)
 const bridge = win.__zp_realm.bridge; // active bridge instance
+
+// Hot-swap the bridge or tear down background timers/observers when closing the realm:
+realm.setBridge(nextBridge);
+realm.dispose();
 ```
 
-When `window.__zp_bridge_factory` is not defined, the membrane defaults to the Service Worker `postMessage` channel with capability token sealing.
+When no custom bridge is configured, the membrane defaults to the Service Worker `postMessage` channel with capability token sealing.
 
 ### 3.2 Rust: Native Transformation Engine
 
 Use [`crates/zp-engine`](crates/zp-engine) in Rust applications or test suites to rewrite scripts, stream HTML transformations, and rewrite CSS:
 
 ```rust
-let mut engine = zp_engine::TransformEngine::new();
-let ctx = zp_engine::DocCtx::new(target_url, proxy_origin);
+use zp_engine::{DocCtx, ScriptKind, TransformEngine};
 
-let rewritten_js = engine.rewrite_script(src, "classic", &ctx)?;
-let patch_json = engine.rewrite_script_patches_json(src, kind, &ctx)?;
+let mut engine = TransformEngine::new();
+let ctx = DocCtx::new(target_url, proxy_origin).with_control_prefix("/zp/");
+
+let rewritten_js = engine.rewrite_script_kind(src, ScriptKind::Classic, &ctx)?;
+let patch_json = engine.rewrite_script_patches_json_kind(src, ScriptKind::Module, &ctx)?;
 let transformed_html = engine.transform_html(html, &ctx)?;
 
 let mut txn = engine.html_txn(&ctx, &prelude);
 txn.write(chunk)?;
 txn.end()?;
 
-let rewritten_css = engine.rewrite_css(css, base_url, "/zp/", &ctx)?;
+let rewritten_css = engine.rewrite_css_with_ctx(css, base_url, &ctx)?;
 let csp_header = engine.build_csp_with(ws_origin, challenge_compat);
 ```
 
 ### 3.3 Rust (WASM): Custom Transport Dialer
 
-Implement the `Dialer` trait in [`crates/zp-kernel-bundle`](crates/zp-kernel-bundle) to route outbound connections over a custom byte stream transport:
+Implement the `Dialer` trait in `zp_kernel_bundle::dialer` to route outbound connections over a custom byte stream transport:
 
 ```rust
+use std::rc::Rc;
+use futures::future::LocalBoxFuture;
+use zp_kernel_bundle::dialer::{set_dialer, AsyncIo, DialError, Dialer, TargetAddr};
+
 struct CustomDialer;
 
-impl zp_kernel_bundle::kernel::transport::dialer::Dialer for CustomDialer {
+impl Dialer for CustomDialer {
     fn connect<'a>(
         &'a self,
         target: &'a TargetAddr,
-        relay: &'a str,
-        t0: f64,
-    ) -> LocalBoxFuture<'a, Result<Box<dyn AsyncIo>, JsValue>> {
+        relay_url: &'a str,
+    ) -> LocalBoxFuture<'a, Result<Box<dyn AsyncIo>, DialError>> {
         // Return a boxed AsyncIo stream connected to target
     }
 }
 
-zp_kernel_bundle::kernel::transport::dialer::set_dialer(Rc::new(CustomDialer));
+set_dialer(Rc::new(CustomDialer));
 ```
 
-### 3.4 Go: Embeddable HTTP Handler
+### 3.4 Go: Embeddable HTTP Server
 
-Mount `httphost.NewHandler` inside any standard Go HTTP server, router, or middleware stack (see [`internal/httphost/example_test.go`](internal/httphost/example_test.go)):
+Construct an `*httphost.Server` with `httphost.NewServer` and mount it inside any standard Go HTTP server, router, or middleware stack (see [`internal/httphost/example_test.go`](internal/httphost/example_test.go) and [`pkg/httphost/httphost_test.go`](pkg/httphost/httphost_test.go)):
 
 ```go
-handler := httphost.NewHandler(httphost.Config{
+srv, err := httphost.NewServer(httphost.Config{
     WebDir:    "dist/web",
-    SocksAddr: "internal", // or "127.0.0.1:9050" for Tor SOCKS5
+    Transport: httphost.TransportSOCKS5,
+    SocksAddr: "127.0.0.1:9050", // or TransportDirect for direct TCP
 })
+if err != nil {
+    log.Fatal(err)
+}
+defer srv.Close()
 ```
 
 ## 4. Intentional Design Trade-Offs

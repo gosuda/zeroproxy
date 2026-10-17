@@ -56,6 +56,35 @@
   if (typeof bridge.onMessage === 'function') {
     try { bridge.onMessage(onBridgeMessage); } catch {}
   }
+  ctx.setBridge = function setBridge(nextBridge) {
+    if (!nextBridge || typeof nextBridge.send !== 'function') {
+      throw new TypeError('ctx.setBridge requires an object with send(msg)');
+    }
+    ctx.bridge = nextBridge;
+    if (typeof nextBridge.onMessage === 'function') {
+      try { nextBridge.onMessage(onBridgeMessage); } catch {}
+    }
+    return nextBridge;
+  };
+  ctx.dispose = function dispose() {
+    if (realmDisposed) return;
+    realmDisposed = true;
+    if (__zpKeepAliveTimer !== null) {
+      try { (Native.clearInterval || clearInterval)(__zpKeepAliveTimer); } catch {}
+      __zpKeepAliveTimer = null;
+    }
+    if (__zpHeartbeatTimer !== null) {
+      try { (Native.clearInterval || clearInterval)(__zpHeartbeatTimer); } catch {}
+      __zpHeartbeatTimer = null;
+    }
+    for (const obs of activeObservers) {
+      try { obs.disconnect(); } catch {}
+    }
+    activeObservers.clear();
+    if (ctx.bridge && typeof ctx.bridge.dispose === 'function') {
+      try { ctx.bridge.dispose(); } catch {}
+    }
+  };
   // Query the document's own encoded wire size after boot since navigation
   // responses complete before resultingClientId is bound.
   function askDocumentEncodedSize(attempt) {

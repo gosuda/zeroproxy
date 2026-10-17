@@ -283,7 +283,10 @@ async fn open_fresh(
         port: parsed.port,
         isolation_key: isolation_key.filter(|k| !k.is_empty()).map(str::to_string),
     };
-    let stream = dialer().connect(&addr, relay_url, t0).await?;
+    let stream = dialer()
+        .connect(&addr, relay_url)
+        .await
+        .map_err(|e| e.into_js_error())?;
 
     if parsed.scheme == "https" {
         let t_tls = now_ms();

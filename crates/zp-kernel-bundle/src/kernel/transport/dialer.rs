@@ -2,19 +2,19 @@
 //!
 //! ```text
 //! open_fresh(fetch.rs)
-//!   └─ Dialer::connect(target, relay_url, t0)
+//!   └─ Dialer::connect(target, relay_url)
 //!        ├─ RelayDialer (default): yamux session + SOCKS5 CONNECT
 //!        └─ host-injected Dialer: direct/Tor/CONNECT/in-process
 //! ```
 //!
 //! TLS and HTTP layering above the returned byte stream are unchanged;
-//! a Dialer only decides where raw bytes terminate. Errors stay `JsValue`
-//! so existing `TARGET_CONNECT_FAILED:*` codes pass through verbatim.
+//! a Dialer only decides where raw bytes terminate.
 //!
 //! The kernel is `wasm32`-only and single-threaded, so the trait uses
 //! `LocalBoxFuture` + `Rc` rather than `Send`/`BoxFuture`.
 
 use std::cell::RefCell;
+use std::fmt;
 use std::rc::Rc;
 
 use futures_util::future::LocalBoxFuture;
@@ -33,23 +33,70 @@ pub trait AsyncIo: AsyncRead + AsyncWrite + Unpin {}
 impl<T: AsyncRead + AsyncWrite + Unpin> AsyncIo for T {}
 
 /// TCP-level endpoint the dialer must reach.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TargetAddr {
     pub host: String,
     pub port: u16,
     pub isolation_key: Option<String>,
 }
 
+/// Structured error returned by [`Dialer::connect`]. Converts into the wire
+/// `TARGET_CONNECT_FAILED:*` `JsValue` format at the JS boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DialError {
+    /// Failed to establish or open a multiplexed stream on the relay session.
+    RelaySession {
+        stage: &'static str,
+        detail: String,
+    },
+    /// Upstream SOCKS5 or target TCP connect failed.
+    TargetConnect {
+        stage: &'static str,
+        detail: String,
+    },
+    /// Custom embedder-supplied dial failure.
+    Custom {
+        code: &'static str,
+        detail: String,
+    },
+}
+
+impl DialError {
+    pub fn code(&self) -> &'static str {
+        match self {
+            DialError::RelaySession { stage, .. } | DialError::TargetConnect { stage, .. } => stage,
+            DialError::Custom { code, .. } => code,
+        }
+    }
+
+    pub fn detail(&self) -> &str {
+        match self {
+            DialError::RelaySession { detail, .. }
+            | DialError::TargetConnect { detail, .. }
+            | DialError::Custom { detail, .. } => detail,
+        }
+    }
+
+    pub fn into_js_error(self) -> JsValue {
+        jserr(self.code(), &self.detail())
+    }
+}
+
+impl fmt::Display for DialError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}: {}", self.code(), self.detail())
+    }
+}
+
+impl std::error::Error for DialError {}
+
 /// Pluggable raw-byte-connection factory.
-///
-/// `t0` is the caller's `Date.now()` seed; implementations forward it to
-/// `push_trace` deltas so stage-level latency attribution keeps working.
 pub trait Dialer {
     fn connect<'a>(
         &'a self,
         target: &'a TargetAddr,
         relay_url: &'a str,
-        t0: f64,
-    ) -> LocalBoxFuture<'a, Result<Box<dyn AsyncIo>, JsValue>>;
+    ) -> LocalBoxFuture<'a, Result<Box<dyn AsyncIo>, DialError>>;
 }
 
 fn now_ms() -> f64 {
@@ -69,17 +116,20 @@ impl Dialer for RelayDialer {
         &'a self,
         target: &'a TargetAddr,
         relay_url: &'a str,
-        t0: f64,
-    ) -> LocalBoxFuture<'a, Result<Box<dyn AsyncIo>, JsValue>> {
+    ) -> LocalBoxFuture<'a, Result<Box<dyn AsyncIo>, DialError>> {
         Box::pin(async move {
-            let t_mux = now_ms();
+            let t0 = now_ms();
+            let t_mux = t0;
             let session = yamux::get_or_open(relay_url).await.map_err(|e| {
                 crate::kernel::push_trace(&format!(
                     "tx:mux-session-err err={} t={}ms",
                     e,
                     delta_ms(t0)
                 ));
-                jserr("TARGET_CONNECT_FAILED:mux-session", &e)
+                DialError::RelaySession {
+                    stage: "TARGET_CONNECT_FAILED:mux-session",
+                    detail: e.to_string(),
+                }
             })?;
             let mut stream = match session.open_stream().await {
                 Ok(s) => s,
@@ -92,9 +142,12 @@ impl Dialer for RelayDialer {
                     ));
                     yamux::invalidate();
                     pool::clear();
-                    let session = yamux::get_or_open(relay_url)
-                        .await
-                        .map_err(|e| jserr("TARGET_CONNECT_FAILED:mux-reopen", &e))?;
+                    let session = yamux::get_or_open(relay_url).await.map_err(|e| {
+                        DialError::RelaySession {
+                            stage: "TARGET_CONNECT_FAILED:mux-reopen",
+                            detail: e.to_string(),
+                        }
+                    })?;
                     session.open_stream().await.map_err(|e| {
                         crate::kernel::push_trace(&format!(
                             "tx:mux-open-err2 host={} err={} t={}ms",
@@ -102,7 +155,10 @@ impl Dialer for RelayDialer {
                             e,
                             delta_ms(t0)
                         ));
-                        jserr("TARGET_CONNECT_FAILED:mux-open", &e)
+                        DialError::RelaySession {
+                            stage: "TARGET_CONNECT_FAILED:mux-open",
+                            detail: e.to_string(),
+                        }
                     })?
                 }
             };
@@ -130,7 +186,10 @@ impl Dialer for RelayDialer {
                         e,
                         delta_ms(t0)
                     ));
-                    jserr("TARGET_CONNECT_FAILED:socks5", &e)
+                    DialError::TargetConnect {
+                        stage: "TARGET_CONNECT_FAILED:socks5",
+                        detail: e.to_string(),
+                    }
                 })?;
             crate::kernel::push_trace(&format!(
                 "tx:socks5-ok host={} socks5={}ms t={}ms",
@@ -150,7 +209,7 @@ thread_local! {
 }
 
 /// Active dialer: the injected one, or a fresh `RelayDialer`.
-pub(crate) fn dialer() -> Rc<dyn Dialer> {
+pub fn dialer() -> Rc<dyn Dialer> {
     CURRENT
         .with(|c| c.borrow().clone())
         .unwrap_or_else(|| Rc::new(RelayDialer))

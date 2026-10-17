@@ -1227,3 +1227,75 @@ test('SW non-UTF-8 decoding: EUC-KR bytes and meta charset tags normalize to UTF
   assert.match(rewrittenMeta, /<meta charset="utf-8"><p>\uC548\uB155<\/p>/);
 });
 
+test('embedding bridge API: ZP.configureBridge, ctx.setBridge, and ctx.dispose manage bridge and realm lifecycle', () => {
+  const root = {};
+  const initialSent = [];
+  let initialDisposed = 0;
+  let inboundListener = null;
+  globalThis.ZP.configureBridge(root, {
+    send(msg) { initialSent.push(msg); return Promise.resolve({ ok: true }); },
+    onMessage(fn) { inboundListener = fn; },
+    dispose() { initialDisposed++; },
+  });
+  assert.equal(typeof root.__zp_bridge_factory, 'function');
+  assert.throws(() => globalThis.ZP.configureBridge(null, { send() {} }), TypeError);
+  assert.throws(() => globalThis.ZP.configureBridge(root, {}), TypeError);
+
+  const ctx = {};
+  const clearedIntervals = [];
+  const disconnected = [];
+  const activeObservers = new Set([
+    { disconnect() { disconnected.push('obs1'); } },
+    { disconnect() { disconnected.push('obs2'); } },
+  ]);
+  const appliedCookies = [];
+  const block = slice(
+    '  const bridge = (() => {',
+    '  function askDocumentEncodedSize(attempt) {'
+  );
+  const env = load(
+    'let realmDisposed = false; let __zpHeartbeatTimer = 99;\n' + block,
+    ['ctx', 'encodedSizes'],
+    {
+      root,
+      ctx,
+      postMessageToSW: () => Promise.resolve({ ok: false }),
+      Native: {
+        clearInterval: (id) => { clearedIntervals.push(id); },
+      },
+      setInterval: () => 42,
+      clearInterval: (id) => { clearedIntervals.push(id); },
+      applyCookieChanges: (c) => { appliedCookies.push(c); },
+      activeObservers,
+    }
+  );
+
+  assert.equal(typeof env.ctx.bridge.send, 'function');
+  assert.equal(typeof inboundListener, 'function');
+  inboundListener({ type: globalThis.ZP.MSG.ENCODED_SIZE, url: 'https://example.com/a.js', size: 1234 });
+  assert.equal(env.encodedSizes.get('https://example.com/a.js'), 1234);
+
+  let nextInbound = null;
+  let nextDisposed = 0;
+  const nextBridge = {
+    send(msg) { return Promise.resolve({ ok: true, echo: msg }); },
+    onMessage(fn) { nextInbound = fn; },
+    dispose() { nextDisposed++; },
+  };
+  assert.throws(() => env.ctx.setBridge({}), TypeError);
+  env.ctx.setBridge(nextBridge);
+  assert.equal(env.ctx.bridge, nextBridge);
+  assert.equal(typeof nextInbound, 'function');
+
+  env.ctx.dispose();
+  assert.deepEqual(clearedIntervals, [42, 99]);
+  assert.deepEqual(disconnected, ['obs1', 'obs2']);
+  assert.equal(activeObservers.size, 0);
+  assert.equal(nextDisposed, 1);
+  assert.equal(initialDisposed, 0);
+
+  // Second dispose call is a no-op.
+  env.ctx.dispose();
+  assert.equal(nextDisposed, 1);
+});
+
