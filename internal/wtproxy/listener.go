@@ -3,9 +3,9 @@
 // Routes a virtual `new WebTransport(target_url)` from a proxied page out
 // to the real target server. Per-session topology:
 //
-//     page realm  ─(virtual WT, SW shim)─►  SW
-//     SW          ─(WT CONNECT to gateway)─►  this listener
-//     listener    ─(outbound WT to target)─►  target origin
+//	page realm  ─(virtual WT, SW shim)─►  SW
+//	SW          ─(WT CONNECT to gateway)─►  this listener
+//	listener    ─(outbound WT to target)─►  target origin
 //
 // The listener accepts a single HTTPS CONNECT upgrade on the path
 // configured via `-wt-path` (default `/__zp/wt`). The page-supplied
@@ -86,7 +86,10 @@ type Config struct {
 	// every browser CONNECT was refused. Requests without an Origin
 	// (non-browser clients) pass, as they did under that default.
 	PageHosts []string
-	// Logger receives one line per session lifecycle event. nil → log.Default.
+	// RequireOrigin rejects WebTransport CONNECT requests that omit the
+	// Origin header.
+	RequireOrigin bool
+	// Logger receives one line per session lifecycle event. nil defaults to log.Default.
 	Logger *log.Logger
 }
 
@@ -444,15 +447,16 @@ func (l *Listener) CertHashes() []string {
 	return []string{base64.RawURLEncoding.EncodeToString(l.devHash[:])}
 }
 
-// pageOriginAllowed admits the proxy's own pages (see Config.PageHosts) and
-// clients that send no Origin; other sites' pages cannot drive the gateway.
+// pageOriginAllowed admits the proxy's own pages (see Config.PageHosts) and,
+// unless RequireOrigin is true, clients that send no Origin; other sites'
+// pages cannot drive the gateway.
 func (l *Listener) pageOriginAllowed(r *http.Request) bool {
 	origin := r.Header.Get("Origin")
 	if origin == "" {
-		return true
+		return !l.cfg.RequireOrigin
 	}
 	u, err := url.Parse(origin)
-	if err != nil {
+	if err != nil || u.Hostname() == "" {
 		return false
 	}
 	for _, h := range l.cfg.PageHosts {
@@ -461,6 +465,10 @@ func (l *Listener) pageOriginAllowed(r *http.Request) bool {
 		}
 	}
 	return false
+}
+
+func (l *Listener) admitsPageOrigin(r *http.Request) bool {
+	return l.pageOriginAllowed(r)
 }
 
 // maxPinnedValidity is the browser's ceiling for a hash-pinned certificate.

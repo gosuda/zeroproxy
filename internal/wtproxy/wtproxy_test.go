@@ -406,3 +406,19 @@ func TestGatewayAdmitsOnlyProxyPageOrigins(t *testing.T) {
 		}
 	}
 }
+
+func TestGatewayRequireOriginRejectsEmptyOrigin(t *testing.T) {
+	for _, hosts := range [][]string{nil, {"proxy.localhost"}} {
+		l := &Listener{cfg: Config{PageHosts: hosts, RequireOrigin: true}}
+		r := httptest.NewRequest(http.MethodConnect, "https://proxy.localhost:18443/__zp/wt", nil)
+		if l.pageOriginAllowed(r) {
+			t.Fatalf("empty Origin accepted with RequireOrigin=true and PageHosts=%v", hosts)
+		}
+	}
+	l := &Listener{cfg: Config{PageHosts: []string{"proxy.localhost"}, RequireOrigin: true}}
+	r := httptest.NewRequest(http.MethodConnect, "https://proxy.localhost:18443/__zp/wt", nil)
+	r.Header.Set("Origin", "https://proxy.localhost:8443")
+	if !l.pageOriginAllowed(r) {
+		t.Fatal("matching Origin rejected with RequireOrigin=true")
+	}
+}

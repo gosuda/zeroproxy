@@ -1,12 +1,14 @@
 package httphost
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
 
-// A synchronous XHR's response goes back through an allowlist. The cookie delta —
-// the non-HttpOnly changes the service worker made to the jar — is on it; the
+// A synchronous XHR's response goes back through an allowlist. The cookie delta,
+// the non-HttpOnly changes the service worker made to the jar, is on it; the
 // response's own Set-Cookie never is.
 func TestSafeSyncHeader(t *testing.T) {
 	for _, name := range []string{"Content-Type", "ETag", "X-ZP-Cookie-Delta", "x-zp-cookie-delta"} {
@@ -53,5 +55,59 @@ func TestCorsMode(t *testing.T) {
 		if got := corsMode(in); got != want {
 			t.Errorf("corsMode(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+func TestSyncFetchRejectsDuplicateRIDWithConflict(t *testing.T) {
+	h := NewHandler(Config{SocksAddr: internalSOCKSMode})
+	s := &server{syncHub: newSyncFetchHub()}
+	first := &syncFetchJob{
+		ID:     "dup-1",
+		Target: "https://example.com/a",
+		Method: http.MethodGet,
+		result: make(chan *syncFetchResult, 1),
+	}
+	if err := s.syncHub.enqueue(first); err != nil {
+		t.Fatalf("first enqueue: %v", err)
+	}
+	if err := s.syncHub.enqueue(first); err != errDuplicateJobID {
+		t.Fatalf("duplicate enqueue = %v, want %v", err, errDuplicateJobID)
+	}
+
+	done := make(chan struct{})
+	req1 := httptest.NewRequest(http.MethodGet, "/zp/api/sync-fetch?rid=job-42&m=GET&u=https://example.com/", nil)
+	req1.Header.Set("Sec-Fetch-Site", "same-origin")
+	rec1 := httptest.NewRecorder()
+	go func() {
+		h.ServeHTTP(rec1, req1)
+		close(done)
+	}()
+
+	// Poll waits until req1 is enqueued; job-42 remains active in syncHub.jobs until result arrives.
+	reqPoll := httptest.NewRequest(http.MethodGet, "/zp/api/sync-fetch/poll", nil)
+	reqPoll.Header.Set("Sec-Fetch-Site", "same-origin")
+	recPoll := httptest.NewRecorder()
+	h.ServeHTTP(recPoll, reqPoll)
+	if recPoll.Code != http.StatusOK {
+		t.Fatalf("poll status = %d, want 200", recPoll.Code)
+	}
+
+	req2 := httptest.NewRequest(http.MethodGet, "/zp/api/sync-fetch?rid=job-42&m=GET&u=https://example.com/", nil)
+	req2.Header.Set("Sec-Fetch-Site", "same-origin")
+	rec2 := httptest.NewRecorder()
+	h.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusConflict {
+		t.Fatalf("duplicate rid status = %d, want %d", rec2.Code, http.StatusConflict)
+	}
+
+	reqRes := httptest.NewRequest(http.MethodPost, "/zp/api/sync-fetch/result", strings.NewReader("ok"))
+	reqRes.Header.Set("Sec-Fetch-Site", "same-origin")
+	reqRes.Header.Set("X-ZP-Sync-Id", "job-42")
+	reqRes.Header.Set("X-ZP-Sync-Status", "200")
+	recRes := httptest.NewRecorder()
+	h.ServeHTTP(recRes, reqRes)
+	<-done
+	if rec1.Code != http.StatusOK {
+		t.Fatalf("first request status = %d, want 200", rec1.Code)
 	}
 }

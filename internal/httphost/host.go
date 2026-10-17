@@ -16,6 +16,7 @@ import (
 	"mime"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -24,55 +25,64 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/gosuda/zeroproxy/internal/headers"
+	"github.com/gosuda/zeroproxy/internal/netguard"
 	"github.com/gosuda/zeroproxy/internal/rtcgw"
 	"github.com/gosuda/zeroproxy/internal/wtproxy"
 	"github.com/gosuda/zeroproxy/internal/yamuxconn"
 )
 
-// Config — NewHandler 입력. main.go 의 CLI 플래그와 1:1 대응한다.
+// Config holds the parameters for NewHandler.
 type Config struct {
-	WebDir        string // built static web asset directory (dist/web)
-	SocksAddr     string // Tor SOCKS5 addr, or "internal" for direct dial
-	WtGatewayURL  string // public WT gateway URL the page reads; empty hides it
+	WebDir       string // built static web asset directory (dist/web)
+	SocksAddr    string // Tor SOCKS5 addr, "internal", or "direct"
+	WtGatewayURL string // public WT gateway URL the page reads; empty hides it
 	// WtGatewayCertHashes pins a self-signed dev gateway certificate
-	// (base64url SHA-256) — browsers reach it only through such a pin. Nil
-	// for an operator certificate the browser validates normally.
+	// (base64url SHA-256). Nil for an operator certificate that the browser
+	// validates normally.
 	WtGatewayCertHashes []string
-	// RtcTURN is D5: the page's RTCPeerConnection runs relay-only through
-	// it. Nil leaves the RTC_GATEWAY_UNAVAILABLE stub.
+	// RtcTURN is the embedded TURN server for relay-only WebRTC.
 	RtcTURN *rtcgw.TURNServer
+	// DisallowPrivateTargets rejects private, loopback, and non-public target
+	// IPs when dialing in "internal" or "direct" mode.
+	DisallowPrivateTargets bool
+	// TrustProxyHeaders trusts X-Forwarded-Proto from non-loopback peers.
+	TrustProxyHeaders bool
 }
 
 // NewHandler builds the ZeroProxy HTTP handler: static assets, /zp/*
-// routes, ws-pipe bridge, sync-fetch hub, CSP report — wrapped in the
-// security-headers middleware. Embedders mount the returned handler under
-// their own listener/mux.
+// routes, ws-pipe bridge, sync-fetch hub, and CSP report wrapped in the
+// security-headers middleware.
 func NewHandler(cfg Config) http.Handler {
 	s := &server{
-		webDir:        cfg.WebDir,
-		socksAddr:     cfg.SocksAddr,
-		wtGatewayURL:  cfg.WtGatewayURL,
-		wtCertHashes:  cfg.WtGatewayCertHashes,
-		rtcTURN:       cfg.RtcTURN,
-		syncHub:       newSyncFetchHub(),
+		webDir:                 cfg.WebDir,
+		socksAddr:              cfg.SocksAddr,
+		wtGatewayURL:           cfg.WtGatewayURL,
+		wtCertHashes:           cfg.WtGatewayCertHashes,
+		rtcTURN:                cfg.RtcTURN,
+		disallowPrivateTargets: cfg.DisallowPrivateTargets || strings.EqualFold(strings.TrimSpace(cfg.SocksAddr), directSOCKSMode),
+		trustProxyHeaders:      cfg.TrustProxyHeaders,
+		syncHub:                newSyncFetchHub(),
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.handle)
-	return securityHeaders(mux)
+	return s.securityHeaders(mux)
 }
 
 type server struct {
-	webDir        string
-	socksAddr     string
-	wtGatewayURL  string // D4 — public URL the browser uses to reach the WT gateway; empty disables client-side virtual WebTransport
-	wtCertHashes  []string // D4 — dev-cert pins for the gateway connection
-	rtcTURN       *rtcgw.TURNServer // D5 embedded TURN (optional) — issues short-term cred tuples via serveConfig
-	// 동기 XHR 중계 허브. Go 는 요청을 park 만 하고 실제 전송은 SW 가 한다
-	// (syncfetch.go 의 주석 참고) — 새 egress 경로가 아니다.
-	syncHub *syncFetchHub
+	webDir                 string
+	socksAddr              string
+	wtGatewayURL           string
+	wtCertHashes           []string
+	rtcTURN                *rtcgw.TURNServer
+	disallowPrivateTargets bool
+	trustProxyHeaders      bool
+	syncHub                *syncFetchHub
 }
 
-const internalSOCKSMode = "internal"
+const (
+	internalSOCKSMode = "internal"
+	directSOCKSMode   = "direct"
+)
 
 const (
 	controlPrefix = "/zp/"
@@ -280,8 +290,20 @@ func (s *server) workerBootstrap(w http.ResponseWriter, r *http.Request) {
 // embedded TURN the field is `[]` so page realm's RTCPC falls back
 // to host candidates only.
 func (s *server) serveConfig(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.isAllowedOrigin(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
+	if r.Method == http.MethodHead {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
 	iceServers := []rtcgw.ICEServerCred{}
 	if s.rtcTURN != nil {
 		if cred, err := s.rtcTURN.IssueICEServerCreds(""); err == nil {
@@ -305,7 +327,7 @@ func (s *server) safeError(w http.ResponseWriter, r *http.Request, code string, 
 	escapedCode := html.EscapeString(sanitizeCode(code))
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("Content-Security-Policy", zeroCSP(r))
+	w.Header().Set("Content-Security-Policy", s.zeroCSP(r))
 	w.WriteHeader(status)
 	_, _ = fmt.Fprintf(w, `<!doctype html><meta charset="utf-8"><title>ZeroProxy %s</title><main><h1>ZeroProxy</h1><p>%s</p><button onclick="history.back()">Back</button><button onclick="location.reload()">Retry</button></main>`, escapedCode, escapedCode)
 }
@@ -313,14 +335,6 @@ func (s *server) safeError(w http.ResponseWriter, r *http.Request, code string, 
 func sanitizeCode(code string) string {
 	code = strings.TrimSpace(code)
 	switch code {
-	// 2026-08-21 — 목록이 12개였다. 그래서 **이 서버가 스스로 내는**
-	// RTC_GATEWAY_UNAVAILABLE(위 rtcgw 분기)이 여기서 POLICY_BLOCKED 로
-	// 강등돼 나갔다. 한 파일 안에서 자기모순이었다. SW 가 통제 중이면
-	// 같은 URL 이 올바른 페이지를 내주고, 아니면 "정책 차단" 이 나온다 —
-	// 어느 쪽이 보일지가 SW 상태에 달려 있었다.
-	//
-	// 단일 소스는 crates/zp-shared/testdata/error_codes.json 이고,
-	// 이 목록이 그것과 같은지는 errors_test.go 가 대조한다.
 	case "BAD_HMAC", "INVALID_SHARE_LINK", "MALFORMED_ROUTE", "SW_NOT_READY",
 		"TARGET_PROTOCOL_BLOCKED", "TLS_CERTIFICATE_INVALID", "TLS_HANDSHAKE_FAILED",
 		"TARGET_CONNECT_FAILED", "TARGET_HTTP_FAILED", "MALFORMED_HTML", "REALM_INJECTION_FAILURE",
@@ -332,12 +346,35 @@ func sanitizeCode(code string) string {
 	return "POLICY_BLOCKED"
 }
 
+func (s *server) isAllowedOrigin(r *http.Request) bool {
+	if origin := strings.TrimSpace(r.Header.Get("Origin")); origin != "" {
+		u, err := url.Parse(origin)
+		if err != nil || u.Host == "" || !strings.EqualFold(u.Host, r.Host) {
+			return false
+		}
+	}
+	if sfs := strings.TrimSpace(r.Header.Get("Sec-Fetch-Site")); sfs != "" {
+		if sfs != "same-origin" && sfs != "none" {
+			return false
+		}
+	}
+	return true
+}
+
 func (s *server) handlePipe(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	c, err := pipeUpgrader.Upgrade(w, r, nil)
+	if !s.isAllowedOrigin(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	upgrader := websocket.Upgrader{
+		EnableCompression: false,
+		CheckOrigin:       s.isAllowedOrigin,
+	}
+	c, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		return
 	}
@@ -349,10 +386,6 @@ func (s *server) handlePipe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.acceptStreams(r.Context(), sess)
-}
-
-var pipeUpgrader = websocket.Upgrader{
-	EnableCompression: false,
 }
 
 type webSocketNetConn struct {
@@ -429,19 +462,46 @@ type addr string
 func (a addr) Network() string { return "websocket" }
 func (a addr) String() string  { return string(a) }
 
+const (
+	maxConcurrentStreamsPerSession = 256
+	streamSlotAcquireTimeout       = 5 * time.Second
+	bridgeIdleTimeout              = 2 * time.Minute
+)
+
 func (s *server) acceptStreams(ctx context.Context, sess *yamuxconn.Session) {
 	defer sess.Close()
+	sem := make(chan struct{}, maxConcurrentStreamsPerSession)
 	for {
 		stream, err := sess.Accept(ctx)
 		if err != nil {
 			return
 		}
-		go s.bridgeTargetStream(ctx, stream)
+		select {
+		case sem <- struct{}{}:
+		default:
+			timer := time.NewTimer(streamSlotAcquireTimeout)
+			select {
+			case sem <- struct{}{}:
+				timer.Stop()
+			case <-timer.C:
+				_ = stream.Close()
+				continue
+			case <-ctx.Done():
+				timer.Stop()
+				_ = stream.Close()
+				return
+			}
+		}
+		go func(c net.Conn) {
+			defer func() { <-sem }()
+			s.bridgeTargetStream(ctx, c)
+		}(stream)
 	}
 }
 
 func (s *server) bridgeTargetStream(ctx context.Context, stream net.Conn) {
-	if strings.EqualFold(strings.TrimSpace(s.socksAddr), internalSOCKSMode) {
+	mode := strings.ToLower(strings.TrimSpace(s.socksAddr))
+	if mode == internalSOCKSMode || mode == directSOCKSMode {
 		s.bridgeInternalSOCKS(ctx, stream)
 		return
 	}
@@ -463,8 +523,13 @@ func (s *server) bridgeInternalSOCKS(ctx context.Context, stream net.Conn) {
 	if err != nil {
 		return
 	}
+	dialAddr, err := s.resolveInternalTarget(ctx, host, port)
+	if err != nil {
+		_, _ = stream.Write([]byte{0x05, 0x02, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
+		return
+	}
 	d := net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
-	target, err := d.DialContext(ctx, "tcp", net.JoinHostPort(host, port))
+	target, err := d.DialContext(ctx, "tcp", dialAddr)
 	if err != nil {
 		_, _ = stream.Write([]byte{0x05, 0x01, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
 		return
@@ -475,6 +540,40 @@ func (s *server) bridgeInternalSOCKS(ctx context.Context, stream net.Conn) {
 	}
 	a, b := traceBridge(stream, target, host)
 	bridgeConns(ctx, a, b)
+}
+
+func (s *server) resolveInternalTarget(ctx context.Context, host, port string) (string, error) {
+	disallowPrivate := s.disallowPrivateTargets || strings.EqualFold(strings.TrimSpace(s.socksAddr), directSOCKSMode)
+	var ips []net.IPAddr
+	if ip := net.ParseIP(host); ip != nil {
+		ips = []net.IPAddr{{IP: ip}}
+	} else {
+		lookupCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		resolved, err := net.DefaultResolver.LookupIPAddr(lookupCtx, host)
+		if err != nil || len(resolved) == 0 {
+			return "", fmt.Errorf("target %q does not resolve", host)
+		}
+		ips = resolved
+	}
+	for _, entry := range ips {
+		ip := entry.IP
+		if len(ip) == 0 || ip.IsUnspecified() || ip.IsLinkLocalUnicast() ||
+			ip.IsLinkLocalMulticast() || ip.IsInterfaceLocalMulticast() || ip.IsMulticast() {
+			return "", fmt.Errorf("target %q resolves to a blocked address", host)
+		}
+		if disallowPrivate && netguard.IsNonPublic(ip) {
+			return "", fmt.Errorf("target %q resolves to a non-public address", host)
+		}
+	}
+	pick := ips[0].IP
+	for _, entry := range ips {
+		if entry.IP.To4() != nil {
+			pick = entry.IP
+			break
+		}
+	}
+	return net.JoinHostPort(pick.String(), port), nil
 }
 
 // traceBridge optionally wraps both ends of a bridged stream so each
@@ -661,15 +760,52 @@ func (s *server) bridgeToTor(ctx context.Context, stream net.Conn) {
 	bridgeConns(ctx, stream, tor)
 }
 
+type idleDeadlineConn struct {
+	net.Conn
+	peer    net.Conn
+	timeout time.Duration
+}
+
+func (c *idleDeadlineConn) touch() {
+	if c.timeout <= 0 {
+		return
+	}
+	deadline := time.Now().Add(c.timeout)
+	_ = c.Conn.SetDeadline(deadline)
+	if c.peer != nil {
+		_ = c.peer.SetDeadline(deadline)
+	}
+}
+
+func (c *idleDeadlineConn) Read(p []byte) (int, error) {
+	c.touch()
+	n, err := c.Conn.Read(p)
+	if n > 0 {
+		c.touch()
+	}
+	return n, err
+}
+
+func (c *idleDeadlineConn) Write(p []byte) (int, error) {
+	c.touch()
+	n, err := c.Conn.Write(p)
+	if n > 0 {
+		c.touch()
+	}
+	return n, err
+}
+
 func bridgeConns(ctx context.Context, a, b net.Conn) {
 	closeBoth := func() {
 		_ = a.Close()
 		_ = b.Close()
 	}
 	defer closeBoth()
+	wa := &idleDeadlineConn{Conn: a, peer: b, timeout: bridgeIdleTimeout}
+	wb := &idleDeadlineConn{Conn: b, peer: a, timeout: bridgeIdleTimeout}
 	done := make(chan struct{}, 2)
-	go func() { _, _ = io.Copy(b, a); closeBoth(); done <- struct{}{} }()
-	go func() { _, _ = io.Copy(a, b); closeBoth(); done <- struct{}{} }()
+	go func() { _, _ = io.Copy(wb, wa); closeBoth(); done <- struct{}{} }()
+	go func() { _, _ = io.Copy(wa, wb); closeBoth(); done <- struct{}{} }()
 	select {
 	case <-ctx.Done():
 		closeBoth()
@@ -679,18 +815,18 @@ func bridgeConns(ctx context.Context, a, b net.Conn) {
 	}
 }
 
-func securityHeaders(next http.Handler) http.Handler {
+func (s *server) securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "no-referrer")
-		w.Header().Set("Content-Security-Policy", zeroCSP(r))
+		w.Header().Set("Content-Security-Policy", s.zeroCSP(r))
 		next.ServeHTTP(w, r)
 	})
 }
 
-func zeroCSP(r *http.Request) string {
+func (s *server) zeroCSP(r *http.Request) string {
 	wsScheme := "ws://"
-	if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
+	if r.TLS != nil || (s.trustForwardedProto(r) && strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")) {
 		wsScheme = "wss://"
 	}
 	host := r.Host
@@ -698,4 +834,26 @@ func zeroCSP(r *http.Request) string {
 		host = "proxy.example"
 	}
 	return headers.BuildCSP(wsScheme + host)
+}
+
+func (s *server) trustForwardedProto(r *http.Request) bool {
+	if s.trustProxyHeaders {
+		return true
+	}
+	remote := strings.TrimSpace(r.RemoteAddr)
+	if remote == "" {
+		return true
+	}
+	if host, _, err := net.SplitHostPort(remote); err == nil {
+		remote = host
+	}
+	if i := strings.IndexByte(remote, '%'); i >= 0 {
+		remote = remote[:i]
+	}
+	ip := net.ParseIP(strings.Trim(remote, "[]"))
+	return ip != nil && ip.IsLoopback()
+}
+
+func zeroCSP(r *http.Request) string {
+	return (&server{}).zeroCSP(r)
 }

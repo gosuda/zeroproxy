@@ -13,7 +13,11 @@ import (
 	"time"
 )
 
-var errNoSyncID = errors.New("sync: missing result id")
+var (
+	errNoSyncID       = errors.New("sync: missing result id")
+	errQueueFull      = errors.New("sync: queue full")
+	errDuplicateJobID = errors.New("duplicate job id")
+)
 
 // 동기 XHR 지원 — **감옥 안에서**.
 //
@@ -111,10 +115,22 @@ func newSyncFetchHub() *syncFetchHub {
 	}
 }
 
-func (h *syncFetchHub) put(j *syncFetchJob) {
+func (h *syncFetchHub) enqueue(j *syncFetchJob) error {
 	h.mu.Lock()
-	h.jobs[j.ID] = j
-	h.mu.Unlock()
+	defer h.mu.Unlock()
+	if _, exists := h.jobs[j.ID]; exists {
+		return errDuplicateJobID
+	}
+	if len(h.jobs) >= syncFetchQueueCap {
+		return errQueueFull
+	}
+	select {
+	case h.queue <- j:
+		h.jobs[j.ID] = j
+		return nil
+	default:
+		return errQueueFull
+	}
 }
 
 func (h *syncFetchHub) take(id string) *syncFetchJob {
@@ -182,19 +198,17 @@ func (s *server) handleSyncFetch(w http.ResponseWriter, r *http.Request) {
 		s.safeError(w, r, "SYNC_BAD_ARGS", http.StatusBadRequest)
 		return
 	}
-	// 페이지가 보낸 헤더 중 안전한 것만 넘긴다. Cookie/Authorization 은
-	// 여기서 다루지 않는다 — 쿠키는 기존 경로대로 SW/커널이 붙인다.
 	for _, h := range q["h"] {
 		if k, v, ok := strings.Cut(h, ":"); ok {
 			job.Headers = append(job.Headers, []string{k, v})
 		}
 	}
 
-	s.syncHub.put(job)
-	select {
-	case s.syncHub.queue <- job:
-	default:
-		s.syncHub.take(job.ID)
+	if err := s.syncHub.enqueue(job); err != nil {
+		if errors.Is(err, errDuplicateJobID) {
+			s.safeError(w, r, "SYNC_DUPLICATE_ID", http.StatusConflict)
+			return
+		}
 		s.safeError(w, r, "SYNC_QUEUE_FULL", http.StatusServiceUnavailable)
 		return
 	}
