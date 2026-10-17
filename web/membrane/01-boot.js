@@ -19,7 +19,22 @@
     }
     try { delete root.__ZP_BOOT; } catch { try { Object.defineProperty(root, '__ZP_BOOT', { value: undefined, enumerable: false }); } catch {} }
   }
+  function restoreEarlyNatives(w) {
+    try {
+      const saved = w && w.__zp_early_natives;
+      if (!saved) return;
+      try { delete w.__zp_early_natives; } catch {}
+      for (const k of Object.keys(saved)) {
+        const d = saved[k];
+        try {
+          if (d) Object.defineProperty(w, k, d);
+          else delete w[k];
+        } catch {}
+      }
+    } catch {}
+  }
   function captureNative(w) {
+    restoreEarlyNatives(w);
     const d = w.document;
     // sandboxed(opaque) 컨텍스트에서 navigator.serviceWorker 읽기는 SecurityError
     // 를 던진다 — 읽다가 죽으면 prelude 전체가 무너져 자식 스크립트 전부가 죽는다.

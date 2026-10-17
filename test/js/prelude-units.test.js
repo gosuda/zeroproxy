@@ -1251,3 +1251,59 @@ test('fastDataBase: plain data objects are fast; windows, facades, instances and
   for (const k of ['constructor', 'prepareStackTrace', 'postMessage', 'location']) assert.equal(fastDataKey(k), false, k);
   assert.equal(fastDataKey('document'), true);
 });
+
+test('sealRegExp: ZP_HIDDEN_RE and ZP_RESERVED_NAME_RE ignore patched RegExp.prototype.test and exec', () => {
+  const { ZP_HIDDEN_RE, ZP_RESERVED_NAME_RE } = load(
+    slice('  const nativeApply = Reflect.apply;', '  const WINDOW_ACCESSORS = Object.create(null);') + '\n' +
+    slice('  const ZP_HIDDEN_RE = ', '  const ZP_WITH_HELPERS = '),
+    ['ZP_HIDDEN_RE', 'ZP_RESERVED_NAME_RE'],
+    {}
+  );
+  const origTest = RegExp.prototype.test;
+  const origExec = RegExp.prototype.exec;
+  try {
+    RegExp.prototype.test = () => { throw new Error('patched test'); };
+    RegExp.prototype.exec = () => { throw new Error('patched exec'); };
+    assert.equal(ZP_HIDDEN_RE.test('__zp_get'), true);
+    assert.equal(ZP_HIDDEN_RE.test('normalVar'), false);
+    assert.equal(ZP_RESERVED_NAME_RE.test('__zp_get'), true);
+    assert.equal(ZP_RESERVED_NAME_RE.test('__zp_t_1'), false);
+  } finally {
+    RegExp.prototype.test = origTest;
+    RegExp.prototype.exec = origExec;
+  }
+});
+
+test('window handles: a child window captured while same-origin transitions to cross-origin once its frame navigates', () => {
+  const { env, win, urlMeta } = xoriginEnv();
+  const frame = {};
+  const child = win('', { frameElement: frame });
+  assert.equal(env.windowHandleFor(child), child, 'initially about:blank: same-origin');
+  urlMeta.set(frame, 'http://b.test:3000/other');
+  const after = env.windowHandleFor(child);
+  assert.notEqual(after, child, 'after frame navigates cross-origin, windowHandleFor returns the cross-origin facade');
+  assert.throws(() => after.document, isSecurityError);
+});
+
+test('SW non-UTF-8 decoding: EUC-KR bytes and meta charset tags normalize to UTF-8', () => {
+  const swSrc = fs.readFileSync(require('node:path').join(__dirname, '../../web/sw.js'), 'utf8').split('\r\n').join('\n');
+  const a = swSrc.indexOf('function extractCharsetFromContentType(');
+  const b = swSrc.indexOf('async function rewriteScriptResponse(', a);
+  assert.ok(a >= 0 && b > a);
+  // eslint-disable-next-line no-new-func
+  const { decodeTextBytes, rewriteMetaCharsetToUtf8 } = new Function(
+    swSrc.slice(a, b) + '\nreturn { decodeTextBytes, rewriteMetaCharsetToUtf8 };'
+  )();
+  // '<meta charset="euc-kr"><p>안녕</p>' in EUC-KR ('안녕' = 0xbe 0xc8 0xb3 0xe7)
+  const prefix = Buffer.from('<meta charset="euc-kr"><p>', 'latin1');
+  const kor = Buffer.from([0xbe, 0xc8, 0xb3, 0xe7]);
+  const suffix = Buffer.from('</p>', 'latin1');
+  const raw = new Uint8Array(Buffer.concat([prefix, kor, suffix]));
+  const decoded = decodeTextBytes(raw, 'text/html', true);
+  assert.equal(decoded.nonUtf8, true);
+  assert.equal(decoded.charset.toLowerCase(), 'euc-kr');
+  assert.match(decoded.text, /<p>안녕<\/p>/);
+  const rewrittenMeta = rewriteMetaCharsetToUtf8(decoded.text);
+  assert.match(rewrittenMeta, /<meta charset="utf-8"><p>안녕<\/p>/);
+});
+

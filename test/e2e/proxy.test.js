@@ -7315,11 +7315,7 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     assert.match(direct['reply.cross'], /"srcIsParent":true,"srcIsTop":true,"origin":"http:\/\/[^"]+","trusted":true/);
     assert.ok(Object.keys(direct).length >= 130, `too few probes ran natively: ${Object.keys(direct).length}`);
     assert.deepEqual(Object.keys(proxied).sort(), Object.keys(direct).sort(), 'probe key sets differ');
-    // Documented divergence: a same-site child's `top`/`parent` read through a
-    // local alias are the raw windows (the rewriter leaves window-chain members
-    // on aliases unwrapped — hot path), so they are not identical to the page's
-    // own window object. ERRATA, cross-site frames section.
-    const expected = new Set(['p2c.same.top', 'p2c.same.parent']);
+    const expected = new Set();
     const unexpected = Object.keys(direct).filter(k => proxied[k] !== direct[k] && !expected.has(k))
       .map(k => `${k}: native=${direct[k]} proxy=${proxied[k]}`);
     assert.deepEqual(unexpected, [], unexpected.join('\n'));
@@ -8049,7 +8045,7 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     fs.writeFileSync(path.join(artifacts, 'worker-env.json'), JSON.stringify({ direct, proxied }, null, 2));
     // The identity is the persona's through the proxy and the test browser's natively (HeadlessChrome) — those must agree
     // between the page and its workers, as natively; everything else must equal native.
-    const identity = ['ua', 'appVersion', 'uaData'];
+    const identity = ['ua', 'appVersion', 'platform', 'uaData'];
     for (const run of [direct, proxied]) {
       for (const k of identity) assert.deepEqual([run.blob[k], run.file[k]], [run.page[k], run.page[k]], k);
     }

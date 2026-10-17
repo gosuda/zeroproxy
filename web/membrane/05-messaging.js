@@ -236,6 +236,18 @@
       // 25개 중 2개가 이 순서로 걸려 postMessage.length 가 3 으로 남았다.
       // __zp_get 은 문자열 키 전역이라 교차 realm 에서도 보인다.
       if (typeof childWin.__zp_get === "function") return;
+      if (!Object.prototype.hasOwnProperty.call(childWin, '__zp_early_natives')) {
+        const saved = Object.create(null);
+        for (const k of ['fetch', 'XMLHttpRequest', 'WebSocket', 'WebSocketStream', 'EventSource', 'Worker', 'SharedWorker', 'eval', 'Function', 'RTCPeerConnection', 'webkitRTCPeerConnection', 'WebTransport', 'RTCDataChannel']) {
+          try {
+            saved[k] = Object.getOwnPropertyDescriptor(childWin, k);
+            if (root[k] !== undefined) {
+              Object.defineProperty(childWin, k, { value: root[k], enumerable: false, configurable: true, writable: true });
+            }
+          } catch {}
+        }
+        try { Object.defineProperty(childWin, '__zp_early_natives', { value: saved, enumerable: false, configurable: true, writable: true }); } catch {}
+      }
       const wrapped = postMessageWrapperFor(childWin);
       if (!wrapped) return;
       const cur = Object.getOwnPropertyDescriptor(childWin, 'postMessage');

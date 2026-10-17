@@ -35,9 +35,25 @@
   // handed it back to the page) and with the page's answer (a sandboxed frame calling itself unsandboxed). The membrane
   // reads windows only through these; they check the receiver's brand, not its realm, so they read any window.
   const nativeApply = Reflect.apply;
+  const nativeReflectGet = Reflect.get;
+  const nativeReflectSet = Reflect.set;
+  const nativeReflectHas = Reflect.has;
+  const nativeReflectGOPD = Reflect.getOwnPropertyDescriptor;
+  const nativeReflectDefineProperty = Reflect.defineProperty;
+  const nativeReflectDeleteProperty = Reflect.deleteProperty;
+  const nativeReflectGetPrototypeOf = Reflect.getPrototypeOf;
+  const nativeReflectConstruct = Reflect.construct;
+  const nativeHasOwn = Object.prototype.hasOwnProperty;
+  const nativeFnToString = Function.prototype.toString;
+  const nativeRegExpExec = RegExp.prototype.exec;
+  const sealRegExp = re => {
+    nativeReflectDefineProperty(re, 'exec', { value: nativeRegExpExec, writable: false, enumerable: false, configurable: false });
+    nativeReflectDefineProperty(re, 'test', { value: s => nativeApply(nativeRegExpExec, re, [s]) !== null, writable: false, enumerable: false, configurable: false });
+    return re;
+  };
   const WINDOW_ACCESSORS = Object.create(null);
   for (const name of ['parent', 'top', 'opener', 'frameElement', 'self', 'frames', 'name', 'length', 'closed', 'history', 'navigation']) {
-    const d = Reflect.getOwnPropertyDescriptor(root, name);
+    const d = nativeReflectGOPD(root, name);
     if (d && (d.get || d.set)) WINDOW_ACCESSORS[name] = d;
   }
   function winGet(w, name) {
@@ -84,13 +100,13 @@
   // Since the bindings cannot go away, hide them from the enumeration surfaces
   // instead. `enumerable: false` does NOT help here: getOwnPropertyNames and
   // Reflect.ownKeys report non-enumerable own properties by spec.
-  const ZP_HIDDEN_RE = /^(?:__zp_|__ZP_|ZPBundle$|ZPPageBundleWBG$|ZeroProxyRT$|ZP$)/;
+  const ZP_HIDDEN_RE = sealRegExp(/^(?:__zp_|__ZP_|ZPBundle$|ZPPageBundleWBG$|ZeroProxyRT$|ZP$)/);
   // The runtime's names on the global object: the page's window does not take a write of one (07-membrane.js
   // scopeTraps) — rewritten calls and event attributes hand our helpers the real global object, so whoever replaced one
   // would receive it. Same rule as the rewriter's refusal of page bindings and bare writes (zp-rewriter
   // is_reserved_name): every `__zp_*` / `__ZP_*` name but the temps rewritten code declares itself (an eval's `var`
   // stores them through the window like any other name) and our wrappers' own parameters.
-  const ZP_RESERVED_NAME_RE = /^(?:__ZP_|__zp_(?!(?:(?:w|lc|lbl|vdcl|dp|sk|t)_\d+|bad|oc|dynamic__|dyn__|inner__|scope|args|self|env|src)$))/;
+  const ZP_RESERVED_NAME_RE = sealRegExp(/^(?:__ZP_|__zp_(?!(?:(?:w|lc|lbl|vdcl|dp|sk|t)_\d+|bad|oc|dynamic__|dyn__|inner__|scope|args|self|env|src)$))/);
   // The helpers rewritten code calls by name — zp-rewriter `RUNTIME_HELPERS`, same order (static-policy compares). Every
   // `with` we run code in starts by binding them as block constants: inside `with(o)` a free name is looked up in `o`
   // first, at run time, on every evaluation — through a Proxy trap for our with objects (15 M lookups a second VM, 5 s

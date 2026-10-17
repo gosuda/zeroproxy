@@ -45,6 +45,7 @@
     if (!w) return;
     try { if (w[networkContainmentMarker]) return; } catch {}
     if (w !== root && (ownsMembrane(w) || bootingProxiedDocument(w))) return;
+    restoreEarlyNatives(w);
     installToStringMasking(w);
     // OXC rewrite 결과는 `__zp_get/set/call/construct/...` 헬퍼를 호출한다.
     // about:blank ad iframe (NAVER GFP SafeFrame 등) 은 자체 prelude 가 안 돌고

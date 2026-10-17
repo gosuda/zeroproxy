@@ -132,6 +132,10 @@ pub(crate) const DANGEROUS_GLOBALS: &[&str] = &[
 /// has been rewritten (e.g., `iframe.contentWindow.location`).
 pub(crate) const DANGEROUS_MEMBERS: &[&str] = &[
     "location",
+    "document",
+    "window",
+    "self",
+    "globalThis",
     "contentWindow",
     "contentDocument",
     "defaultView",
@@ -4174,7 +4178,9 @@ impl<'a> Visit<'a> for RewriteVisitor {
         // 성립하지 않는다. 즉 이 좁힘은 구멍을 남기지 않는다.
         const URL_SHAPE_MEMBERS: &[&str] = &[
             "href", "protocol", "host", "hostname", "port", "pathname", "search", "hash",
-            "origin", "location",
+            "origin", "location", "top", "parent", "opener", "frameElement",
+            "window", "self", "globalThis", "frames", "document", "defaultView",
+            "contentWindow", "contentDocument",
         ];
         if let Expression::Identifier(recv) = &expr.object {
             let recv_name = recv.name.as_str();
@@ -6676,6 +6682,37 @@ mod tests {
         assert!(
             r.code.contains("__zp_lc_1") && r.code.contains("__zp_lc_2"),
             "nested loops must have distinct counters: {}",
+            r.code
+        );
+    }
+
+    #[test]
+    fn local_alias_window_chain_members_route_through_membrane() {
+        let src = "function g(w, d, f) { return [w.top, w.parent, w.opener, w.frameElement, w.document, w.window, w.self, w.globalThis, w.frames, f.contentWindow, f.contentDocument, d.defaultView]; }";
+        let r = rewrite_script(src, &opts()).unwrap();
+        for prop in [
+            "top",
+            "parent",
+            "opener",
+            "frameElement",
+            "document",
+            "window",
+            "self",
+            "globalThis",
+            "frames",
+        ] {
+            let needle = format!("__zp_get(w,\"{prop}\")");
+            assert!(
+                r.code.contains(&needle),
+                "local alias w.{prop} must route through __zp_get, got: {}",
+                r.code
+            );
+        }
+        assert!(
+            r.code.contains("__zp_get(f,\"contentWindow\")")
+                && r.code.contains("__zp_get(f,\"contentDocument\")")
+                && r.code.contains("__zp_get(d,\"defaultView\")"),
+            "local alias f.contentWindow/contentDocument and d.defaultView must route through __zp_get, got: {}",
             r.code
         );
     }
