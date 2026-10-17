@@ -3816,7 +3816,7 @@ setInterval(() => { flushDirtyJarsToIDB(); flushStateToIDB(); }, COOKIE_FLUSH_IN
 self.addEventListener('message', evt => {
   if (evt.data && evt.data.type === ZP.MSG.FLUSH_COOKIES) {
     const p = Promise.all([flushDirtyJarsToIDB(), flushStateToIDB()]);
-    evt.waitUntil ? evt.waitUntil(p) : p;
+    if (evt.waitUntil) evt.waitUntil(p);
   }
 });
 

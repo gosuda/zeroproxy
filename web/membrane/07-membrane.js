@@ -1058,6 +1058,14 @@
     function sameOriginAncestor(win) {
       return safeCrossWindow(crossWindowTargets.get(win) || win);
     }
+    function containSameOriginChildWindow(win) {
+      try {
+        const raw = crossWindowTargets.get(win) || win;
+        if (!raw || raw === root || isScopeProxy(raw) || isAncestorWindow(raw) || ownsMembrane(raw)) return;
+        if (bootingProxiedDocument(raw)) installEarlyPostMessage(raw);
+        else if (!raw[networkContainmentMarker]) installNetworkContainment(raw);
+      } catch {}
+    }
     // `hint`: a frame element whose intended origin speaks for a window that has
     // no membrane of its own yet, or 'ancestor' for parent / top / opener.
     function windowHandleFor(win, hint) {
@@ -1071,7 +1079,7 @@
       if (!origin) origin = virtualOriginOfWindow(raw);
       if (origin && origin !== securityOrigin()) return crossOriginWindow(raw);
       if (hint === 'ancestor' || (hint === undefined && isAncestorWindow(raw))) return sameOriginAncestor(raw);
-      if (typeof containSameOriginChildWindow === 'function') containSameOriginChildWindow(raw);
+      containSameOriginChildWindow(raw);
       return win;
     }
     // The browser's sentences, word for word (measured on Chrome 154, a window and a Location of another origin). A read names
@@ -1237,14 +1245,6 @@
         } catch {}
       }
       return scope;
-    }
-    function containSameOriginChildWindow(win) {
-      try {
-        const raw = crossWindowTargets.get(win) || win;
-        if (!raw || raw === root || isScopeProxy(raw) || isAncestorWindow(raw) || ownsMembrane(raw)) return;
-        if (bootingProxiedDocument(raw)) installEarlyPostMessage(raw);
-        else if (!raw[networkContainmentMarker]) installNetworkContainment(raw);
-      } catch {}
     }
     maskNativeFunction(virtualLocation[Symbol.toPrimitive], Symbol.toPrimitive);
     // 2026-08-13 — `has` 를 정직하게 만들었다. 예전에는 **모든 이름에 true** 를
