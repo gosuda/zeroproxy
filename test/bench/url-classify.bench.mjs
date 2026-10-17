@@ -1,5 +1,4 @@
-// URL classification bench (Node) — pulls all shared logic from
-// ./bench-core.mjs so the Browser variant can stay in parity.
+// Node URL classification benchmark sharing ./bench-core.mjs with the browser benchmark.
 //
 // Run with: node test/bench/url-classify.bench.mjs
 
@@ -63,7 +62,6 @@ async function main() {
   const wasm = await readFile(wasmPath);
   const rt = await ZeroProxyRT.load(wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength));
 
-  // Parity check.
   let parityFails = 0;
   for (const s of PARITY_SAMPLES) {
     const expected = classifyJsRegex(s);
@@ -86,7 +84,6 @@ async function main() {
   const corpus = makeCorpus(1000);
   const ITERS = 100_000;
 
-  // Pre-warm rt pool for warm-path measurements.
   rt.reset();
   for (const s of corpus) rt.classOf(s);
 
@@ -96,7 +93,6 @@ async function main() {
   const enc = new TextEncoder();
   const memU8 = () => new Uint8Array(ex.memory.buffer);
 
-  // ===== Main comparison (warm cache) =====
   const mainRows = [];
   mainRows.push(t('js-regex', ITERS, (i) => classifyJsRegex(corpus[i % corpus.length])));
   mainRows.push(t('js-URL (new URL parse)', ITERS, (i) => classifyJsURL(corpus[i % corpus.length])));
@@ -127,27 +123,16 @@ async function main() {
   mainRows.push(t('wasm classifyURL (handle-only)', ITERS, (i) => ex.url_classify(handles[i % handles.length])));
   report('Main comparison (warm)', mainRows, 'js-regex');
 
-  // ===== Encoder isolation =====
-  // TextEncoder vs manual UTF-8 loop vs ASCII-only fast path. Establishes
-  // whether the Chrome encodeInto cost (840ns) is the encoder itself or
-  // the cross-realm bridge. If encodeManual beats TextEncoder, the Chrome
-  // path can switch to manual for ASCII URL inputs.
   const probeBuf = new Uint8Array(4096);
   const encRows = [];
   encRows.push(t('encodeInto into Uint8Array', ITERS, (i) => enc.encodeInto(corpus[i % corpus.length], probeBuf).written));
   encRows.push(t('encodeInto into scratch view', ITERS, (i) => enc.encodeInto(corpus[i % corpus.length], cachedScratch).written));
   encRows.push(t('encodeManual (charCodeAt loop)', ITERS, (i) => encodeManual(corpus[i % corpus.length], probeBuf)));
   encRows.push(t('encodeAsciiFast (ASCII only)', ITERS, (i) => encodeAsciiFast(corpus[i % corpus.length], probeBuf)));
-  // Buffer.from (Node-only). Allocates a Uint8Array internally, so this
-  // measures both encode and alloc — apples-to-oranges with the above but
-  // useful for Node-only callers.
+  // Buffer.from allocates a Uint8Array on every call, measuring both encoding and allocation.
   encRows.push(t('Buffer.from utf8 (Node, alloc)', ITERS, (i) => Buffer.from(corpus[i % corpus.length], 'utf8').length));
   report('Encoder alternatives (isolation)', encRows, 'encodeInto into Uint8Array');
 
-  // ===== Wasm with alternate encoders =====
-  // Replace encodeInto with the alternatives, keep the wasm call. Shows
-  // whether changing the encoder closes the gap between
-  // "wasm raw (warm, cached view)" and "js-regex".
   const wasmEncRows = [];
   wasmEncRows.push(mainRows.find(r => r.label === 'wasm raw (warm, cached view)'));
   wasmEncRows.push(t('wasm raw + encodeManual', ITERS, (i) => {
@@ -157,16 +142,12 @@ async function main() {
   }));
   wasmEncRows.push(t('wasm raw + encodeAsciiFast', ITERS, (i) => {
     const n = encodeAsciiFast(corpus[i % corpus.length], cachedScratch);
-    if (n < 0) return 0; // fallback would be needed; corpus is ASCII so this never triggers
+    if (n < 0) return 0;
     const packed = ex.url_intern_and_classify(SCRATCH, n);
     return Number(packed & 0xffffffffn);
   }));
   report('WASM with alternate encoders (warm)', wasmEncRows, 'wasm raw (warm, cached view)');
 
-  // ===== Scheme-only with alternate encoders =====
-  // Most impactful — schemeOnly is the path we recommend for long URLs.
-  // If encodeManual closes the Chrome encodeInto gap, schemeOnly benefits
-  // most.
   const SCHEME_PROBE = 16;
   const schemeRows = [];
   schemeRows.push(mainRows.find(r => r.label === 'wasm classifySchemeOnly (D)'));
@@ -183,20 +164,15 @@ async function main() {
   }));
   report('Scheme-only with alternate encoders (warm)', schemeRows, 'wasm classifySchemeOnly (D)');
 
-  // ===== Batch ABI =====
   const BATCH_SIZES = [16, 64, 256];
   const batchRows = [];
   batchRows.push(mainRows.find(r => r.label === 'wasm raw (warm, cached view)'));
-  // Production rt.classifyBatch path — ASCII fast path inside.
-  // Different from the raw-export batch row (which pre-encodes outside the
-  // measured loop). This row measures the end-to-end cost the MO callback
-  // actually pays.
+  // Measure end-to-end rt.classifyBatch (including encoding) vs raw bulk_intern_and_classify on pre-encoded buffers.
   for (const N of BATCH_SIZES) {
     for (const s of corpus) rt.classOf(s);
     const batchSlice = corpus.slice(0, N);
     const ITERS_BATCH = Math.max(1000, ITERS / N | 0);
     const totalItems = ITERS_BATCH * N;
-    // warmup
     for (let i = 0; i < 100; i++) rt.classifyBatch(batchSlice);
     const t0 = now();
     for (let i = 0; i < ITERS_BATCH; i++) rt.classifyBatch(batchSlice);
@@ -243,7 +219,6 @@ async function main() {
   }
   report('Batch ABI (per-item ns includes encode amortised)', batchRows, 'wasm raw (warm, cached view)');
 
-  // ===== Cold path =====
   rt.reset();
   const coldRows = [];
   coldRows.push(t('js-regex (cold unique)', ITERS, (i) => classifyJsRegex(`https://cold.example/${i}/asset.js`)));
@@ -251,7 +226,6 @@ async function main() {
   coldRows.push(t('wasm classOf (cold unique)', ITERS, (i) => rt.classOf(`https://cold.example/${i}/asset.js`)));
   report('Cold path (no cache hits — HashMap behaviour)', coldRows, 'js-regex (cold unique)');
 
-  // ===== URL length sensitivity =====
   const lengthRows = [];
   for (const mode of ['short', 'medium', 'long']) {
     const c = makeCorpus(1000, mode);
@@ -264,7 +238,6 @@ async function main() {
   }
   report('URL length sensitivity (warm)', lengthRows, lengthRows[0].label);
 
-  // ===== Pool size sensitivity =====
   const poolRows = [];
   for (const SIZE of [100, 1000, 10000]) {
     rt.reset();

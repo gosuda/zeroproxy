@@ -1,18 +1,8 @@
 /* ZeroProxy Service Worker: controlled network requests are routed through the Rust WASM kernel. */
 importScripts('/zp/assets/zp-core.js?v=__ZP_BUILD_ID__');
-// 2026-06-08 split-bundle (c.1) Step 4: legacy rewriter-rs/ deleted. Both
-// JS and CSS rewriters live on ZPBundle (modern, single source of truth).
-// Rust zp-bundle (no-modules variant). Must be imported at top-level: SW
-// `importScripts` only succeeds during initial script evaluation; lazy
-// import from inside an event handler is blocked by the worker spec and
-// fails with "failed to load" even if the URL is served correctly.
+// SW importScripts only succeeds during initial script evaluation, so load both
+// WASM JS glue bundles at top level and instantiate their WASM modules lazily.
 importScripts('/__zp/zp_bundle_sw.js?v=__ZP_BUILD_ID__');
-// 2026-06-08 split-bundle (c.3): kernel/transport WASM glue is split into
-// its own bundle so the heavy stack (rustls + h2 + yamux + mlkem + tokio
-// + decoders + membrane/rtcgw/wtproxy) only instantiates on the first
-// upstream fetch. The JS *glue* (~tens of KB) is loaded eagerly here at
-// top level because importScripts is unavailable later; the actual wasm
-// (~MB) is fetched + instantiated lazily inside `initKernel()`.
 importScripts('/__zp/zp_kernel_sw.js?v=__ZP_BUILD_ID__');
 
 const nativeFetch = self.fetch.bind(self);
@@ -28,54 +18,29 @@ const SUBMISSION_TTL_MS = 5 * 60 * 1000;
 let rewriterPromise = null;
 let bundlePromise = null;
 
-// C4: in-memory LRU cache for rewritten script bodies. Key invariant:
-// SHA-256(transformerVersion | kind | targetURL | sourceBytes). A version
-// bump on either rewriter pipeline invalidates every entry. Only
-// SUCCESSFUL rewrites are stored — failures fall through to the
-// fail-closed `blockSource()` so a transient parser bug never gets pinned.
+// In-memory LRU cache for rewritten script bodies, keyed by
+// SHA-256(transformerVersion | kind | targetURL | sourceBytes). Only successful
+// rewrites are cached so transient failures fall through to blockSource().
 const REWRITE_CACHE_MAX_ENTRIES = 200;
 const REWRITE_CACHE_MAX_BYTES = 50 * 1024 * 1024;
 const rewriteCache = new Map();
 let rewriteCacheBytes = 0;
 let rewriteCacheVersion = '';
 
-// 2026-06-09 perf telemetry: per-SW-lifetime counters surfaced via the
-// `__zpKernelProbe` diagnostic message. Production tuning + trap
-// notebook entries reference these — e.g. "NAVER load: cache hits
-// 12/19, total rewrite latency 540 ms" pins exactly where the cold
-// path spent CPU. Counters reset on SW activate (intentional —
-// they're per-session, not persistent).
+// Per-SW-lifetime rewriter telemetry surfaced via __zpKernelProbe.
 const rewriteStats = {
   hits: 0,
   misses: 0,
-  // Cumulative `self.ZPBundle.rewriteScript` wall time in ms (cold path).
   rewriteLatencyMs: 0,
-  // Cumulative `crypto.subtle.digest` wall time in ms (cache-key SHA-256).
-  // High ratio of this vs rewriteLatencyMs flags the cache key as a
-  // pessimization — every cold-path call pays it even when the result
-  // is later cached.
   cacheKeyLatencyMs: 0,
-  // Number of `rewriteScriptResponse` invocations (== cache lookups).
   invocations: 0,
 };
 
-// 2026-06-09 transport header debug ring buffer. Captures the last
-// N outgoing `transportFetch` header arrays so the probe can dump
-// what we're sending upstream to an anti-bot WAF. Comparing this to
-// real-Chrome capture (e.g. wireshark / chrome://net-export) is the
-// fastest way to spot a header gap that triggers a 403. Bounded to
-// MAX_HEADER_LOG to avoid unbounded memory growth.
+// Bounded ring buffer of recent outgoing transportFetch header arrays for __zpKernelProbe.
 const MAX_HEADER_LOG = 16;
 const outgoingHeaderLog = [];
 
-// 2026-08-13 — 거절당한 요청을 스스로 신고하게 만든다.
-//
-// SW 가 단일 관문이므로, 프록시가 무언가를 못 살려 준 순간은 **전부** 여기를
-// 지난다. 그런데 서브리소스 실패는 페이지 콘솔에 아무것도 남기지 않아서,
-// 지금까지는 "화면이 이상하다" → 스크린샷 분석 → DOM 뒤지기 순서로 눈으로
-// 찾아야 했다 (NAVER 장바구니의 Braze 오버레이가 그랬다). 거절 사유를 URL·
-// 클라이언트와 함께 남겨 두면 그 과정이 목록 조회 한 번으로 끝난다.
-// 페이지에서는 `__zp_refusals()` 로 읽는다.
+// Record refused requests and their reasons so pages can inspect them via `__zp_refusals()`.
 const MAX_REFUSAL_LOG = 64;
 const refusalLog = [];
 function logRefusal(code, status, targetUrl, extra) {
@@ -102,13 +67,7 @@ function logOutgoingHeaders(targetUrl, method, entries) {
   return entry;
 }
 
-// 2026-06-09 transport-stage perf telemetry. NAVER cold load 1분 분석에서
-// rewriter는 1.1% (679 ms / 60 s) 라는 것이 확인됨. 나머지 99% 는
-// transport (yamux+TLS+h2 핸드셰이크 + sub-resource fetch). 어느 fetch가
-// 무거운지 알아야 다음 최적화 (parallel/preload/connection-pooling) 가
-// 의미가 있음. ring buffer 는 마지막 N 개 fetch 만 보관 — 누적
-// 카운터는 SW lifetime 전체. logTransportEvent 는 transportFetch 가
-// self.kernelFetch 완료 후 호출 — 즉 핸드셰이크+body 합산 wall time.
+// Per-SW-lifetime transport latency telemetry and bounded recent event log.
 const MAX_TRANSPORT_LOG = 32;
 const transportLatencyLog = [];
 const transportStats = {
@@ -183,21 +142,7 @@ function rewriteCacheSet(key, code) {
 }
 
 self.addEventListener('install', event => event.waitUntil(self.skipWaiting()));
-// 2026-06-07 split-bundle (c.1) Step 2.0: activate 가 initBundle 을 실제로
-// await (이전엔 fire-and-forget). SW 가 activated 상태로 진입할 때 ZPBundle.ready
-// 가 보장됨 → 첫 fetch 가 cold-init latency 없이 즉시 ZPBundle 사용 가능. 30s
-// timeout 으로 wasm fetch 가 실패해도 activate 가 stuck 되지 않도록 보호.
-// 그래도 ZPBundle.ready 가 false 면 hot-path 가 `await initBundle()` 재시도.
-// 동기 XHR 중계 — SW 쪽 소비자.
-//
-// SW 는 동기 XHR 을 **가로채지 못한다**(실측: 같은 페이지·같은 URL 에서 동기
-// XHR 은 Go 까지 내려가 403, 비동기 fetch 는 SW 가 503). 그래서 페이지는
-// 동기 XHR 을 same-origin 엔드포인트로 던지고, Go 가 그 응답을 park 한 채
-// 여기로 작업을 넘긴다. 실제 전송은 기존 `transportFetch` 가 그대로 하므로
-// egress 경로도 TLS/HTTP 지문도 달라지지 않는다.
-//
-// 페이지 메인 스레드가 동기 XHR 로 막혀 있어도 SW 는 별도 스레드라 돌 수 있다 —
-// 그게 이 구조가 성립하는 이유다.
+// Service Workers cannot intercept synchronous XHR directly, so the page parks requests on the Go server and this loop polls and fulfills them via `transportFetch`.
 let syncRelayRunning = false;
 async function syncFetchRelayLoop() {
   if (syncRelayRunning) return;
@@ -208,35 +153,48 @@ async function syncFetchRelayLoop() {
       const r = await nativeFetch(ZP.apiPath('sync-fetch/poll'), { cache: 'no-store' });
       if (r.status === 200) batch = await r.json();
     } catch {
-      // 서버가 잠깐 없을 수 있다. 조금 쉬고 다시 연다.
       await new Promise(res => setTimeout(res, 1000));
       continue;
     }
-    if (!batch) continue;                      // 204 = 빈손, 즉시 재연결
-    // 서버가 큐에 쌓인 잡을 묶어서 준다. 낡은 서버는 단일 객체를 주므로
-    // 양쪽 다 받는다.
+    if (!batch) continue;
     const jobs = Array.isArray(batch) ? batch : [batch];
-    for (const job of jobs) handleSyncFetchJob(job).catch(() => {}); // 다음 폴을 막지 않는다
+    for (const job of jobs) handleSyncFetchJob(job).catch(() => {});
   }
 }
 
-// 탭 등록은 페이지 로드와 **경쟁**한다. 인라인 스크립트가 아주 이른 시점에
-// 동기 XHR 을 던지면 그 탭이 아직 `tabs` 에 없을 수 있다(실측: 같은 하네스에서
-// 어떤 런은 성공, 어떤 런은 SW_NOT_READY). 짧게 기다렸다 다시 보고,
-// 그래도 없으면 탭이 하나뿐일 때는 그것을 쓴다.
-async function resolveSyncTab(tabId) {
+// Retry briefly because inline scripts can issue synchronous XHR before tab registration finishes, falling back to the sole tab only when `tabId` is empty.
+async function resolveSyncTab(tabIdOrUrl, tokenOpt) {
+  if (!cookieJarLoaded) await ensureCookieJarLoaded();
+  let tabId = tabIdOrUrl;
+  let token = tokenOpt || '';
+  if (tabIdOrUrl && typeof tabIdOrUrl === 'object' && tabIdOrUrl.searchParams) {
+    tabId = tabIdOrUrl.searchParams.get('tab') || '';
+    if (!token) token = tabIdOrUrl.searchParams.get('token') || '';
+  }
+  tabId = tabId ? String(tabId) : '';
+  token = token ? String(token) : '';
   for (let i = 0; i < 20; i++) {
-    const t = tabId && tabs.get(tabId);
-    if (t) return t;
-    if (!tabId && tabs.size === 1) return tabs.values().next().value;
+    if (tabId) {
+      const t = tabs.get(tabId);
+      if (t) {
+        if (token && t.runtimeToken && token !== t.runtimeToken) return null;
+        return t;
+      }
+    } else if (tabs.size === 1) {
+      const t = tabs.values().next().value;
+      if (token && t.runtimeToken && token !== t.runtimeToken) return null;
+      return t;
+    }
     await new Promise(r => setTimeout(r, 100));
   }
-  if (tabs.size === 1) return tabs.values().next().value;
+  if (!tabId && tabs.size === 1) {
+    const t = tabs.values().next().value;
+    if (token && t.runtimeToken && token !== t.runtimeToken) return null;
+    return t;
+  }
   return null;
 }
 
-// HTTP 헤더 값에 넣어도 안전한 형태로 줄인다. 개행이 섞이면 헤더 인젝션이
-// 되고, 비ASCII 는 fetch 가 거부한다.
 function headerSafe(v) {
   return String(v == null ? '' : v).replace(/[\r\n]+/g, ' ').replace(/[^\x20-\x7e]/g, '?').slice(0, 200);
 }
@@ -246,23 +204,12 @@ function utf8Base64(s) {
   for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
   return btoa(bin);
 }
-// SW-less 문서로 가는 CSS 안의 `/zp/api/fetch?url=…` 을 릴레이 URL 로 옮긴다.
-// 릴레이만이 SW 없이도 동작하는 경로다(Go 가 park 하고 SW 가 답한다).
-//
-// **상한을 둔다.** 릴레이 요청은 Go 가 붙잡고 있으므로 호스트당 ~6개인 HTTP/1.1
-// 커넥션을 점유한다. 예전에 페이지 이미지를 전부 릴레이로 보냈다가 스타일시트가
-// 큐에서 밀려 `deadSheets` 가 났다(그래서 이미지는 blob 경로로 갈라놨다).
-// 스타일시트 하나가 참조하는 이미지는 보통 몇 개지만 스프라이트가 많은 시트는
-// 수십 개일 수 있다 — 그런 경우 옮기지 않고 **몇 개를 남겼는지 로그로 남긴다**
-// (조용히 자르면 "전부 처리됨" 으로 읽힌다).
-//
-// 정규식 대신 스캐너를 쓴다 — 경계 문자(따옴표/괄호/공백)만 보면 되고,
-// 이스케이프가 얽힌 정규식은 이 파일에서 이미 여러 번 사고를 냈다.
+// Rewrite `/zp/api/fetch?url=...` paths inside CSS delivered to uncontrolled documents into sync-fetch relay URLs, capped to prevent HTTP/1.1 connection exhaustion.
 const MAX_RELAYED_CSS_URLS = 12;
 const CSS_URL_STOP = '"\') \t\r\n';
 async function relayifyCSSFetchURLs(resp, job) {
   let css;
-  try { css = await resp.clone().text(); } catch { return resp; }
+  try { css = (await decodeResponseText(resp.clone(), false)).text; } catch { return resp; }
   const marker = ZP.apiPath('fetch') + '?url=';
   if (!css || css.indexOf(marker) < 0) return resp;
   let out = '';
@@ -277,7 +224,6 @@ async function relayifyCSSFetchURLs(resp, job) {
     while (j < css.length && CSS_URL_STOP.indexOf(css[j]) < 0) j++;
     const enc = css.slice(at + marker.length, j);
     let target = '';
-    // zp-css 는 form 인코딩이라 공백이 `+` 다. 되돌린 뒤 절대 URL 을 얻는다.
     try { target = decodeURIComponent(enc.replace(/\+/g, '%20')); } catch { target = ''; }
     if (!/^https?:/i.test(target) || moved >= MAX_RELAYED_CSS_URLS) {
       if (moved >= MAX_RELAYED_CSS_URLS) skipped++;
@@ -293,20 +239,18 @@ async function relayifyCSSFetchURLs(resp, job) {
     }
     i = j;
   }
-  if (skipped) logRefusal('css-relay-cap', 0, job.target, MAX_RELAYED_CSS_URLS + '개까지만 릴레이로 옮겼다, ' + skipped + '개는 그대로 남겼다(403 예상)');
+  if (skipped) logRefusal('css-relay-cap', 0, job.target, 'relayed first ' + MAX_RELAYED_CSS_URLS + ' URLs, left ' + skipped + ' unrewritten (expected 403)');
   if (!moved) return resp;
   const headers = new Headers(resp.headers);
   headers.delete('Content-Length');
   return new Response(out, { status: resp.status, statusText: resp.statusText, headers });
 }
 async function handleSyncFetchJob(job) {
-  // 릴레이 버전. 브라우저가 낡은 SW 를 물고 있는지 응답만 보고 가리기 위한 것 —
-  // 이걸 안 실으면 "내 코드가 틀렸나" 와 "SW 가 낡았나" 를 구분할 수 없다.
   const out = { id: job.id, v: 'r4', status: 0, statusText: '', headers: [], body: null, err: '' };
   try {
-    const tab = await resolveSyncTab(job.tab);
+    const tab = await resolveSyncTab(job.tab, job.token || job.runtimeToken);
     if (!tab) throw new Error('SW_NOT_READY tab=' + (job.tab || '(none)') + ' known=' + tabs.size);
-    // What the page wrote just before this request and the message has not delivered yet.
+    // Apply cookie writes queued by the page immediately before this synchronous request.
     if (tab.cookieJar && Array.isArray(job.cookies) && job.docUrl) {
       for (const pair of job.cookies) applyCookieWrite(tab, job.docUrl, pair && pair[1], pair && pair[0], undefined);
     }
@@ -317,38 +261,23 @@ async function handleSyncFetchJob(job) {
       headers: Array.isArray(job.headers) ? job.headers : [],
       tab,
       entryId,
-      // A synchronous XHR reads `document.cookie` the moment it returns: the cookies the
-      // response set ride back in a header (the page applies them before it returns).
+      // Return response Set-Cookie deltas in a header so the page applies them before synchronous send() returns.
       collectCookies: !job.kind,
     }, job.kind ? (job.cors === 'anonymous' || job.cors === 'use-credentials' ? {
-      // A stylesheet or script of a frame the worker does not control that asked for CORS (`crossorigin`).
+      // Uncontrolled frame stylesheet or script with a crossorigin attribute.
       elementCors: true, mode: 'cors', credentials: job.cors === 'use-credentials' ? 'include' : 'same-origin',
       opaqueOrigin: !!(entry && entry.opaque),
     } : null) : {
-      // An XHR is a cors-mode request of its document (the element loads above are not), with cookies
-      // only as `withCredentials` asks — and the browser's CORS rules apply to it.
+      // Synchronous XHR obeys document CORS rules and sends cookies only when withCredentials is set.
       runtimeFetch: true, mode: 'cors', credentials: job.wc ? 'include' : 'same-origin',
       opaqueOrigin: !!(entry && entry.opaque),
     }));
-    // A network error (a failed CORS check among them) makes a synchronous `send()` throw — and an element
-    // that asked for CORS and was refused fail to load.
+    // Propagate network or CORS failures so synchronous send() throws and CORS element loads fail.
     if ((!job.kind || job.cors) && resp && resp.type === 'error') throw new Error('ZP_NETWORK_ERROR');
     const cookieChanges = resp && resp.__zpFetchMeta && resp.__zpFetchMeta.cookies;
-    // ★릴레이는 `transportFetch` 를 직접 부르므로 `/zp/api/fetch` 핸들러가
-    // 하던 후처리를 못 탄다. 동기 XHR 은 원본 바이트를 원해서 문제가 없었지만,
-    // SW-less 프레임의 `<link>`/`<script>` 가 이 경로로 오면서 필요해졌다 —
-    // 리라이트가 빠지면 CSS 의 `url(../img.png)` 이 릴레이 URL 을 base 로
-    // 해석돼 전부 깨진다.
+    // Rewrite stylesheets and scripts fetched on behalf of uncontrolled frames so relative URLs and globals stay intact.
     if (job.kind === 'style') {
       resp = await rewriteCSSResponse(resp, { targetUrl: job.target });
-      // ★2026-08-21 — 리라이트된 CSS 안의 `/zp/api/fetch` 를 릴레이 경로로 한 번 더 옮긴다.
-      //
-      // 이 응답은 **SW 클라이언트가 아닌 문서**로 간다(그래서 릴레이를 탄 것이다).
-      // `/zp/api/fetch` 는 SW 안에만 있는 가상 경로라 그 문서에서는 Go 까지 내려가
-      // 403 이 된다. 실측(naver 광고 프레임): 릴레이로 받은 스타일시트의 `url()`
-      // 이미지 3건이 전부 403 이었고, 개시자가 `/zp/api/sync-fetch` 문서라는 것으로
-      // 경로를 특정했다. 요소 속성이었다면 프렐류드의 blob 업그레이드가 잡았을 텐데
-      // 운반체가 **CSS 텍스트**라 아무도 안 고친다. 여기가 마지막 지점이다.
       resp = await relayifyCSSFetchURLs(resp, job);
     }
     else if (job.kind === 'script') resp = await rewriteScriptResponse(resp, { targetUrl: job.target, kind: 'classic' });
@@ -358,8 +287,7 @@ async function handleSyncFetchJob(job) {
       const visible = new Headers(resp.headers);
       corsFilterHeaders(visible, resp.__zpFetchMeta && resp.__zpFetchMeta.expose);
       visible.forEach((v, k) => out.headers.push([k, v]));
-      // The relay only lets a few header names through to the page's own XHR; what the document may read of
-      // the answer travels as one JSON value instead (an XHR's `getResponseHeader`).
+      // Package CORS-visible response headers into X-ZP-Sync-Visible for XHR getResponseHeader().
       if (!job.kind) {
         const readable = [];
         visible.forEach((v, k) => { if (!k.toLowerCase().startsWith('x-zp-') && k.toLowerCase() !== 'set-cookie') readable.push([k, v]); });
@@ -367,14 +295,9 @@ async function handleSyncFetchJob(job) {
       }
     } catch {}
     if (Array.isArray(cookieChanges) && cookieChanges.length) out.headers.push(['X-ZP-Cookie-Delta', utf8Base64(JSON.stringify(cookieChanges))]);
-    // ★바이트를 그대로 넘긴다. 예전에는 여기서 base64 문자열을 만들었는데,
-    // 서브리소스를 전부 이 경로로 보내자 그 비용이 SW 스레드에 몰려 다른 잡이
-    // 밀렸다(실측: deadSheets 2~4). 본문 크기도 33% 줄어든다.
     out.body = await resp.arrayBuffer();
   } catch (e) {
     out.err = String((e && e.message) || e || 'error');
-    // 상류 실패 이유는 Go 가 버리므로 여기서 흘려 둔다. SW 콘솔은
-    // `dump-recording --filter console` 로 회수되고, 렌더러가 굳어도 남는다.
     try { console.log('ZPSYNC-SW fail target=' + job.target + ' err=' + out.err); } catch {}
   }
   try {
@@ -387,8 +310,6 @@ async function handleSyncFetchJob(job) {
         'X-ZP-Sync-Statustext': headerSafe(out.statusText),
         'X-ZP-Sync-V': out.v,
         'X-ZP-Sync-Error': headerSafe(out.err),
-        // 응답 헤더는 작아서 한 줄에 실어도 된다. 다만 HTTP 헤더 값은 ASCII 만
-        // 안전하므로(Content-Language 등에 비ASCII 가 올 수 있다) base64 로 싣는다.
         'X-ZP-Sync-Headers': utf8Base64(JSON.stringify(out.headers || [])),
       },
       body: out.body || new ArrayBuffer(0),
@@ -397,40 +318,27 @@ async function handleSyncFetchJob(job) {
   } catch {}
 }
 
-// 스크립트 평가 시점에도 시작한다. Service Worker 는 유휴 시 종료됐다가 이벤트로
-// 되살아나는데, 그때 `activate` 는 다시 발생하지 않는다. activate 에서만 걸어두면
-// 되살아난 SW 는 폴링을 하지 않아 동기 XHR 이 전부 타임아웃된다.
+// Start the polling loop at script evaluation time because an idle-terminated SW does not receive `activate` again on wake-up.
 syncFetchRelayLoop();
 
 self.addEventListener('activate', event => event.waitUntil((async () => {
   await self.clients.claim();
-  syncFetchRelayLoop();   // 의도적으로 await 하지 않는다 — 영구 루프다(중복 호출은 플래그로 막힌다).
+  syncFetchRelayLoop();
   const BUNDLE_BOOT_TIMEOUT_MS = 30000;
   await Promise.race([
     initBundle().catch(() => null),
     new Promise(r => setTimeout(r, BUNDLE_BOOT_TIMEOUT_MS)),
   ]);
-  // D4: refresh the runtime config (currently just the public WT
-  // gateway URL). Bounded + fire-and-forget — if the endpoint hangs or
-  // returns garbage the page-side virtual WT just falls back to the
-  // rejected stub, which is fine.
   await Promise.race([
     refreshRuntimeConfig().catch(() => null),
     new Promise(r => setTimeout(r, 5000)),
   ]);
 })()));
 
-// Runtime config the SW threads into the boot JSON every navigation.
-// Refreshed on each activate (and lazily on demand if a navigation
-// arrives before activate completes). The endpoint is plain JSON
-// served from the Go control plane (`/zp/api/config`).
+// Runtime config threaded into boot JSON on navigation (/zp/api/config).
 let runtimeConfig = { wtGateway: '', wtGatewayCertHashes: [], rtcICEServers: [] };
 let runtimeConfigPromise = null;
-// ★activate 때 한 번 읽는 것으로는 부족했다. 브라우저는 유휴 SW 를 내렸다
-// 다시 띄우는데 그때 전역은 기본값으로 돌아가고 activate 는 다시 오지 않는다 —
-// 그 SW 가 사는 동안 wtGateway/rtcICEServers 가 빈 값이라 페이지는 조용히 스텁을
-// 받았다. 개발용 게이트웨이 인증서 핀은 서버를 재시작할 때마다 바뀐다. 그래서
-// 문서 내비게이션마다(짧은 TTL, 시간 상한) 다시 읽는다.
+// Re-fetch runtime configuration on a short TTL so idle-restarted SWs and restarted dev servers pick up fresh certificate hashes.
 const RUNTIME_CONFIG_TTL_MS = 10000;
 let runtimeConfigAt = 0;
 async function ensureRuntimeConfig() {
@@ -450,15 +358,8 @@ async function refreshRuntimeConfig() {
         if (cfg && typeof cfg === 'object') {
           runtimeConfig = {
             wtGateway: typeof cfg.wtGateway === 'string' ? cfg.wtGateway : '',
-            // Pin for a self-signed dev gateway certificate. It is
-            // regenerated on every server start, which is one reason the
-            // config is re-read per navigation (ensureRuntimeConfig).
             wtGatewayCertHashes: Array.isArray(cfg.wtGatewayCertHashes)
               ? cfg.wtGatewayCertHashes.filter(h => typeof h === 'string' && h) : [],
-            // Each /zp/api/config response carries a fresh TURN-REST cred
-            // tuple (when -rtc-turn-addr is set on the server). The
-            // tuple is opaque to the SW — it's pasted into the boot JSON
-            // and consumed by runtime-prelude's ZPRTCPeerConnection.
             rtcICEServers: Array.isArray(cfg.rtcICEServers) ? cfg.rtcICEServers : [],
           };
           runtimeConfigAt = Date.now();
@@ -472,33 +373,16 @@ async function refreshRuntimeConfig() {
 }
 self.addEventListener('message', event => event.waitUntil(handleMessage(event)));
 self.addEventListener('fetch', event => {
-  // Only intercept http(s). Non-http schemes — chrome-extension: (a browser
-  // extension's own injected-script channel), data:, blob:, about: — must
-  // reach the browser's NATIVE handler untouched. Calling respondWith on them
-  // routes through classify→UNKNOWN→`Response.error()`, which surfaces as
-  // "FetchEvent ... resulted in a network error response" and breaks the
-  // extension (observed on NAVER: content.js "Failed to establish injected
-  // script channel"). Returning without respondWith = browser default fetch.
+  // Only intercept http(s) requests so browser-internal schemes (chrome-extension:, data:, blob:, about:) use native handling.
   const u = event.request.url;
   if (!u.startsWith('http:') && !u.startsWith('https:')) return;
-  // CSP 위반 리포트는 우리 자신에게 보내는 것이다 — 가로채면 안 된다.
-  //
-  // 브라우저는 report-uri 를 문서 기준으로 풀어 `/zp/api/csp-report` 로 POST
-  // 하는데, 이 요청도 SW 의 fetch 이벤트를 탄다. 그냥 두면 classify 가 이걸
-  // "프록시 오리진으로 온 알 수 없는 경로" = 타깃의 서브리소스로 보고 타깃
-  // 오리진으로 되던진다 — 실측: example.com 이 405 를 돌려줬고 리포트는 서버에
-  // 영영 도착하지 않았다. **우리 감옥이 우리 진단을 먹고 있었다.**
-  // 같은 오리진의 우리 엔드포인트이므로 네이티브 fetch 로 통과시킨다.
+  // Pass CSP violation reports and synchronous XHR relay requests directly to the Go server so they are not misclassified as target subresources.
   if (event.request.method === 'POST') {
     try {
       const p = new URL(u).pathname;
       if (p === ZP.apiPath('csp-report')) return;
     } catch {}
   }
-  // 워커의 동기 XHR 릴레이 — 페이지 sync XHR 은 SW 를 우회하지만 워커
-  // 요청은 클라이언트 fetch 로 여기를 탄다. 응답하면 classify 가 이걸 타깃
-  // 서브리소스로 보고 upstream 에 붙여 404 가 되므로, Go 의 park 엔드포인트로
-  // 네트워크 통과시킨다(응답은 SW 가 sync-fetch/result 로 채운다).
   try {
     if (new URL(u).pathname === ZP.apiPath('sync-fetch')) return;
   } catch {}
@@ -548,64 +432,10 @@ function completeBodyResponse(resp) {
   return result;
 }
 
-// Rust zp-bundle (OXC native crate). Initializes lazily and exposes
-// self.ZPBundle.{rewriteScript, transformHtml, buildCSP, bundleVersion}.
-// The JS ZPRewriter remains the primary path during this migration window;
-// the Rust bundle is available for parity tests and gradual cut-over.
-//
-// captureBrowserFingerprint returns the hardcoded Chrome 148 ClientHello
-// spec the WASM kernel installs into rustls' `set_captured_spec`. The
-// historical server-side capture endpoint (Go `-tls-addr` HTTPS listener
-// + `/zp/api/fp`) was deleted 2026-06-05: in practice the SW never
-// actually fetched from it because Chrome refuses to grant SW fetch
-// permission to a self-signed HTTPS port, and shipping a trusted cert in
-// a local dev binary is impractical. The Chrome 148 spec below was
-// captured once from a real browser at tls.peet.ws and frozen into the
-// build. Updating to a future Chrome version is a one-line replacement
-// of the base64 blob (decode shape: `{supportedVersions,cipherSuites,
-// extensions,supportedCurves,supportedPoints,signatureSchemes,alpnProtocols}`).
-//
-// Phase 5.8 spec details:
-//   - cipherSuites: 15 entries in Chrome 148 interleaved (AES128, AES256,
-//     CHACHA) order with ECDSA/RSA per-row pairs.
-//   - extensions: Chrome 148 order [0, 17613, 51, 65281, 43, 16, 5, 11,
-//     13, 18, 23, 27, 10, 35, 45, 65037] — 65037 = ECH GREASE (Phase 5.10).
-//   - supportedCurves: [4588, 29, 23, 24] — 4588 = X25519MLKEM768 (Phase
-//     5.9 hybrid emit in mlkem_hybrid.rs).
-//   - record_size_limit (id 28) ABSENT (Firefox-specific).
-// 2026-08-16 갱신 — signatureSchemes 앞에 2308/2309/2310 (ML-DSA 44/65/87) 추가.
-// 측정 근거: tls.peet.ws/api/all 을 같은 브라우저로 프록시 경유 vs 직접 재보니
-// peetprint 8개 필드 중 **signature_algorithms 하나만** 달랐다.
-//   직접  : 2308-2309-2310-1027-2052-1025-1283-2053-1281-2054-1537
-//   프록시:                1027-2052-1025-1283-2053-1281-2054-1537
-// ja4 도 cipher 부분(8daaf6152771)은 같고 확장/시그 해시만 달랐다
-// (d8a2da3f94cd vs 806a8c22fdea). 즉 우리 wire 는 2026-07-03 에 "Chrome 완전
-// 일치" 를 찍은 그대로인데 **Chrome 이 그 사이에 움직였다** — 동결된 스펙은
-// 시간이 지나면 저절로 틀려진다는 뜻이고, 이 blob 은 주기적으로 재측정해야 한다.
-// ja3_hash 는 실행마다 다른데 그건 회귀가 아니다: Chrome 은 확장 순서를 매
-// 연결 섞으므로 ja3 는 원래 불안정하다(peetprint/ja4 는 정렬해서 해싱한다).
-// 리스크: 우리가 검증할 수 없는 서명 알고리즘을 광고한다. 서버가 실제로
-// ML-DSA 로 서명하면 검증에 실패하지만, 오늘 공개 CA 는 그런 인증서를 발급하지
-// 않는다(Chrome 도 같은 목록을 광고한다).
-// 2026-08-18 — **17613 (ALPS, application_settings) 복원**.
-// 잠시 뺐던 확장이다. 뺀 이유와 되돌린 이유를 둘 다 남긴다.
-//   뺐던 이유: Chrome 은 ALPS 를 광고하고 서버가 협상하면 세팅을 주고받는데,
-//   우리는 광고만 하고 응답을 처리하지 않았다. 대부분의 서버는 ALPS 를 몰라
-//   무시하지만 **Google GFE 는 실제로 협상한다** — 핸드셰이크와 h2 SETTINGS
-//   까지 멀쩡히 끝난 뒤 응답을 읽는 도중 `unexpected_message` fatal alert 로
-//   연결이 죽었다(ajax.googleapis / googletagmanager / doubleclick /
-//   accounts.google 전부 502).
-//   되돌린 이유: rustls fork 에 ALPS 를 실제로 구현했다 —
-//   `ServerExtensions::application_settings` 로 서버 응답을 파싱하고,
-//   협상됐으면 클라이언트 두 번째 flight 를 **EncryptedExtensions 메시지로
-//   시작**한다(draft-vvv-tls-alps §4). 빠져 있던 건 바로 그 메시지였고,
-//   서버는 EncryptedExtensions 자리에서 Finished 를 보고 연결을 끊은 것이다.
-// **광고만 하고 못 지키는 확장은 지문 일치보다 나쁘다** — 그래서 이 줄을
-// 되돌리는 조건은 "구현" 하나였다. 가드 테스트가 그 조건을 강제한다.
+// Chrome ClientHello spec (base64 JSON: {supportedVersions, cipherSuites,
+// extensions, supportedCurves, supportedPoints, signatureSchemes, alpnProtocols})
+// installed into the WASM kernel's rustls set_captured_spec.
 const CAPTURED_FINGERPRINT_B64 = 'eyJzdXBwb3J0ZWRWZXJzaW9ucyI6Wzc3Miw3NzFdLCJjaXBoZXJTdWl0ZXMiOls0ODY1LDQ4NjYsNDg2Nyw0OTE5NSw0OTE5OSw0OTE5Niw0OTIwMCw1MjM5Myw1MjM5Miw0OTE3MSw0OTE3MiwxNTYsMTU3LDQ3LDUzXSwiZXh0ZW5zaW9ucyI6WzAsMTc2MTMsNTEsNjUyODEsNDMsMTYsNSwxMSwxMywxOCwyMywyNywxMCwzNSw0NSw2NTAzNyw1MTc2NF0sInN1cHBvcnRlZEN1cnZlcyI6WzQ1ODgsMjksMjMsMjRdLCJzdXBwb3J0ZWRQb2ludHMiOiJBQT09Iiwic2lnbmF0dXJlU2NoZW1lcyI6WzIzMDgsMjMwOSwyMzEwLDEwMjcsMjA1MiwxMDI1LDEyODMsMjA1MywxMjgxLDIwNTQsMTUzN10sImFscG5Qcm90b2NvbHMiOlsiaDIiLCJodHRwLzEuMSJdfQ==';
-// 브라우저의 실제 언어 선호를 Chrome 이 쓰는 Accept-Language 문법으로 옮긴다.
-// 하드코딩하면 프록시 경유와 직접 접속이 서로 다른 언어 변종을 받게 되고,
-// 그 차이가 회귀 측정에 그대로 섞인다(NAVER 로그인 폼이 실제로 그랬다).
 function browserAcceptLanguage() {
   try {
     const raw = self.navigator && self.navigator.languages;
@@ -619,18 +449,10 @@ function browserAcceptLanguage() {
   } catch { return 'en-US,en;q=0.9'; }
 }
 
-// Client Hints, negotiated the way Chrome 154 does. Measured 2026-10-13 against this machine's Chrome with a local site
-// that answers `Accept-CH` + `Critical-CH` (HTTP/1.1 and HTTP/2; the probes are in ERRATA item 81):
-//  * `sec-ch-ua`, `-mobile` and `-platform` go on every request to a potentially trustworthy URL.
-//  * The rest only once a top-level document of an origin asked for them with `Accept-CH` (the last list replaces the
-//    set), and then on that origin's navigations and on its own requests to itself — a third party (an image, a fetch,
-//    a frame of another site) gets the three defaults, since nothing delegates them by default.
-//  * A top-level navigation whose response names in `Critical-CH` hints it did not carry is sent once more with them
-//    (Chrome's internal restart: the 307 a fresh Chrome shows in front of Cloudflare's challenge page).
-// The proxy dropped every high-entropy hint and never restarted. Cloudflare answers Glassdoor's hint-less first request
-// with `cType: 'interactive'` (the checkbox that does not pass) and the restarted one with `cType: 'managed'`; a real
-// Chrome only ever renders the second.
-// The order Chrome emits them on a navigation (Blink's own list, measured with every hint asked for):
+// Client Hints negotiation matching Chrome:
+// - sec-ch-ua, sec-ch-ua-mobile, and sec-ch-ua-platform are sent on every request to a potentially trustworthy URL.
+// - High-entropy hints are sent only after a top-level document of that origin opts in via Accept-CH.
+// - A top-level navigation whose response specifies missing Critical-CH hints is reissued once with those hints.
 const CLIENT_HINT_NAV_ORDER = [
   'device-memory', 'sec-ch-device-memory', 'dpr', 'sec-ch-dpr', 'viewport-width', 'sec-ch-viewport-width',
   'sec-ch-viewport-height', 'rtt', 'downlink', 'ect', 'sec-ch-ua', 'sec-ch-ua-mobile', 'sec-ch-ua-full-version',
@@ -639,10 +461,9 @@ const CLIENT_HINT_NAV_ORDER = [
   'sec-ch-prefers-reduced-motion', 'sec-ch-prefers-reduced-transparency', 'save-data',
 ];
 const CLIENT_HINT_DEFAULTS = ['sec-ch-ua', 'sec-ch-ua-mobile', 'sec-ch-ua-platform'];
-// Every hint name the browser underneath may have put on the request it handed the worker: its values describe the
-// host browser on the proxy origin, never the persona on the target, so none of them is forwarded.
+// Host browser client hints on incoming SW requests describe the proxy origin and must not be forwarded upstream.
 const BROWSER_CLIENT_HINTS = new Set([...CLIENT_HINT_NAV_ORDER, 'width', 'sec-ch-width', 'sec-ch-ua-reduced', 'sec-ch-ua-full']);
-// origin → the hints its last top-level `Accept-CH` asked for (a profile's store in Chrome; this worker's here).
+// Per-origin high-entropy hint set requested by the latest top-level Accept-CH response header.
 const clientHintPrefs = new Map();
 function parseClientHintList(value) {
   const out = new Set();
@@ -652,9 +473,7 @@ function parseClientHintList(value) {
   }
   return out;
 }
-// A potentially trustworthy URL: https, or a loopback host. Chrome sends neither client hints nor `Sec-Fetch-*` anywhere
-// else (measured: a plain-http page on this machine's LAN address got `upgrade-insecure-requests, user-agent, accept,
-// accept-encoding, accept-language` and nothing more, even after asking for a hint).
+// Chrome sends client hints and Sec-Fetch-* headers only to potentially trustworthy URLs (https or loopback).
 function potentiallyTrustworthyURL(u) {
   try {
     const url = new URL(u);
@@ -663,9 +482,7 @@ function potentiallyTrustworthyURL(u) {
     return h === 'localhost' || h.endsWith('.localhost') || /^127\./.test(h) || h === '[::1]';
   } catch { return false; }
 }
-// The hint values: the persona's for the UA family (ZP — the same object the page's `getHighEntropyValues` reads), the
-// browser's own for the device and network (this worker sees the same `navigator`), the tab's top window for the
-// viewport and the media preferences (reported by the launcher and each top-level document, `clientEnv`).
+// Compute client hint values from the target UA persona, navigator device/network metrics, and tab viewport/media state.
 function clientHintValue(name, env) {
   const he = ZP.TARGET_UA_HIGH_ENTROPY;
   const q = s => '"' + s + '"';
@@ -700,7 +517,6 @@ function clientHintValue(name, env) {
   }
   return null;
 }
-// The window values a page reports for its tab, kept only in the shape `clientHintValue` reads.
 function sanitizeClientEnv(env) {
   if (!env || typeof env !== 'object') return null;
   const num = v => (typeof v === 'number' && isFinite(v) && v > 0 && v < 100000 ? v : 0);
@@ -712,9 +528,7 @@ function sanitizeClientEnv(env) {
     transparency: pick(env.transparency, ['reduce', 'no-preference']),
   };
 }
-// The high-entropy hints a request carries (the defaults are not in this list), in Chrome's navigation order.
-//   topLevel: a top-level navigation — the target origin's own preferences.
-//   otherwise: the tab's top-level origin's preferences, only for a request to that origin from a document of it.
+// High-entropy hints for a request in Chrome's navigation order.
 function highEntropyHintsFor(opt, u, topLevel, inFrame) {
   if (!potentiallyTrustworthyURL(u)) return [];
   let origin;
@@ -734,12 +548,7 @@ function highEntropyHintsFor(opt, u, topLevel, inFrame) {
   return CLIENT_HINT_NAV_ORDER.filter(n => prefs.has(n) && !CLIENT_HINT_DEFAULTS.includes(n));
 }
 
-// Header order on the wire (measured 2026-10-13 over HTTP/1.1 and HTTP/2; HTTP/2 adds `priority` last and
-// `content-length` right after the pseudo-headers, which the transport places).
-//  * A navigation: the hints, then the browser's own request line; after a Critical-CH restart the hints follow `accept`.
-//  * A sub-request (element load, fetch, XHR): Blink's header map, whose order is a hash table's — it changes with the
-//    set of names. Three sets are measured (no high-entropy hints; Cloudflare's nine; all of them); a name not in the
-//    table (a page's own header) goes where the measured `cf-chl` did. Exact for those sets, an approximation otherwise.
+// Wire header ordering templates matching Blink's navigation and subresource header ordering.
 const NAV_REQUEST_LINE = ['upgrade-insecure-requests', 'user-agent', 'accept'];
 const NAV_TAIL = ['*', 'origin', 'content-type', 'sec-fetch-site', 'sec-fetch-mode', 'sec-fetch-user', 'sec-fetch-dest', 'sec-fetch-storage-access', 'referer', 'accept-encoding', 'accept-language', 'cookie', 'priority'];
 const SUB_TAIL = ['sec-fetch-site', 'sec-fetch-mode', 'sec-fetch-dest', 'sec-fetch-storage-access', 'referer', 'accept-encoding', 'accept-language', 'cookie', 'priority'];
@@ -754,8 +563,7 @@ function requestHeaderTemplate(kind, hints) {
   const map = !high.length ? SUB_MAP_PLAIN : uaOnly ? SUB_MAP_UA : SUB_MAP_ALL;
   return [...map, ...SUB_TAIL];
 }
-// The final order of `entries` (lowercase names) under a template: listed names by position, the others at `*` in their
-// own relative order. Also the list the kernel follows after it adds Referer/Origin/Accept-Encoding/Cookie.
+// Order lowercase header entries by template position, placing unlisted names at '*' in their relative order.
 function orderRequestHeaders(entries, template) {
   const star = template.indexOf('*');
   const rank = name => { const i = template.indexOf(name); return i < 0 ? star : i; };
@@ -777,68 +585,28 @@ function captureBrowserFingerprint() { return CAPTURED_FINGERPRINT_B64; }
 async function initBundle() {
   if (self.ZPBundle && self.ZPBundle.ready) return;
   if (bundlePromise) return bundlePromise;
-  // Bundle glue is wrapped in an IIFE that exposes wasm_bindgen as
-  // self.ZPBundleWBG (avoiding `let wasm_bindgen` collision with the
-  // legacy rewriter-rs glue). The importScripts for the bundle happens at
-  // top level of this SW (worker spec only allows importScripts there).
   const wbg = self.ZPBundleWBG;
   if (typeof wbg !== 'function') {
     throw new Error('REALM_INJECTION_FAILURE');
   }
   bundlePromise = (async () => {
     await wbg({ module_or_path: '/__zp/zp_bundle_sw_bg.wasm?v=__ZP_BUILD_ID__' });
-    // CRITICAL: `wbg` (the wasm-bindgen factory function) carries the JS
-    // glue wrappers as own properties (Object.assign(__wbg_init, {...exports}))
-    // — those wrappers do addHeapObject/takeObject. The factory's return
-    // value is the raw `wasm.exports` table, which takes/returns ints
-    // (heap indices) directly and would mishandle JS objects. Always read
-    // through wbg.<name>, never through the awaited factory result.
-    //
-    // 2026-06-08 split-bundle (c.3): kernel* names moved to `self.ZPKernel`
-    // (instantiated by `initKernel()` on first upstream fetch). The eager
-    // `ZPBundle` surface no longer carries `kernel{Init,Fetch,Stream,
-    // EchoSync,LastNamedGroups,Version}` — call sites await `initKernel()`
-    // and read from `self.ZPKernel` / `self.kernelFetch` instead.
+    // Read exports from the wbg factory properties rather than the raw wasm.exports return value so JS heap wrappers run.
     self.ZPBundle = Object.freeze({
       ready: true,
       bundleVersion: wbg.bundleVersion,
-      // proxyOrigin (= this worker's own ORIGIN) makes rewritten dynamic-import
-      // URLs absolute. Root-relative ones resolve against the IMPORTING
-      // context's base, which the membrane virtualises to the target host — an
-      // inline script then imported https://<target>/zp/api/script?… and got
-      // the target's 404 (NAVER ad SDK: 'initAd is not defined').
+      // Pass ORIGIN as proxyOrigin so rewritten dynamic-import URLs are absolute and do not resolve against the virtual target base.
       rewriteScript: (source, kind, targetUrl) => wbg.rewriteScript(source, kind || 'classic', targetUrl || '', ORIGIN),
-      // Patch-mode emit: returns `{"len":N,"patches":[{start,end,replacement},…]}`
-      // as a JSON string. Caller applies patches over the original source it
-      // already holds — skips the O(n) full re-emit + cross-ABI string copy.
-      // Optional (export missing on older bundles → SW falls back to full path).
       rewriteScriptPatches: typeof wbg.rewriteScriptPatches === 'function'
         ? (source, kind, targetUrl) => wbg.rewriteScriptPatches(source, kind || 'classic', targetUrl || '', ORIGIN)
         : null,
       transformHtml: (html, targetUrl) => wbg.transformHtml(html, targetUrl || '', ORIGIN),
-      // Phase C streaming render: the wasm-bindgen `HtmlTxn` class. `new
-      // ZPBundle.HtmlTxn(targetUrl, ORIGIN, preludeHTML)` then feed decoded
-      // HTML byte chunks via `.write(Uint8Array)` and finish with `.end()`.
-      // Optional (older bundles lack it → SW stays on the buffered path).
       HtmlTxn: typeof wbg.HtmlTxn === 'function' ? wbg.HtmlTxn : null,
-      // 2026-06-08 split-bundle (c.1) Step 4: CSS rewriter ported here from
-      // rewriter-rs/. Mirrors the legacy `rewriteCSS` surface (positional
-      // args, throws on parse failure).
-      // `proxyOrigin` defaults to this worker's own origin (ORIGIN), so the
-      // emitted /zp/api/fetch references are absolute and resolve correctly
-      // no matter what base the consuming context has. Root-relative ones
-      // resolved against the membrane's VIRTUAL base (the target origin) and
-      // 404'd for every target — fonts and sprites just vanished. Derived at
-      // runtime, so it follows whatever host/port the proxy is served on.
+      // Pass ORIGIN as proxyOrigin so emitted /zp/api/fetch URLs are absolute regardless of the consuming context's virtual base.
       rewriteCSS: (source, baseUrl, controlPrefix, proxyOrigin) =>
         wbg.rewriteCSS(source, baseUrl || '', controlPrefix || '/zp/', proxyOrigin === undefined ? ORIGIN : (proxyOrigin || '')),
-      // D2: unchained composer (rewriter_map only). Required by
-      // /zp/api/sourcemap when no upstream `.map` is present.
       composeSourceMap: (source, kind, targetUrl) =>
         wbg.composeSourceMap(source, kind || 'classic', targetUrl || '', ORIGIN),
-      // D2 follow-on: chained composer (rewriter_map ∘ original_map).
-      // Optional on older bundles; the SW falls back to the unchained
-      // composer when missing or when no upstream map exists.
       composeSourceMapChained: typeof wbg.composeSourceMapChained === 'function'
         ? (source, kind, targetUrl, originalMapJson) =>
             wbg.composeSourceMapChained(source, kind || 'classic', targetUrl || '', originalMapJson || '', ORIGIN)
@@ -849,13 +617,7 @@ async function initBundle() {
   return bundlePromise;
 }
 
-// 2026-06-08 split-bundle (c.3): kernel/transport half — fetched +
-// instantiated lazily on first upstream fetch. The JS glue was already
-// loaded by the top-level `importScripts('/__zp/zp_kernel_sw.js?v=__ZP_BUILD_ID__')` (no
-// way to importScripts later — worker spec forbids it), but the actual
-// `zp_kernel_sw_bg.wasm` (multi-MB rustls + h2 + yamux + mlkem +
-// decoders) only crosses the network when something actually needs to
-// talk upstream.
+// Instantiate the transport WASM kernel lazily on the first upstream fetch.
 let kernelPromise = null;
 async function initKernel() {
   if (self.ZPKernel && self.ZPKernel.ready) return;
@@ -875,9 +637,6 @@ async function initKernel() {
       kernelStream: wbg.kernelStream,
       kernelLastNamedGroups: wbg.kernelLastNamedGroups,
     });
-    // Expose the Rust kernel under the globals the SW transport path
-    // probes. Call directly (no wrapper) so the JsValue ABI ref doesn't
-    // get dropped between page and WASM.
     if (typeof self.ZPKernel.kernelFetch === 'function') {
       self.kernelFetch = self.ZPKernel.kernelFetch;
     }
@@ -887,10 +646,6 @@ async function initKernel() {
     if (typeof self.ZPKernel.kernelInit === 'function') {
       try { self.ZPKernel.kernelInit(); } catch {}
     }
-    // Hand the captured spec to the kernel before the first upstream
-    // fetch finishes resolving. The rustls fork's hardcoded Chrome 134
-    // fallback covers the race window if a kernel_fetch fires before
-    // this resolves.
     const setSpec = wbg.kernelSetCapturedSpec;
     if (typeof setSpec === 'function') {
       const spec = captureBrowserFingerprint();
@@ -907,6 +662,7 @@ async function handleFetch(event) {
   const url = new URL(req.url);
   try {
     if (isCORSPreflight(req)) return corsPreflight(req);
+    if (!cookieJarLoaded) await ensureCookieJarLoaded();
     const clientId = event.resultingClientId || event.clientId;
     const cls = classify(req, url, clientId);
     switch (cls.kind) {
@@ -914,12 +670,8 @@ async function handleFetch(event) {
       case 'PROXY_DOCUMENT': return proxyDocument(req, cls, clientId);
       case 'RUNTIME_API': return runtimeAPI(req, url, clientId);
       case 'VIRTUAL_SUBRESOURCE': return virtualSubresource(req, cls, clientId);
-      // 204 rather than a 1x1 image: "no icon", stated once and cached, so the
-      // browser stops asking and nothing is logged.
       case 'BLANK_ICON': return new Response(null, { status: 204, headers: { 'cache-control': 'max-age=86400' } });
-      // 여기가 "프록시가 못 살려 준" 요청이 실제로 죽는 자리다. 서브리소스는
-      // `Response.error()` 라 페이지 콘솔에 사유가 남지 않으므로 반드시 남긴다
-      // — 이 한 줄이 "화면이 이상하다" 를 URL 목록으로 바꾼다.
+      // Record unclassified subresource refusals in `refusalLog` because `Response.error()` produces no console reason.
       default:
         logRefusal('UNCLASSIFIED', req.mode === 'navigate' ? 403 : 0, url.href, {
           mode: req.mode, dest: req.destination, client: clientId || '', ref: req.headers.get('Referer') || '',
@@ -936,31 +688,13 @@ function classify(req, url, clientId) {
     if (isRuntimeAPIPath(url.pathname)) return { kind: 'RUNTIME_API' };
     if (url.pathname.startsWith(ZP.controlPath('error/'))) return { kind: 'INTERNAL_ASSET' };
     if (url.pathname === ZP.CONTROL_PREFIX || url.pathname === ZP.controlPath('index.html') || url.pathname === ZP.controlPath('sw.js') || internalPath(url.pathname)) return { kind: 'INTERNAL_ASSET' };
-    // A2 hardening: same-origin sub-resources must resolve a tab from an
-    // explicit signal (Referer-derived ctx or saved clientContext). No
-    // first-available-tab fallback — multi-tab leak risk.
+    // Same-origin subresources must resolve a tab from an explicit Referer or saved clientContext without falling back to an arbitrary tab.
     const ctx = contextFor(req, clientId);
     const p = parseSharePath(url.pathname);
     if (p && req.mode === 'navigate') return { kind: 'PROXY_DOCUMENT', ...p };
     if (ctx) {
-      // 프록시 오리진의 "우리 것이 아닌" 경로 = 타깃 코드가 URL 을 **문서
-      // 기준**으로 해석한 결과다. 대표적으로 런타임에 주입된 CSS:
-      //   style.textContent = '#a{background:url(/img/bg.png)}'
-      // 브라우저 CSS 엔진이 문서 URL 기준으로 풀기 때문에 프록시 오리진의
-      // `/img/bg.png` 로 나온다. htmltx 는 네트워크에서 온 바이트만 고치고
-      // 멤브레인은 CSS 엔진의 URL 해석에 손댈 수 없으므로, 이 경로를 여기서
-      // 받아 주지 않으면 런타임 CSS 서브리소스는 전부 죽는다 (실측: 루트상대
-      // <style>/insertRule/el.style/@font-face/adoptedStyleSheets 5종).
-      //
-      // ctx 가 있으면 타깃이 이미 확정돼 있으므로 `api/fetch?url=` 로 도는
-      // 것과 권한이 같다 — 새로 열리는 문은 없다. ctx 가 없으면 아래 UNKNOWN
-      // 으로 떨어진다: 탭은 절대 추측하지 않는다 (A2).
+      // Route proxy-origin relative subresources (such as runtime CSS resolved against the document URL) as virtual subresources when client context is known.
       if (url.pathname.startsWith(ZP.CONTROL_PREFIX)) {
-        // `/zp/…` 로 나온 건 위의 정상 경로와 달리 **증상**이다: 타깃 코드가
-        // 우리 내부 URL 을 손에 넣어 거기에 상대 경로를 풀었다는 뜻
-        // (예: `/zp/api/script?u=…` 로 서빙된 모듈이 `./x.js` 를 `/zp/api/`
-        // 기준으로 해석). 아래 매핑은 우리 내부 경로 모양을 업스트림에 흘리고
-        // 십중팔구 404 로 끝난다. 누가 쐈는지 남겨 두면 발신자를 특정할 수 있다.
         try {
           (self.__zpRustTrace = self.__zpRustTrace || []).push(
             `sw:zp-path-as-subresource ${url.pathname} search=${String(url.search || '(none)').slice(0, 120)} dest=${req.destination || '?'} mode=${req.mode || '?'} initiator=${String(req.referrer || '(none)').slice(-160)} ref=${String(req.headers.get('Referer') || '(none)').slice(-160)}`
@@ -970,40 +704,16 @@ function classify(req, url, clientId) {
       return { kind: 'VIRTUAL_SUBRESOURCE', ctx, sameOriginURL: url };
     }
     if (p && shareRoutes.has(p.routeKey)) return { kind: 'PROXY_DOCUMENT', ...p };
-    // The browser's own tab-icon request: proxy origin, `/favicon.ico`, and no
-    // client behind it (browser chrome issues it, not a document). It therefore
-    // resolves no ctx, lands in UNKNOWN and gets `Response.error()` — a console
-    // network error on every proxied page plus a broken tab icon.
-    //
-    // Answer it locally and empty. Asking the TARGET for an icon is not an
-    // option: icon links are deliberately stripped (`x-zeroproxy-icon`) so the
-    // tab cannot identify the site being browsed, and honouring this request
-    // upstream would reintroduce exactly that. There is no local icon file
-    // either (`build.mjs` copies one only if present, and none ships).
-    //
-    // Only the client-less case is claimed. A page-initiated `/favicon.ico`
-    // (`<img src="/favicon.ico">`) resolves a ctx and keeps going through the
-    // normal subresource path — that one IS the target's business.
+    // Answer browser-initiated /favicon.ico requests (no client ctx) with 204 so the tab does not leak the target icon or log a network error.
     if (url.pathname === '/favicon.ico' && !ctx) return { kind: 'BLANK_ICON' };
     return { kind: 'UNKNOWN' };
   }
-  // A2 hardening: same policy for cross-origin — no defaultContext() fallback.
   const ctx = contextFor(req, clientId);
   if (ctx && (url.protocol === 'http:' || url.protocol === 'https:')) return { kind: 'VIRTUAL_SUBRESOURCE', ctx, crossOriginURL: url };
   return { kind: 'UNKNOWN' };
 }
 
 function internalPath(path) {
-  // `/__zp/*` is the proxy server's static asset prefix for WASM blobs
-  // (`zp_bundle_sw_bg.wasm`, `zp_bundle_sw.js`, `zp_page_rt.wasm`, etc.)
-  // that the page prelude and SW load via root-relative URLs. Without
-  // claiming them as internal, the SW falls through to VIRTUAL_SUBRESOURCE
-  // and rewrites `/__zp/zp_page_rt.wasm` against the virtual baseUrl
-  // (e.g. `https://github.com/__zp/zp_page_rt.wasm`) — upstream 404 →
-  // page-rt fails to instantiate → URL classification falls back → some
-  // sites (GitHub) hit subtle membrane bugs that surface as React
-  // hydration errors → "Looks like something went wrong" SSR fallback.
-  // ★목록은 zp-core 가 갖는다(세 벌이었고 집합이 갈라져 있었다).
   return ZP.isInternalPath(path);
 }
 function isRuntimeAPIPath(path) {
@@ -1015,16 +725,7 @@ async function internalAsset(req, url) {
   if (url.pathname === ZP.controlPath('worker-bootstrap.js')) return workerBootstrap(url);
   if (url.pathname === ZP.CONTROL_PREFIX || url.pathname === ZP.controlPath('index.html')) return addCSP(await nativeFetch(req, { cache: 'no-store' }), req);
   if (!internalPath(url.pathname) && url.pathname !== ZP.controlPath('sw.js')) return safeError('POLICY_BLOCKED', 403);
-  // 2026-08-14 — 내부 에셋은 HTTP 캐시를 쓰게 둔다.
-  //
-  // 여기서 `cache: 'no-store'` 를 강제하면 Go 가 `no-cache` 를 줘도 소용이
-  // 없다 — SW 의 이 fetch 가 브라우저 캐시를 통째로 우회하므로 조건부 요청이
-  // 나가지 않는다. 실측: 서버 헤더만 고쳤을 때 2회차 로드도 여전히 200 × 9.
-  // 기본 모드로 두면 Last-Modified 기반 재검증이 살아나 304 로 끝난다.
-  // 신선도는 그대로다 — `no-cache` 는 매번 재검증을 강제한다.
-  //
-  // `sw.js` 는 Go 가 여전히 `no-store` 를 주므로 여기 분기가 필요 없다:
-  // 업데이트 방아쇠 경로는 서버 헤더로만 통제한다.
+  // Use the default cache mode for internal assets so `Last-Modified` conditional revalidation (`304 Not Modified`) works.
   return addCSP(await nativeFetch(req), req);
 }
 
@@ -1036,6 +737,18 @@ function parseSharePath(path) {
 
 
 
+function isChildFrameDocument(req, entry, routeState) {
+  if (routeState && routeState.frameRoute) return true;
+  if (entry && (entry.frameRoute || entry.parentTargetUrl)) return true;
+  if (req) {
+    const dest = req.destination || '';
+    if (dest === 'iframe' || dest === 'frame') return true;
+    const secDest = req.headers && req.headers.get('Sec-Fetch-Dest');
+    if (secDest === 'iframe' || secDest === 'frame') return true;
+  }
+  return false;
+}
+
 async function proxyDocument(req, route, clientId) {
   cleanupPendingSubmissions();
   const state = shareRoutes.get(route.routeKey);
@@ -1046,8 +759,11 @@ async function proxyDocument(req, route, clientId) {
     shareRoutes.delete(route.routeKey);
     return internalAsset(new Request(ZP.CONTROL_PREFIX), new URL(ZP.CONTROL_PREFIX, ORIGIN));
   }
-  tab.activeEntryId = entry.entryId;
+  const isFrame = isChildFrameDocument(req, entry, state);
+  if (isFrame) entry.frameRoute = true;
+  if (!isFrame || !tab.activeEntryId) tab.activeEntryId = entry.entryId;
   bindClientContext(clientId, tab, entry);
+  scheduleStateFlush();
   const submitId = new URL(req.url).searchParams.get('zp_submit');
   const resp = submitId
     ? await submittedDocument(req, route.routeKey, submitId, tab, entry, clientId)
@@ -1059,8 +775,11 @@ async function submittedDocument(req, routeKey, submitId, tab, entry, clientId) 
   pendingSubmissions.delete(submitId);
   if (!pending || pending.expiresAt <= Date.now()) return safeError('SUBMISSION_EXPIRED', 410, entry.targetUrl);
   if (pending.routeKey !== routeKey || pending.tabId !== tab.tabId || pending.entryId !== entry.entryId) return safeError('POLICY_BLOCKED', 403, entry.targetUrl);
-  tab.activeEntryId = entry.entryId;
+  const isFrame = isChildFrameDocument(req, entry, null);
+  if (isFrame) entry.frameRoute = true;
+  if (!isFrame || !tab.activeEntryId) tab.activeEntryId = entry.entryId;
   bindClientContext(clientId, tab, entry);
+  scheduleStateFlush();
   return transportFetch(pending.targetUrl, { request: req, document: true, method: pending.method, headers: pending.headers, body: pending.body, tab, entryId: entry.entryId });
 }
 
@@ -1085,29 +804,17 @@ async function virtualSubresource(req, cls, clientId) {
 
 function shouldRewriteCSS(req, resp) {
   if (req.destination === 'style') return true;
-  // SW-less 프레임(document.write / about:blank)의 `<link>` 를 부모가 대신
-  // 받아 blob 으로 물려줄 때 쓰는 신호. 그 fetch 는 destination 이 'empty' 라
-  // 위 판정을 못 타는데, 리라이트가 빠지면 `url(...)` 이 상대경로로 남아
-  // blob: 을 base 로 해석돼 배경이 전부 깨진다.
+  // Recognize stylesheet requests proxied via `fetch()` by a parent frame on behalf of an uncontrolled child document.
   if (req.headers.get('X-ZP-Style-Request') === '1') return true;
   const ct = resp && resp.headers && resp.headers.get('Content-Type') || '';
   return /\btext\/css\b/i.test(ct);
 }
 async function rewriteCSSResponse(resp, opt) {
-  // Read the body once; CSS rewrite uses swc_css and rewrites url(...) /
-  // @import to /zp/api/fetch?url=<absolute> so subresources route through
-  // the SW the same way scripts do. On parse failure, ship the original
-  // body — runtime-prelude DOM hooks still contain navigation.
+  // Rewrite CSS url(...) and @import references to /zp/api/fetch?url=<absolute>, falling back to the original body on parse failure.
   let css = '';
-  try { css = await resp.text(); } catch { return resp; }
+  try { css = (await decodeResponseText(resp, false)).text; } catch { return resp; }
   let out = css;
   try {
-    // 2026-06-08 split-bundle (c.1) Step 4: CSS rewriter ported to ZPBundle
-    // (SWC-based, same surface). The legacy ZPRewriter is being deleted in
-    // this step; the wbg wrapper exposes `rewriteCSS(source, base_url,
-    // control_prefix)` (positional) which throws a `CSS_PARSE_FAILED`
-    // JsError on parse failure — both cases fall through to ship the
-    // original body.
     if (self.ZPBundle && self.ZPBundle.ready && typeof self.ZPBundle.rewriteCSS === 'function') {
       const code = self.ZPBundle.rewriteCSS(css, opt.targetUrl || '', ZP.CONTROL_PREFIX);
       if (typeof code === 'string' && code.length > 0) out = code;
@@ -1120,14 +827,8 @@ async function rewriteCSSResponse(resp, opt) {
   return new Response(out, { status: resp.status, statusText: resp.statusText, headers });
 }
 
-// ── HLS playlists ─────────────────────────────────────────────────────────────
-//
-// A `<video src="….m3u8">` is played by the browser's own HLS player, and that player fetches the playlist's variants, keys,
-// init segments and segments ITSELF, in the media stack: the page's hooks never see those URLs. They are absolute target
-// URLs (refused by `media-src 'self' blob:`, so the video stays blank — no leak) or relative ones, resolved against the
-// route the playlist came from. So the playlist is rewritten on its way to a media element: every URI becomes the proxy
-// route for its absolute target. A page that plays HLS through fetch/XHR (hls.js) is not touched — it resolves URLs itself,
-// in the membrane, and its request is not a media element's.
+// Native media elements fetch HLS variants, keys, and segments directly in the browser media stack, bypassing page hooks.
+// Rewrite playlist URIs to /zp/api/fetch?url=<absolute> when the request originates from a video or audio element.
 const PLAYLIST_TYPE_RE = /\b(?:application\/(?:vnd\.apple\.mpegurl|x-mpegurl|mpegurl)|audio\/(?:x-)?mpegurl)\b/i;
 const PLAYLIST_PATH_RE = /\.m3u8?$/i;
 function isMediaElementRequest(req) {
@@ -1137,20 +838,15 @@ function isPlaylistResponse(resp, targetUrl) {
   if (!resp || (resp.status !== 200 && resp.status !== 206)) return false;
   const ct = resp.headers.get('Content-Type') || '';
   if (PLAYLIST_TYPE_RE.test(ct)) return true;
-  // a CDN that serves it as plain bytes
   let path = '';
   try { path = new URL(targetUrl).pathname; } catch {}
   return PLAYLIST_PATH_RE.test(path) && (!ct || /^(?:text\/plain|application\/octet-stream|binary\/octet-stream)\b/i.test(ct));
 }
-// A media element's request for something that looks like a playlist: it is rewritten whole, so it is asked for whole. (The
-// transport copies the browser's own headers, `Range` included — `bytes=0-` is how a media element starts — and a CDN
-// answers that with a 206 of the original bytes.)
+// Strip Range on media element requests targeting playlists so the full playlist can be rewritten before slicing.
 function isPlaylistTarget(req, targetUrl) {
   if (!isMediaElementRequest(req)) return false;
   try { return PLAYLIST_PATH_RE.test(new URL(targetUrl).pathname); } catch { return false; }
 }
-// One URI of a playlist (or a `URI="…"` attribute) → the proxy route for its absolute target. Anything that is not http(s)
-// once resolved is left as it is: the browser refuses it, CSP included.
 function playlistProxyURI(uri, baseUrl, tab) {
   const t = String(uri).trim();
   if (!t) return uri;
@@ -1167,8 +863,7 @@ function rewritePlaylistText(text, baseUrl, tab) {
   }).join('');
 }
 async function rewritePlaylistResponse(req, resp, opt) {
-  // A playlist is rewritten whole; a partial one (the browser asked for a range) is fetched again without it, and the
-  // range is answered from the rewritten bytes.
+  // Refetch partial (206) playlist responses whole before rewriting, then serve any requested byte range from the rewritten buffer.
   let source = resp;
   if (resp.status === 206) {
     try { source = await opt.refetch(); } catch { return resp; }
@@ -1205,16 +900,8 @@ function sameOriginTargetURL(sameOriginURL, ctx) {
 }
 
 async function runtimeAPI(req, url, clientId) {
-  // A2 hardening: privileged API endpoints must resolve a tab from an
-  // explicit signal (URL ?tab=, referer-derived context, or client context).
-  // No first-available-tab fallback — multi-tab requests must not piggy-back.
+  // Privileged API endpoints must resolve a tab from an explicit signal (?tab=, Referer context, or clientContext).
   if (url.pathname === '/zp/api/diag/trace') {
-    // Connection-timing investigation: classify every tx:* line by host
-    // and pattern. Produces five histograms — tls / socks5 / mux / http
-    // for h2-reuse vs first-handshake — so we can tell whether the
-    // dominant cost is TLS, SOCKS5 dial, mux open, or actual upstream
-    // RTT. Per-host first-tls also separates "many cold origins" from
-    // "one host but slow handshake".
     const ring = Array.isArray(self.__zpRustTrace) ? self.__zpRustTrace.slice() : [];
     if (url.searchParams.get('clear') === '1') { try { self.__zpRustTrace = []; } catch {} }
     const head = {};
@@ -1248,17 +935,10 @@ async function runtimeAPI(req, url, clientId) {
       }
       const totV = pull('total'); if (totV != null) stat(tag + '.total', totV);
     }
-    // Phase 5.8 diag: when ?filter=<substr> is provided, return matching
-    // raw trace lines (last 50). Useful for "why is github.com h2-err?"
-    // kind of investigation — the aggregated buckets hide the exact line.
     const filter = url.searchParams.get('filter') || '';
     const rawMatches = filter
       ? ring.filter(l => l.includes(filter)).slice(-50)
       : [];
-    // Phase 5.9 named_groups dump from rustls fork's apply_chrome_ja3_shape.
-    // 2026-06-08 split-bundle (c.3): kernel surface moved to `self.ZPKernel`.
-    // Only available after the kernel wasm has been lazy-instantiated by
-    // a prior `transportFetch`; if not yet, just leave the field empty.
     let namedGroups = '';
     try {
       if (self.ZPKernel && typeof self.ZPKernel.kernelLastNamedGroups === 'function') {
@@ -1277,9 +957,7 @@ async function runtimeAPI(req, url, clientId) {
     }, null, 2), { status: 200, headers: { 'Content-Type': 'application/json' } });
   }
   if (url.pathname === '/zp/api/fetch' || url.pathname === ZP.apiPath('v2/fetch')) {
-    // GET ?url=<absolute> — issued by the CSS rewriter for url(...) / @import
-    // subresources. Routes the same way as the POST form below but takes the
-    // target from the query string. v1 전용 — v2 는 POST 봉투 뿐이다.
+    // GET ?url=<absolute> serves rewritten CSS url(...) / @import subresources and iframe navigations (v1 only).
     const ctx = contextFor(req, clientId);
     if (req.method === 'GET') {
       if (url.pathname !== ZP.apiPath('fetch')) return safeError('POLICY_BLOCKED', 405);
@@ -1288,12 +966,7 @@ async function runtimeAPI(req, url, clientId) {
       const explicitTab = url.searchParams.get('tab') && tabs.get(url.searchParams.get('tab'));
       const tab = explicitTab || (ctx && tabs.get(ctx.tabId));
       if (!tab) return safeError('SW_NOT_READY', 503, target || req.url);
-      // Iframe / sub-frame navigation through /zp/api/fetch: rewrite of
-      // <iframe src=absolute> by zp-htmltx routes here. We need to (a) give
-      // the iframe its own entry so its virtual baseURI is the iframe's
-      // target (not the parent's), (b) bind the iframe's clientId so its
-      // subresources resolve context, and (c) inject prelude + CSP via
-      // transformDocumentResponse so the iframe is fully contained.
+      // Allocate a dedicated entry and bind clientId for iframe/document navigations so subresources resolve against the frame's target URL.
       const isDocumentRequest = req.mode === 'navigate'
         || req.destination === 'iframe'
         || req.destination === 'document'
@@ -1304,22 +977,23 @@ async function runtimeAPI(req, url, clientId) {
       let entry;
       let entryId;
       if (isDocumentRequest) {
+        const isFrameRequest = req.destination === 'iframe'
+          || req.destination === 'frame'
+          || req.headers.get('Sec-Fetch-Dest') === 'iframe'
+          || req.headers.get('Sec-Fetch-Dest') === 'frame';
         let canonical = target;
         try { canonical = ZP.canonicalTargetURL(target).href; } catch {}
         entryId = randomEntryId();
-        entry = { entryId, targetUrl: canonical, baseUrl: canonical, title: '', stateClone: null, scrollX: 0, scrollY: 0, createdAt: Date.now() };
+        entry = { entryId, targetUrl: canonical, baseUrl: canonical, title: '', stateClone: null, scrollX: 0, scrollY: 0, createdAt: Date.now(), frameRoute: isFrameRequest };
         tab.entries.set(entryId, entry);
+        if (!isFrameRequest || !tab.activeEntryId) tab.activeEntryId = entryId;
         bindClientContext(clientId, tab, entry);
+        scheduleStateFlush();
       } else {
         entryId = (ctx && ctx.entryId) || (explicitTab && explicitTab.activeEntryId) || tab.activeEntryId;
         entry = tab.entries.get(entryId);
       }
       rememberResourceContext(url, target, { tabId: tab.tabId, entryId, targetUrl: target, baseUrl: target });
-      // Script destination must go through the rewriter: zp-htmltx routes
-      // <script src=ABS> here, and naked target JS would access native
-      // `window`/`location`, bypassing the membrane. Detect via Sec-Fetch-Dest
-      // / req.destination and route the response through rewriteScriptResponse
-      // exactly like /zp/api/script.
       const isScriptRequest = !isDocumentRequest && (
         req.destination === 'script'
         || req.destination === 'worker'
@@ -1334,7 +1008,6 @@ async function runtimeAPI(req, url, clientId) {
           ? [['Accept', 'text/javascript, application/javascript, */*;q=0.8']]
           : [['Accept', '*/*']];
       const elementCors = isDocumentRequest ? null : elementCorsOptions(req, entry);
-      // A media element's range request goes upstream as it is (it seeks) — except a playlist's, which is rewritten whole.
       const mediaRequest = !isDocumentRequest && !isScriptRequest && isMediaElementRequest(req);
       const resp = await transportFetch(target, Object.assign({ request: req, method: 'GET', headers: accept, tab, entryId, document: isDocumentRequest, noRange: mediaRequest && isPlaylistTarget(req, target) }, elementCors));
       if (elementCors && resp.type === 'error') return resp;
@@ -1349,9 +1022,7 @@ async function runtimeAPI(req, url, clientId) {
       return shouldRewriteCSS(req, resp) ? rewriteCSSResponse(resp, { targetUrl: target }) : resp;
     }
     if (req.method !== 'POST') return safeError('POLICY_BLOCKED', 405);
-    // v2 는 바이너리 봉투([u32le headLen][JSON head][raw body]) — v1 의
-    // base64-in-JSON 을 대체한다. head 모양은 v1 payload 와 동일하고
-    // 바디만 꼬리의 raw bytes 로 온다. v1 경로는 그대로 유지.
+    // v2 uses a binary envelope ([u32le headLen][JSON head][raw body]) instead of base64-in-JSON.
     const isV2 = url.pathname === ZP.apiPath('v2/fetch');
     let payload, bodyBytes;
     if (isV2) {
@@ -1376,8 +1047,7 @@ async function runtimeAPI(req, url, clientId) {
       redirect: init.redirect || 'follow', referrer: init.referrer,
       referrerPolicy: init.referrerPolicy || '',
     });
-    // A network error (a failed CORS check, a refused redirect, …) reaches the page as one fetch() rejection.
-    // A bare `Response.error()` would look like a dead endpoint to it, and it would ask again.
+    // Encode network/CORS errors in X-ZP-Fetch-Meta so the page rejects fetch() without treating the SW endpoint as unreachable.
     if (resp.type === 'error') return new Response(null, { status: 200, headers: { 'X-ZP-Fetch-Meta': JSON.stringify({ type: 'error' }) } });
     const headers = new Headers(resp.headers);
     corsFilterHeaders(headers, resp.__zpFetchMeta && resp.__zpFetchMeta.expose);
@@ -1387,98 +1057,16 @@ async function runtimeAPI(req, url, clientId) {
   if (url.pathname === '/zp/api/script') {
     if (req.method !== 'GET') return safeError('POLICY_BLOCKED', 405);
     const target = url.searchParams.get('u');
-    // 페이지가 요청 시점의 가상 문서 URL 을 실어 보낸다 — entry.baseUrl 은
-    // history.replaceState 직후 같은 틱 요청에서 낡아 있을 수 있다.
+    // Prefer the page-supplied `ref` parameter over `entry.baseUrl`, which may not yet reflect a same-tick `history.replaceState` call.
     const refOverride = url.searchParams.get('ref') || '';
     const kind = url.searchParams.get('kind') || 'classic';
     const scriptCtx = contextFor(req, clientId);
     const explicitTab = url.searchParams.get('tab') && tabs.get(url.searchParams.get('tab'));
     const tab = explicitTab || (scriptCtx && tabs.get(scriptCtx.tabId));
     if (!target || !tab) return safeError('SW_NOT_READY', 503, target || req.url);
-    // NAVER anti-bot (WTM / nCaptcha) — 차단은 **전부 걷혔다**(2026-08-12).
-    //
-    // 그동안 이 자리에 wtm/ncpt 스텁이 있었고, 그 명분은 "실행시키면 렌더러가
-    // 굳는다" 였다. 그 wedge 의 진짜 원인은 남의 코드가 아니라 우리 코드였다:
-    //   ① `runtime-prelude.js` 의 `Notification.permission` 게터가 폴백으로
-    //      자기 자신을 읽어 **무한 재귀**했다. WTM 의 wasm 이 속성 목록
-    //      `["navigator.permissions.query(...).state","Notification.permission"]`
-    //      을 읽는 순간 스택 오버플로 폭풍이 나고 렌더러가 수십 초 멈췄다.
-    //   ② `script.src` 가 프록시 URL 을 흘려 webpack publicPath 가 깨졌고,
-    //      그 탓에 SDK 가 순수 JS 프로버로 폴백하며 `ncpt/errorLog` 를 쏟았다.
-    // 둘 다 고쳤다. 측정: 차단 유지 6/6 ALIVE, **ncpt 차단 해제 5/5 ALIVE**,
-    // `__zp_diagnostics` 0.
-    //
-    // 걷은 이득이 크다. 차단이 켜져 있으면 `ncaptcha-api.js` 가 40바이트 스텁이
-    // 되어 `nhomz` 가 정의되지 않고 캡차가 **원천 봉쇄**된다. 지금은 실제로
-    // 78,954바이트가 로드되고 `nhomz` (1.11.1-wasm), `initNcaptcha`,
-    // `__ncaptcha_api` 가 전부 정의된다.
-    //
-    // 다시 막고 싶어지면: 증상만 보고 스텁을 넣지 말 것. 이 두 버그처럼
-    // **원인이 우리 쪽일 수 있다**. 그리고 해시로 핀한 차단은 벤더가 빌드를
-    // 갈면 조용히 죽으므로(`fce46da` → `1baa7f7` 에서 실제로 그랬다) 쓰지 말 것.
-    //
-    // ntm.pstatic.net (ntm_<hex>.js) is deliberately NOT blocked: it looked
-    // like the same 121 s symptom, but stubbing it removes more ad inventory
-    // than it fixes (GFP SDK uses ntm as a bid-token source).
-    // (아래는 차단 목록의 역사 기록이다. 실행 코드는 남아 있지 않다 —
-    //  같은 실수를 반복하지 않도록 왜 넣었고 왜 걷었는지를 남긴다.)
     {
-      // DIAG: incrementally block NAVER ad / anti-bot SDKs to isolate which
-      // one wedges V8 once NACT unlocks the heavy tracker bundle. The Veta
-      // ad core, GFP display SDK, and NAC synchronizer all contain logic
-      // that probes for membrane traces and busy-loops when proxied. NTM
-      // is left enabled (prior session note: blocking it broke GFP bid
-      // tokens and removed more ad inventory than it fixed).
-      // (NAVER pm.pstatic.net / ssl.pstatic.net SDK bundle blocks removed
-      // 2026-06-05 after the wedge root cause (`window.ZP` enumeration via
-      // getOwnPropertyNames) was fixed by runtime-prelude closure-capture +
-      // delete and the rewriter loop-cap rule landed. See the longer
-      // explanation block below and `.ai/trap-notebook/real-site-compat.md`
-      // 2026-06-05 entry.)
-      // NAVER warm-session V8 wedge — historical block list. The probe
-      // root cause (2026-06-05) is now understood: NAVER's anti-bot scripts
-      // enumerated `Object.getOwnPropertyNames(window)` and tripped on the
-      // `ZP` / `ZeroProxyRT` named properties (defineProperty with
-      // `enumerable: false` still appeared in getOwnPropertyNames per spec).
-      // runtime-prelude now captures both into closure-locals and deletes
-      // them, and the rewriter caps any literal `for(;;)` / `while(true)`
-      // / `while(1)` / `do while(true)` shape after 10 M iterations
-      // (defense-in-depth even for sites whose probe slipped past the
-      // fingerprint hide). With those two landed, the manual block list is
-      // no longer load-bearing — Edge real-browser verification (2026-06-05)
-      // showed NAVER renders the full page including the previously
-      // blocked bundles. Removing the block also lets GFP / NAC / Veta
-      // deliver ad inventory again ("기능적으로 완전한 가상 브라우징"
-      // strict-mode aim).
-      //
-      // If a future NAVER probe shape resurfaces a wedge, re-introduce
-      // a targeted block here AND file a trap-notebook entry naming the
-      // specific signal — the right long-term fix is to add a new
-      // hardening to runtime-prelude or zp-rewriter, not to grow this
-      // list silently.
     }
-    // request 자체를 transportFetch 에 전달 → browser-set headers (Accept,
-    // sec-ch-ua-* 등) 가 upstream 으로 전달됨. 명시 headers 만 보내면 upstream
-    // anti-bot 회로가 404 NAVER 페이지를 반환하는 경우가 있음 → SafeFrame
-    // loader 미실행 → 광고 미렌더. virtualSubresource 경로와 동일 패턴 유지.
-    // ★entry 는 **요청한 프레임의 것**이어야 한다. `tab.activeEntryId` 는
-    // 탭에서 가장 최근에 만들어진 문서를 가리키므로, iframe 이 하나라도 뜨면
-    // 최상위 문서의 스크립트 요청이 **남의 프레임 entry** 를 물고 나간다.
-    // 그러면 (a) 업스트림이 받는 Referer 가 엉뚱한 프레임의 URL 이 되고
-    // (다른 임베드 프레임의 주소가 제3자에게 새는 것이기도 하다),
-    // (b) 페이지가 실어 보낸 `ref` 는 same-origin 가드에 걸려 **버려진다** —
-    // 정확히 그 가드가 고쳐 줬어야 할 상황에서.
-    // CNN 실측(2026-08-25): prebid 를 받는
-    // `micro.rubiconproject.com/prebid/dynamic/11016.js` 요청이
-    // `ref=https://edition.cnn.com/` 를 정확히 실어 보냈는데도 entry 가
-    // optimizely iframe 이라 Referer 가 그 iframe URL 로 나갔고, rubicon 은
-    // Referer 로 빌드를 고르므로 **v11.18.5 대신 레거시 v4.43.0** 을 줬다.
-    // CNN 의 adfuel 은 v11 API 를 기대하므로 경매가 아예 안 돌았다
-    // (pbjs.getEvents() 대조군 73 vs 프록시 0, 프레임 31 vs 11).
-    // 아래 /zp/api/fetch 경로는 이미 ctx 를 먼저 본다 — 여기만 빠져 있었다.
-    // A srcdoc frame is controlled for its fetches but `navigator.serviceWorker.controller` is null in it, so it cannot
-    // bind itself to its tab with a message: the markup walked for it names its tab and entry in the script URL, and
-    // its first script request binds it (as a worker's first request does) for everything it asks for afterwards.
+    // Bind `srcdoc` frames to their entry on their first script request via the `entry` query parameter.
     const urlEntry = explicitTab && url.searchParams.get('entry');
     const namedEntry = urlEntry && explicitTab.entries.get(urlEntry);
     if (!scriptCtx && namedEntry && clientId) bindClientContext(clientId, explicitTab, namedEntry);
@@ -1494,18 +1082,11 @@ async function runtimeAPI(req, url, clientId) {
     const ctx = contextFor(req, clientId);
     const tab = explicitTab || (ctx && tabs.get(ctx.tabId));
     if (!target || !tab) return safeError('SW_NOT_READY', 503, target || req.url);
-    // entry 는 요청한 프레임의 것 — /zp/api/script 와 같은 이유(위 주석).
-    // module 워커 본문은 module kind 로 리라이트해야 import/export 문법이 산다.
     const kind = url.searchParams.get('kind') === 'module' ? 'module' : 'worker';
     const wsEntryId = (ctx && ctx.entryId) || tab.activeEntryId;
-    // 이 요청의 발신자는 **워커 클라이언트**다 — `?tab=` 을 명시로 들고 왔으니
-    // 여기서 탭에 바인딩해 둔다. 안 하면 이 워커의 후속 요청(모듈 dep 의
-    // `/zp/api/script?u=…` — Rust 방출 specifier 에는 tab 파라미터가 없다)이
-    // ctx 를 못 찾아 503 으로 죽는다.
+    // Bind the worker client to the tab so subsequent module dependency fetches resolve their client context.
     bindClientContext(clientId, tab, tab.entries.get(wsEntryId) || { entryId: wsEntryId, targetUrl: target, baseUrl: target });
-    // D5: srctok 는 blob:/data: 소스 stash — transportFetch 대신 stash 소스를
-    // 같은 재작성 파이프라인으로 보낸다. target 은 이 경우 blob:/data: URL
-    // (워커 location parity)이고 내부 상대 specifier 는 그것을 base 로 풀린다.
+    // Serve stashed `blob:`/`data:` worker sources from `workerSrcStash` when `srctok` is present.
     const srcTok = url.searchParams.get('srctok');
     let upstream;
     if (srcTok) {
@@ -1513,8 +1094,7 @@ async function runtimeAPI(req, url, clientId) {
       workerSrcStash.delete(srcTok);
       upstream = stashed == null ? null : new Response(stashed, { status: 200, headers: { 'Content-Type': 'text/javascript; charset=utf-8' } });
     } else {
-      // The browser fetches a worker's script as `same-origin` / `worker` (`sharedworker`). Here the worker's bootstrap asks
-      // for it, so its own request says nothing of that: the server is told what the browser would have said.
+      // Supply worker fetch metadata explicitly because the bootstrap request originates from inside the worker.
       let workerDest = 'worker';
       try { const client = clientId && await self.clients.get(clientId); if (client && client.type === 'sharedworker') workerDest = 'sharedworker'; } catch {}
       upstream = await transportFetch(target, { method: 'GET', headers: [['Accept', 'text/javascript,*/*']], tab, entryId: wsEntryId, fetchMeta: { mode: 'same-origin', dest: workerDest } });
@@ -1524,11 +1104,7 @@ async function runtimeAPI(req, url, clientId) {
     return rewritten;
   }
   if (url.pathname === ZP.apiPath('sourcemap')) {
-    // D2: serve the composed Source Map v3 JSON for a previously-rewritten
-    // script. DevTools requests this when the operator opens the script in
-    // the Sources panel; the URL is the `//# sourceMappingURL=…` we appended
-    // in rewriteScriptResponse. Cache-Control: no-store so a re-rewrite
-    // (transformer version bump, etc.) invalidates the cached map.
+    // Serve composed Source Map v3 JSON for a rewritten script.
     const target = url.searchParams.get('u') || '';
     const kind = url.searchParams.get('k') || 'classic';
     if (!target) return safeError('POLICY_BLOCKED', 400);
@@ -1542,13 +1118,8 @@ async function runtimeAPI(req, url, clientId) {
       }
       const upstream = await transportFetch(target, { method: 'GET', headers: [['Accept', 'text/javascript,*/*']], tab, entryId: (ctx && ctx.entryId) || tab.activeEntryId });
       if (!upstream || upstream.status >= 400) return safeError('TARGET_HTTP_FAILED', 502, target);
-      const source = await upstream.text();
-      // D2 follow-on: chain with the target site's *original* `.map`
-      // when one is referenced. DevTools then walks straight to
-      // pre-bundle TypeScript / pre-minify source instead of stopping
-      // at the bundled .js. Best-effort — if the upstream map can't be
-      // fetched or is malformed, the chained composer falls back to
-      // the unchained map (never breaks DevTools).
+      const source = (await decodeResponseText(upstream, false)).text;
+      // Chain with the upstream source map when available, falling back to the unchained rewriter map.
       const originalMapJson = await fetchOriginalSourceMap(source, target, tab).catch(() => '');
       const mapJson = originalMapJson && typeof self.ZPBundle.composeSourceMapChained === 'function'
         ? self.ZPBundle.composeSourceMapChained(source, kind, target, originalMapJson)
@@ -1561,11 +1132,7 @@ async function runtimeAPI(req, url, clientId) {
       return safeError('REWRITE_FAILED', 502, target);
     }
   }
-  // Unmatched /zp/api/* — record who asked. The page console only shows
-  // "404 (from service worker)" with a `script:1` initiator, which is not
-  // enough to find the emitter: a relative reference inside a script we serve
-  // at `/zp/api/script?…` resolves to `/zp/api/<name>` and lands here. Logging
-  // the referrer + destination identifies it in one reproduction.
+  // Log unmatched /zp/api/* requests with Referer and destination to identify relative URL leaks from rewritten scripts.
   try {
     (self.__zpRustTrace = self.__zpRustTrace || []).push(
       `sw:api-404 path=${url.pathname} dest=${req.destination || '?'} mode=${req.mode || '?'} ref=${String(req.headers.get('Referer') || '').slice(-120)}`
@@ -1574,21 +1141,13 @@ async function runtimeAPI(req, url, clientId) {
   return safeError('POLICY_BLOCKED', 404);
 }
 
-// D2 follow-on: locate the target site's original sourceMappingURL
-// pragma (RFC: `//# sourceMappingURL=…` or legacy `//@`), resolve it
-// against the script URL, and fetch the JSON through the transport so
-// the composer can chain `rewriter_map ∘ original_map`. Returns the
-// raw map JSON, or `''` when no pragma / fetch failure / non-OK status
-// / data URI parse failure. The composer's chained-mode treats `''`
-// as "no chain, use the unchained map".
+// Resolve and fetch the script's original sourceMappingURL pragma (or decode an inline data: URI), returning '' on failure.
 async function fetchOriginalSourceMap(source, target, tab) {
-  // Last pragma wins per Source Map v3 §A.3. Tolerate `//#` and
-  // legacy `//@` and arbitrary whitespace after the marker.
+  // Last pragma wins per Source Map v3 section A.3.
   const re = /\/\/[#@]\s*sourceMappingURL=([^\s'"]+)/g;
   let m, last = null;
   while ((m = re.exec(source))) last = m[1];
   if (!last) return '';
-  // Inline data URI (typical for dev builds).
   if (last.startsWith('data:')) {
     try {
       const comma = last.indexOf(',');
@@ -1597,12 +1156,10 @@ async function fetchOriginalSourceMap(source, target, tab) {
       const payload = last.slice(comma + 1);
       const isBase64 = /;\s*base64\b/i.test(meta);
       const decoded = isBase64 ? atob(payload) : decodeURIComponent(payload);
-      // Reject obviously non-JSON to avoid passing garbage to the parser.
       if (!decoded.trimStart().startsWith('{')) return '';
       return decoded;
     } catch { return ''; }
   }
-  // Resolve against the script URL.
   let absUrl;
   try { absUrl = new URL(last, target).toString(); } catch { return ''; }
   try {
@@ -1617,82 +1174,16 @@ async function fetchOriginalSourceMap(source, target, tab) {
   } catch { return ''; }
 }
 
-// 2026-06-10 NAVER 광고/트래커 instant-stub list. NAVER WAF 는 비신뢰
-// IP (residential / VPN / proxy) 에서 광고/anti-bot 트래커 endpoint 를
-// 60s slow-lane 후 응답하는 design — 우리 IP/JA3 가 분류받으면 우회 불가
-// (trap notebook 2026-06-02 IP-reputation gate 결정적 측정). 그 60s 가
-// page hydration chain (메뉴/link binding) 의 await 안에 있어서 첫 NAVER
-// 진입 = 1분 이상 wait. transportLatency telemetry 로 확정한 endpoints:
-//   nam.veta.naver.com/gfp/v1   → 200, 62820ms, 0 bytes (광고 bid)
-//   siape.veta.naver.com/fxshow → 200, 62878ms, 0 bytes (sidebar 광고)
-//   ntm.pstatic.net/scripts/ntm_xxx.js → 200, 64742ms, 206 KB (트래커 WASM)
-// 
-// **Stub 결정**: dogfood 가능성 우선 → 세 host 모두 instant 204.
-// **광고 trade-off** (trap notebook 2026-06-02 ntm reject 항목): ntm block
-// 시 정상 작동 광고들 (premium / da_public / veta) 모두 about:blank
-// iframes 로 깨짐. 그러나 우리 환경에선 이미 nam.veta/siape.veta stub 으로
-// 광고 인벤토리가 어차피 채워지지 않음 → ntm 도 stub 해도 손해 boundary
-// 작음. 광고 자체 보다 메뉴/페이 link 빠른 반응이 dogfood UX 우선.
-// 
-// production deployment 시 광고 표시 원하면 ntm 만 list 에서 제거 + 첫
-// 진입 1분 wait 받아들이거나 SW response cache 구현 (별도 트랙).
-// 2026-07-29 — EMPTIED. The 60s these stubs existed to dodge was NOT a NAVER
-// WAF slow-lane: it was our own transport bug (rustls `read_tls` returns one
-// record per call, and `TlsStream::poll_read` polled the socket before feeding
-// the ciphertext it already held, so a fully-delivered response sat undecrypted
-// until the peer's next keepalive PING — exactly 60s). See trap-notebook
-// 2026-07-28. A direct HTTP/2 probe to www.naver.com from the same IP showed
-// last-data and END_STREAM arriving with gap=0ms, 3/3.
-//
-// With the real cause fixed, stubbing these actively BREAKS the page: the `{}`
-// bodies show up as empty panels in NAVER's own UI and the 1×1 PNG blanks every
-// news/card thumbnail. Keep the lists (and this history) so a regression can be
-// bisected by re-adding a host, but ship empty.
 const NAVER_AD_BID_STUB_HOSTS = new Set([]);
 
-// 2026-06-10 NAVER dynamic thumbnail proxy (`s.pstatic.net/dthumb.phinf/...`)
-// 도 NAVER WAF 의 추가 slow-lane endpoint — 비신뢰 IP 에서 20s+ wait
-// (transportLatency 측정값: 4 개 × 20040ms = 80s). 페이지의 핵심 이미지
-// (뉴스/카드 thumbnail) 들이 여기 — 그래서 dthumb 응답이 늦으면 page
-// hydration 완성 안 됨. ntm 과 같이 stub 으로 우회 — 차이점은 이미지라
-// 1×1 transparent PNG 로 응답 (binary 이미지 응답). 결과: thumbnail 빈
-// 자리 (UI 깨짐 visible) trade-off, dogfood 가능성 우선.
-// 2026-07-29 — EMPTIED for the same reason as NAVER_AD_BID_STUB_HOSTS above:
-// the "20s+ per dthumb request" this worked around was our TLS read lost
-// wakeup, not a WAF slow-lane. Stubbing blanked every news/card thumbnail.
 const NAVER_IMAGE_STUB_PATHS = [];
 
-// 2026-06-11 NAVER 광고 SDK ES module stub. **좁은 매칭만** — 광고 SDK 의
-// `gfp-display-glog-logger.js` (logger 전용, dynamic import fail 의 cascade
-// source) 만 빈 module 로 stub. **절대 매치 안 시킬 path**:
-// `gfp-display-sdk.js` (광고 SDK 메인, 168 KB), `gfp-display-nda.js`
-// (정상 작동 SDK), `gfp-core.js`. 너무 광범위한 `gfp-display-*` 패턴은
-// SDK 메인까지 stub 해서 광고 SDK init fail → page hydration 지연
-// (2026-06-11 회귀: 사용자 보고 "또 오래 걸림"). Logger 만 빈 module 로
-// 대체하면 (a) dynamic import 즉시 resolve, (b) SDK 메인은 정상 init,
-// (c) logging 만 silent — page hydration 정상 진행.
-// 2026-06-11: stub 제거. glog-logger 를 빈/Proxy module 로 stub 하면 SDK 의
-// named import 또는 생성자 호출에서 "t is not a constructor" throw (회귀).
-// gfp-display-sdk.js (168 KB) 가 정상 fetch+rewrite 되는 것 확인됐으니
-// glog-logger 도 정상 fetch 경로로 두고, dynamic import 실패의 진짜
-// 원인 (rewriter 의 module 변환 / transport) 을 별도 진단. 빈 list 면
-// 아래 stub 분기 no-op.
 const NAVER_AD_MODULE_STUB_PATTERNS = [];
-// 1×1 transparent PNG (67 bytes) — Web 표준 가장 작은 valid PNG.
 const TRANSPARENT_PNG_BYTES = Uint8Array.from(
   atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkAAIAAAoAAv/lxKUAAAAASUVORK5CYII='),
   c => c.charCodeAt(0)
 );
 
-// 2026-06-10 SW response cache for static assets. NAVER cold-load 의 824
-// requests / 3163s 누적 wait 의 진짜 원인은 SW 가 모든 fetch 를 매번 cold
-// path 로 보낸다는 것 — 브라우저 native HTTP cache 를 SW 가 가로채니
-// 활용 불가. 두 번째 진입 / 새로고침 시 같은 immutable static asset (hash
-// URL 인 `.js`, `.css`, `.png` 등) 을 또 fetch. Cache API 로 SW lifetime
-// 지속되는 persistent cache 를 유지 — GET + 200 + static extension 매치
-// 응답만 cache. NAVER hash URL (`ntm_xxx.js`, `preload.20fd9b94.js`) 은
-// content-addressed 라 invalidation 신경 안 써도 됨. cache version key 로
-// 전체 무효화 가능.
 const RESPONSE_CACHE_NAME = 'zp-resp-v1';
 const STATIC_ASSET_EXT_RE = /\.(?:js|css|png|jpg|jpeg|gif|svg|webp|woff2?|ttf|otf|ico|mp3|mp4|wasm)(?:\?|$)/i;
 
@@ -1710,24 +1201,14 @@ async function tryRespCachePut(url, response) {
   } catch {}
 }
 
-// Referrer-Policy 를 우리도 지킨다. 예전에는 정책을 **전혀 안 봤고** 언제나
-// 문서의 전체 URL(쿼리 포함)을 Referer 로 실었다. 실측(2026-08-25 픽스처):
-// 타깃이 `Referrer-Policy: no-referrer` 를 선언해도 우리는 전체 URL 을 보냈다 —
-// 타깃이 명시적으로 금지한 것을 우리가 대신 흘린 것이고, 브라우저 기본
-// (strict-origin-when-cross-origin) 과도 달라 그 자체가 지문이다.
-//
-// 정책 자체는 지어낼 필요가 없다: 브라우저가 요청마다 계산해서
-// `Request.referrerPolicy` 로 넘겨준다 — **문서 정책과 요소의
-// `referrerpolicy` 속성이 이미 반영된 값**이다(측정: 같은 문서 안에서
-// `no-referrer` 와 `unsafe-url` 이 요청별로 따로 나온다).
+// Compute the outgoing `Referer` header value according to the active `Referrer-Policy`.
 function refererForPolicy(base, targetUrl, policy) {
   let b, tgt;
   try { b = new URL(base); tgt = new URL(targetUrl); } catch { return ''; }
   if (b.protocol !== 'http:' && b.protocol !== 'https:') return '';
   const sameOrigin = b.origin === tgt.origin;
-  // "downgrade" 는 https → http 뿐이다(http → https 는 업그레이드다).
   const downgrade = b.protocol === 'https:' && tgt.protocol === 'http:';
-  // 전체 URL 이라도 자격증명과 프래그먼트는 절대 싣지 않는다(명세).
+  // Strip credentials and fragment identifiers before emitting a `Referer` URL.
   const full = () => { try { const c = new URL(b.href); c.username = ''; c.password = ''; c.hash = ''; return c.href; } catch { return ''; } };
   const originOnly = () => b.origin + '/';
   switch (String(policy || '').toLowerCase()) {
@@ -1738,42 +1219,13 @@ function refererForPolicy(base, targetUrl, policy) {
     case 'same-origin': return sameOrigin ? full() : '';
     case 'strict-origin': return downgrade ? '' : originOnly();
     case 'no-referrer-when-downgrade': return downgrade ? '' : full();
-    // 빈 문자열이면 브라우저 기본과 같게 판단한다.
     case 'strict-origin-when-cross-origin':
     default:
       if (downgrade) return '';
       return sameOrigin ? full() : originOnly();
   }
 }
-// 상류가 헤더 한 줄도 주지 않은 채 멈추면 `kernelFetch` 의 promise 는
-// **영영 settle 되지 않는다**. 그 위에 데드라인이 하나도 없어서 (Rust 쪽
-// 주석은 "caller does this on a deadline timeout" 이라고 적어 두었지만 그
-// caller 가 없었다) 브라우저는 무한히 기다린다. iframe 내비게이션이 이렇게
-// 되면 프레임은 `about:blank` 인 채 load 도 error 도 안 오고, 콘솔에도
-// 아무것도 안 남는다 — 화면만 비고 원인은 어디에도 없다.
-//
-// CNN 실측(2026-08-25, 계측 없는 클린 빌드): 한 번의 로드에서 요청 492건 중
-// 485건은 정상 응답, **문서 내비게이션 6건만** 끝까지 응답이 없었다. 그
-// 6프레임이 광고/동의 체인(bounce → APS)을 통째로 끊고 있었다.
-//
-// 데드라인은 원인 치료가 아니라 **경계**다. 멈춘 상류를 "보이는 실패"로
-// 바꿔서 (a) 브라우저가 프레임을 포기하고 error 문서를 커밋하게 하고,
-// (b) refusal 로그에 어느 타깃이 멈췄는지 이름을 남긴다.
-// ★이 예산은 "헤더까지" 가 아니라 **응답 전체**를 덮는다.
-//
-// 커널의 스트리밍 응답(헤더가 오면 곧바로 resolve)은 **HTTP/2 경로에만** 있다
-// (`finish_h2_response` 의 Streaming 분기). HTTP/1.1 상류는 본문을 끝까지 읽은
-// 뒤에야 `kernelFetch` 가 resolve 하므로, 여기 건 타이머는 곧 전송 전체의
-// 제한 시간이 된다.
-//
-// 실측(2026-08-26, 로컬 픽스처): 헤더를 10초 늦춘 h1 문서는 정상 로드되고,
-// 헤더는 즉시 주되 본문을 35초에 걸쳐 흘리는 h1 문서는 20초 예산에서 잘려
-// 에러 페이지가 됐다 — 대조군 브라우저는 점진적으로 렌더한다. 그래서 예산을
-// 90초로 둔다. 목적은 "느린 전송을 자르는 것" 이 아니라 **영원한 대기를
-// 없애는 것**이다.
-//
-// 남은 숙제: 커널이 "헤더 받음" 을 h1 에서도 알려 주면 이 값을 TTFB 기준으로
-// 바꿀 수 있고, 그때는 훨씬 짧게(20초) 잡아도 안전하다.
+// Bound upstream transport requests with an overall deadline so stalled origins do not hang indefinitely.
 const TRANSPORT_DEADLINE_MS = 90000;
 function withTransportDeadline(promise, targetUrl, method) {
   let timer = null;
@@ -1785,15 +1237,9 @@ function withTransportDeadline(promise, targetUrl, method) {
       reject(e);
     }, TRANSPORT_DEADLINE_MS);
   });
-  // clearTimeout 을 빼먹으면 정상 응답마다 타이머가 20초씩 살아남는다.
   return Promise.race([promise, deadline]).finally(() => { if (timer !== null) clearTimeout(timer); });
 }
 
-// 브라우저가 실어 보낸 Referer 를 타깃 세계의 URL 로 되돌린다. 프록시 URL 이면
-// 그 라우트의 타깃을, 프록시 밖 주소면 그대로. 못 풀면 빈 문자열 — 그 경우
-// Referer 를 아예 보내지 않는 것이 대조군과 같은 동작이다.
-// What a navigation request is for: `document` for a top-level one, `iframe`/`frame`/`embed`/`object` for a nested one.
-// `Request.destination` of the intercepted navigation says so.
 function navigationDestination(req) {
   try {
     const d = req && req.destination;
@@ -1802,9 +1248,7 @@ function navigationDestination(req) {
   return 'document';
 }
 
-// `Sec-Fetch-Mode` / `Sec-Fetch-Dest` of a sub-request. An element load (an image, a script, a stylesheet, a font, a worker)
-// reaches the worker as the browser's own request, which knows both. A script's `fetch()`/XHR is a request of the runtime
-// API; its mode is in the init the membrane forwards and its destination is `empty`.
+// Compute Sec-Fetch-Mode and Sec-Fetch-Dest for element loads vs runtime fetch()/XHR calls.
 function subrequestFetchMetadata(opt) {
   if (opt.fetchMeta) return opt.fetchMeta;
   if (!opt.runtimeFetch && opt.request) {
@@ -1819,8 +1263,6 @@ function subrequestFetchMetadata(opt) {
   return { mode, dest: 'empty' };
 }
 
-// The credentials mode of a sub-request: an element load's is on the browser's request (a `crossorigin` element's was set
-// by `elementCorsOptions`), a runtime fetch's came with its init.
 function subrequestCredentials(opt) {
   if (!opt.runtimeFetch && opt.request && !opt.fetchMeta && !opt.elementCors) {
     try { return opt.request.credentials || 'same-origin'; } catch {}
@@ -1828,8 +1270,7 @@ function subrequestCredentials(opt) {
   return opt.credentials || 'same-origin';
 }
 
-// `Sec-Fetch-Site` between an initiator URL and a target URL. Schemeful: `http://a.example` and `https://a.example` are
-// the same site only if the scheme matches too, and `same-origin` needs the port.
+// Compute schemeful Sec-Fetch-Site relation between initiatorUrl and targetUrl.
 function fetchSiteRelation(initiatorUrl, targetUrl) {
   try {
     const a = new URL(initiatorUrl);
@@ -1842,10 +1283,7 @@ function fetchSiteRelation(initiatorUrl, targetUrl) {
 
 function referrerFromBrowserHeader(req) {
   try {
-    // ★내비게이션 요청에서 Referer 는 **헤더로 읽히지 않는다** — 브라우저가
-    // 관리하는 금지 헤더라 `request.headers` 에 없다. 실측: 링크 클릭으로
-    // 넘어간 문서 요청도 헤더는 '(none)' 이었다. 값은 `request.referrer` 에
-    // 있다('about:client' 는 "기본값"이라는 뜻이라 URL 이 아니다).
+    // Read `req.referrer` first because `Referer` is a forbidden header on navigation `Request` objects, and map proxy share routes back to their target URL.
     let ref = '';
     try { const r = req && req.referrer; if (r && r !== 'about:client') ref = r; } catch {}
     if (!ref) { try { ref = (req && req.headers && req.headers.get('Referer')) || ''; } catch {} }
@@ -1896,12 +1334,9 @@ async function transportFetch(targetUrl, opt) {
     headers: new Headers(opt.headers || (opt.request && opt.request.headers) || undefined),
     credentials: opt.credentials || 'include', redirect: opt.redirect || 'follow',
     redirectDepth: 0,
-    // An opaque document's requests are cross-site: of the jar only SameSite=None travels with them, and only
-    // that may be kept from their responses. (Its own document request is made by the embedder.)
+    // Subresource requests from an opaque document are cross-site and only send/store SameSite=None cookies.
     initiatorOpaque: !!(opt.opaqueOrigin || (entry && entry.opaque)) && !opt.document,
-    // Cookies a page's own fetch/XHR got set, hop by hop (see the Set-Cookie
-    // block below): its `document.cookie` must show them when the promise
-    // resolves, and the page's copy of the jar is only a snapshot.
+    // Collect Set-Cookie deltas across redirect hops so the page's document.cookie snapshot updates before fetch/XHR resolves.
     cookieDelta: opt.runtimeFetch || opt.collectCookies ? [] : null,
   });
   return transportFetchHop(target, state);
@@ -1912,22 +1347,12 @@ async function transportFetchHop(targetUrl, opt) {
   try { u = ZP.canonicalTargetURL(targetUrl).href; } catch (e) { return safeError(e.code || 'TARGET_PROTOCOL_BLOCKED', 403, targetUrl); }
   if (opt.mode === 'same-origin' && new URL(u).origin !== opt.context.origin) return Response.error();
   const txMethod = opt.method || (opt.request && opt.request.method) || 'GET';
-  // NAVER 광고/트래커 instant-stub — see NAVER_AD_BID_STUB_HOSTS doc.
-  // ntm.pstatic.net 은 트래커 WASM script 로 응답해야 하므로 빈 .js content,
-  // 그 외 (nam.veta/siape.veta) 는 204 No Content 로 응답.
   let urlParts = null;
   try {
     urlParts = new URL(u);
     const stubHost = urlParts.host;
     if (NAVER_AD_BID_STUB_HOSTS.has(stubHost)) {
       const isScript = stubHost === 'ntm.pstatic.net';
-      // 2026-06-10 stub 응답 shape: 광고 SDK 가 `nam.veta/gfp/v1` /
-      // `siape.veta/fxshow` 응답을 JSON.parse 시도. 204 No Content (빈
-      // body) 반환 시 parse error → SDK 의 catch 가 어떤 fallback content
-      // 를 inject 가능 (사용자 환경에서 binary garbage 가 메인 페이지에
-      // 표시되는 회귀 가설). 대신 200 + `{}` empty JSON 으로 응답하면 SDK
-      // 가 정상 parse + "no bid → no inventory" 로 처리. ntm 은 script 라
-      // 그대로 빈 .js.
       const stubBody = isScript ? '/* zp:stub */' : '{}';
       const stubCType = isScript ? 'application/javascript; charset=utf-8' : 'application/json; charset=utf-8';
       logTransportEvent(u, txMethod, 200, 0, stubBody.length);
@@ -1936,7 +1361,6 @@ async function transportFetchHop(targetUrl, opt) {
         headers: { 'Content-Type': stubCType, 'Cache-Control': 'no-store', 'Content-Security-Policy': ZP.fixedCSP() },
       });
     }
-    // NAVER dynamic thumbnail proxy stub — 1×1 transparent PNG.
     for (const { host, pathPrefix } of NAVER_IMAGE_STUB_PATHS) {
       if (urlParts.host === host && urlParts.pathname.startsWith(pathPrefix)) {
         logTransportEvent(u, txMethod, 200, 0, TRANSPARENT_PNG_BYTES.byteLength);
@@ -1946,13 +1370,6 @@ async function transportFetchHop(targetUrl, opt) {
         });
       }
     }
-    // NAVER 광고 SDK module stub — no-op ES module 응답으로 dynamic import
-    // 즉시 resolve. ssl.pstatic.net/tveta/libs/glad/.../gfp-display-glog-logger
-    // 매치. 2026-06-11 회귀: `export default {};` 는 SDK 가 logger 를
-    // `new Logger()` 처럼 생성자로 호출할 때 "t is not a constructor"
-    // throw. default export 를 **호출/생성 가능한 no-op class** 로 제공해서
-    // `new X()`, `X()`, `X.method()` 모두 silent no-op 되도록. Proxy 로
-    // 임의 property 접근/호출도 안전하게 흡수.
     if (urlParts.host === 'ssl.pstatic.net') {
       for (const re of NAVER_AD_MODULE_STUB_PATTERNS) {
         if (re.test(urlParts.pathname)) {
@@ -1970,24 +1387,9 @@ async function transportFetchHop(targetUrl, opt) {
       }
     }
   } catch {}
-  // 2026-06-11 SW response cache 임시 비활성화 — dynamic ES module import
-  // 의 cache hit path 에서 puppeteer chromium 의 race / spec edge 로
-  // gfp-display-glog-logger.js 같은 module 이 instantiate fail (console
-  // errors 2 → 5 회귀). dogfood UX 우선으로 cache 제거. stub list (광고/
-  // 트래커/dthumb) 만 유지. 향후 Cache API + ES module 호환 path 별도 트랙.
-  // if (txMethod === 'GET' && urlParts && STATIC_ASSET_EXT_RE.test(urlParts.pathname)) {
-  //   const cached = await tryRespCacheGet(u);
-  //   if (cached) { … }
-  // }
-  // Step 13: HTTP transport is Rust-only (crates/zp-kernel-bundle).
-  // 2026-06-08 split-bundle (c.3): kernel + transport wasm is lazy —
-  // first `transportFetch` is what actually triggers the multi-MB
-  // `zp_kernel_sw_bg.wasm` fetch + instantiate. Subsequent calls hit the
-  // ready check at the top of `initKernel()`.
   try { await initKernel(); } catch { return safeError('SW_NOT_READY', 503, u); }
   if (typeof self.kernelFetch !== 'function') return safeError('SW_NOT_READY', 503, u);
-  // CORS (see the block above `isCORSPreflight`): a page's own cors-mode request to another origin is
-  // tainted from here on (redirects included), and an "unsafe" one is preflighted first.
+  // Taint cross-origin CORS requests and run preflight when method or headers are not CORS-safelisted.
   const corsMode = !!((opt.runtimeFetch || opt.elementCors) && opt.mode === 'cors');
   const corsRequest = corsMode && !opt.preflight;
   const corsOrigin = opt.originTainted ? 'null' : opt.context.origin;
@@ -2004,42 +1406,8 @@ async function transportFetchHop(targetUrl, opt) {
     }
   }
   const headers = new Headers(opt.headers || (opt.request && opt.request.headers) || undefined);
-  // Phase 5.8 note: page-side User-Agent survives this Headers init and
-  // wins over the `pushOnce('user-agent', ZP.TARGET_USER_AGENT)` further
-  // down (pushOnce no-ops when 'seen' already has it). That is the
-  // desired behaviour — the page-side UA is the genuine browser UA
-  // (e.g. `...Chrome/148 Safari/537.36 Edg/148.0.0.0` for Edge WebView2)
-  // which is consistent with the sec-ch-ua brand list the browser also
-  // forwards. TARGET_USER_AGENT only applies as a fallback for callers
-  // that don't pass a Request (e.g. internal scheduled fetches).
-  // Origin masking: browser-added Referer/Origin point at proxy.localhost
-  // (the SW origin). Rewrite to the virtual target URL/origin so target
-  // servers never see the proxy as the requester. The entry's targetUrl is
-  // the document URL the page-level code thinks it's running on.
-  //
-  // Critical: page-side fetch() never includes Referer/Origin/User-Agent in
-  // the Request headers — the browser marks them as forbidden header names
-  // and either appends them at the network layer or refuses to send the JS
-  // value. So `headers.has('Referer')` is almost always false for
-  // page-initiated requests. We must SET these headers unconditionally (not
-  // only rewrite-if-present) so anti-CSRF / anti-bot endpoints that check
-  // them (e.g. NAVER /api/v1/collect/exlogcr, Wikipedia anti-scraping) don't
-  // reject us. The relay server promotes the X-ZP-* sidechannel to real
-  // headers before dispatching upstream.
+  // Smuggle forbidden headers (Referer, Origin) via X-ZP-* so the kernel/relay can promote them to real upstream headers.
   const context = opt.context;
-  // For iframe document loads use the embedder's URL as Referer (mirrors
-  // browser behaviour); for subresources inside an iframe use the iframe's
-  // own virtual URL.
-  // ★최상위 문서는 **자기 자신을 Referer 로 보내면 안 된다.**
-  //
-  // 예전에는 부모가 없으면 entry.targetUrl(= 그 문서 자신)을 base 로 삼았다.
-  // 그래서 주소창에 URL 을 찍어 연 첫 로드에도 Referer: <그 페이지 자신> 이
-  // 나갔다 — 대조군은 아무것도 안 보낸다. 타깃 입장에서 "자기 페이지에서
-  // 넘어온 방문" 으로 보이는, 실제 브라우저에는 없는 신호다.
-  //
-  // 브라우저는 이미 정답을 알고 있다: 링크로 왔으면 Referer 헤더에 그 문서의
-  // 프록시 URL 이 실려 온다. 그것을 우리 라우트로 되돌려 타깃 URL 로 바꿔 쓰고,
-  // 헤더가 없으면(주소창/북마크/첫 로드) **우리도 보내지 않는다.**
   let effectiveBase = context.referrer;
   if (opt.referrer === '') effectiveBase = '';
   else if (opt.referrer && opt.referrer !== 'about:client') {
@@ -2052,40 +1420,21 @@ async function transportFetchHop(targetUrl, opt) {
   headers.delete('X-ZP-Origin');
   let sentReferer = '';
   if (effectiveBase) {
-    // Referer/Origin are forbidden headers — the Request constructor strips
-    // them from `init.headers`. Smuggle them as X-ZP-Referer/X-ZP-Origin and
-    // let the relay server promote them back to real Referer/Origin before
-    // dispatching upstream. Without this, anti-CSRF endpoints 400.
-    // 정책 출처 우선순위: (1) 페이지 fetch 가 명시한 값(프렐류드가 실어 보냄),
-    // (2) 브라우저가 이 요청에 대해 계산한 값, (3) 문서 응답의 Referrer-Policy
-    // 헤더, (4) 브라우저 기본. (2) 가 대부분을 덮는다 — 요소 속성까지 반영된
-    // 값이라 가장 정확하다.
     const referrerPolicy = context.referrerPolicy;
     const refValue = refererForPolicy(effectiveBase, u, referrerPolicy);
     if (refValue) headers.set('X-ZP-Referer', refValue);
     sentReferer = refValue || '';
   }
-  // A document's `document.referrer` is the Referer its navigation carried — after redirects, the last hop's. The
-  // prelude used to rebuild it from the embedder's URL under the default policy, whatever the embedder or the frame's
-  // `referrerpolicy` said (and a top-level document read '').
+  // Record the Referer sent on the final hop so document.referrer matches what upstream received.
   if (opt.document) {
     const docEntry = opt.tab && opt.tab.entries && opt.tab.entries.get(opt.entryId);
     if (docEntry) docEntry.documentReferrer = sentReferer;
   }
-  // Origin is independent of Referrer-Policy and an explicit empty referrer. A cors-mode element (`crossorigin`,
-  // module script, font) names its origin even to its own site (measured: Chrome does); a fetch() only across origins.
+  // Emit Origin on non-GET/HEAD requests, CORS-mode element loads, and cross-origin CORS fetches.
   if ((opt.method !== 'GET' && opt.method !== 'HEAD')
-      || (corsMode && (opt.originTainted || opt.elementCors || new URL(u).origin !== context.origin))) {
-    // After a redirect between two other origins the request's origin is "tainted": `Origin: null`.
+       || (corsMode && (opt.originTainted || opt.elementCors || new URL(u).origin !== context.origin))) {
     headers.set('X-ZP-Origin', opt.originTainted ? 'null' : context.origin);
   }
-  // User-Agent is a forbidden header for fetch() — same smuggle pattern.
-  // Without a UA, sites like Wikipedia reject requests as suspicious bots.
-  // Phase 5.8: User-Agent moved inline into headerEntries below so the
-  // Chrome 148 order pass positions it after upgrade-insecure-requests.
-  // The kernel still strips X-ZP-User-Agent if seen (legacy fallback).
-  // Strip proxy.localhost from any header the page synthesised. (If they
-  // remain after our rewrite, the value is genuinely the proxy origin.)
   for (const name of ['Referer', 'Origin']) {
     const v = headers.get(name);
     if (v && v.includes(ORIGIN)) headers.delete(name);
@@ -2096,20 +1445,8 @@ async function transportFetchHop(targetUrl, opt) {
   headers.set('X-ZP-Runtime-Token', opt.tab.runtimeToken || '');
   headers.set('X-ZP-Relay-Servers', JSON.stringify(opt.tab.servers || []));
   if (opt.document) headers.set('X-ZP-Document-Request', '1');
-  // Per-tab armed challenge-compat: forwards the operator opt-in to the relay.
-  // The relay strips this header (x-zp-* range) before forwarding upstream and
-  // uses it as the FIRST of two signals. The SECOND is the response-side
-  // classifier (Cf-Mitigated / challenges.cloudflare.com host / cdn-cgi/
-  // challenge-platform path). Only when BOTH hold does the relay emit the
-  // X-ZP-Challenge-Compat: 1 response marker; SW addCSP then strips it.
   if (opt.tab.challengeCompat) headers.set('X-ZP-Arm-Challenge-Compat', '1');
-  // Cookie jar bridge: SW maintains tab.cookieJar (RFC 6265-scoped) via
-  // ZP_COOKIE_SET messages from the page and Set-Cookie response headers.
-  // Attach the cookies that domain/path-match the outgoing URL so each
-  // subdomain sees only the cookies it's entitled to (no cross-leak of
-  // login state between mail.naver.com / pay.naver.com / nid.naver.com /
-  // www.naver.com). The Rust kernel passes Cookie through unchanged to
-  // the relay.
+  // Attach RFC 6265-scoped cookies from tab.cookieJar when credentials mode permits.
   const credentialsAllowed = opt.credentials === 'include'
     || (opt.credentials === 'same-origin' && new URL(u).origin === context.origin);
   headers.delete('Cookie');
@@ -2117,22 +1454,9 @@ async function transportFetchHop(targetUrl, opt) {
     const cookieStr = opt.tab.cookieJar.cookieHeader(u, { crossSite: opt.initiatorOpaque });
     if (cookieStr) headers.set('Cookie', cookieStr);
   }
-  // Build a flat [[k, v], ...] header list from BOTH our `headers` Headers
-  // object AND the page-side `req.headers`. The Fetch-spec `new Request()`
-  // we used to call strips "forbidden header names" — Sec-Fetch-*,
-  // sec-ch-ua-*, User-Agent, etc. — which is exactly what NAVER / GitHub
-  // WAFs check first; without them the upstream silently 60s-times-out.
-  // The plain-object request shape below bypasses Request's filter while
-  // still satisfying the kernel's `headerEntries` reader.
+  // Build a flat [name, value] list without constructing a Request object so forbidden headers (Sec-Fetch-*, sec-ch-ua-*, User-Agent) survive.
   const headerEntries = [];
   const seen = new Set();
-  // Client hints (see `clientHintPrefs`): the browser underneath put its own on the request it handed us — values for
-  // the proxy origin and the host browser (WebView2 says Edge) — so none of those is forwarded; the persona's are
-  // emitted below, the three defaults on every request to a trustworthy URL and the rest as the target asked for them.
-  // (Until 2026-10-13 every high-entropy hint was dropped unconditionally, and a script's fetch/XHR carried `sec-ch-ua`
-  // alone: `-mobile` and `-platform` came only from the browser's request, which a runtime fetch does not have.)
-  // Fetch Metadata likewise exists only for a trustworthy target (the browser's own request, to the proxy origin, has it
-  // either way).
   const trustworthy = potentiallyTrustworthyURL(u);
   const pushOnce = (k, v, own) => {
     const kl = k.toLowerCase();
@@ -2142,53 +1466,26 @@ async function transportFetchHop(targetUrl, opt) {
     seen.add(kl);
     headerEntries.push([k, v]);
   };
-  // 2026-06-09 NAVER anti-bot fix: force-set User-Agent FIRST so the
-  // page-side `HeadlessChrome`-flavored UA from puppeteer / WebView2
-  // never reaches the upstream. NAVER WAF instantly classifies the
-  // `HeadlessChrome` substring as a bot and returns 403 on every ad
-  // SDK fetch (gfp-display-sdk.js, gfp-display-glog-logger.js, …).
-  // Before this fix, the request.headers loop below would inject
-  // `user-agent: ...HeadlessChrome/148.0.0.0...` and the later
-  // `pushOnce('user-agent', ZP.TARGET_USER_AGENT)` no-op'd because
-  // `seen` already had it. Real-Chrome operators in WebView2 still
-  // get the canonical Chrome 148 UA — no harm.
+  // Force-set the target persona User-Agent first so HeadlessChrome or host-browser UA strings from request.headers are ignored.
   pushOnce('user-agent', ZP.TARGET_USER_AGENT);
   for (const [k, v] of headers.entries()) {
-    // A playlist is rewritten whole, so it is asked for whole.
     if (opt.noRange && (k.toLowerCase() === 'range' || k.toLowerCase() === 'if-range')) continue;
     pushOnce(k, v);
   }
-  // Now grab anything the browser added that Headers refused to copy
-  // (Sec-Fetch-Mode/Dest/Site/User, Accept-Language,
-  // upgrade-insecure-requests). `request.headers.entries()` from the
-  // SW-intercepted request DOES include these in Chromium.
+  // Copy browser-supplied headers (Sec-Fetch-*, Accept-Language, Upgrade-Insecure-Requests) from the initial intercepted request.
   if (opt.redirectDepth === 0 && opt.request && opt.request.headers) {
     for (const [k, v] of opt.request.headers.entries()) {
       const kl = k.toLowerCase();
-      // Skip ones we explicitly own (Referer/UA/Cookie were promoted via
-      // X-ZP-* and would be lost here anyway). Accept-Encoding is forced
-      // to identity below.
       if (kl === 'cookie' || kl === 'host' || kl === 'origin' || kl === 'referer'
           || kl === 'user-agent' || kl === 'accept-encoding'
           || kl === 'connection' || kl === 'content-length' || kl === 'transfer-encoding') {
         continue;
       }
-      // A playlist is rewritten whole, so it is asked for whole.
       if (opt.noRange && (kl === 'range' || kl === 'if-range')) continue;
       pushOnce(k, v);
     }
   }
-  // Synthesize Sec-Fetch-* / Accept-Language if the browser didn't
-  // include them. WebView2 in some configurations omits them on the
-  // SW-intercepted navigation; nid.naver.com / GitHub WAFs both treat
-  // a missing Sec-Fetch-Mode as bot traffic and silently drop the
-  // request (60s TCP timeout from upstream's perspective). We pick the
-  // values a real browser would have sent for a top-level navigation
-  // to a cross-site origin.
-  // A frame's document request is not a top-level navigation's, and a server that reads Fetch Metadata sees which it is
-  // (Cloudflare's challenge widget is a frame and is asked for as one): `dest` is `iframe`, the initiator is the embedder,
-  // the user did not activate it, and a cross-site frame says whether it may use its cookies. A top-level navigation with
-  // no initiator (the first, from the launcher) is `none`; with one, its relation to the target.
+  // Synthesize Sec-Fetch-* metadata, Accept-Language, and Priority when omitted on the incoming request.
   const navDest = opt.document ? navigationDestination(opt.request) : 'document';
   const inFrame = navDest !== 'document';
   const sub = opt.document ? null : subrequestFetchMetadata(opt);
@@ -2199,28 +1496,13 @@ async function transportFetchHop(targetUrl, opt) {
     if (opt.document) site = context.referrer ? fetchSiteRelation(context.referrer, u) : (inFrame ? 'cross-site' : 'none');
     else if (!opt.initiatorOpaque) site = fetchSiteRelation(context.documentUrl, u);
     pushOnce('sec-fetch-site', site);
-    // A cross-site request that carries cookies says whether it may use them: a frame's document, and a sub-request whose
-    // credentials mode is `include` (an image, a stylesheet, a classic script; not a `crossorigin` element, not a default fetch).
     if (site === 'cross-site' && (opt.document ? inFrame : subrequestCredentials(opt) === 'include')) pushOnce('sec-fetch-storage-access', 'active');
   }
   if (opt.document && !inFrame && !seen.has('sec-fetch-user')) pushOnce('sec-fetch-user', '?1');
-  // Accept-Language 는 브라우저가 SW 로 넘겨준 게 있으면 그대로 쓰고, 없을 때만
-  // 여기서 만든다. 예전에는 `en-US,en;q=0.9,ko;q=0.8` 을 하드코딩했는데, 이
-  // 머신의 실제 브라우저는 `ko,en,en-US` 다 — 그래서 프록시로 연 NAVER 는
-  // 영어(lang=en) 변종을, 직접 연 NAVER 는 한국어 변종을 받았다. 같은 사이트의
-  // **다른 페이지를 보게 되므로** 회귀 비교 자체가 어긋난다(로그인 폼이 대표적).
-  // navigator.languages 는 SW 전역에도 있으니 사용자의 실제 선호를 그대로 쓴다.
-  // q 값은 Chrome 규칙: 첫 항목은 q 없이, 이후 0.1 씩 내린다.
   if (!seen.has('accept-language')) pushOnce('accept-language', browserAcceptLanguage());
-  // RFC 9218 `priority`. 2026-08-16 실측: 같은 머신의 직접 Chrome 은 최상위
-  // 문서 요청에 `priority: u=0, i` 를 보내는데 우리는 아예 안 보냈다.
   if (opt.document && !seen.has('priority')) pushOnce('priority', 'u=0, i');
-  // A script's fetch()/XHR asks for anything unless it said otherwise (measured: `accept: */*`); the runtime API
-  // request has no browser request behind it to carry that.
   if (!opt.document && opt.runtimeFetch && !seen.has('accept')) pushOnce('accept', '*/*');
-  // Phase 5.8: emit User-Agent inline so the order pass positions it.
   pushOnce('user-agent', ZP.TARGET_USER_AGENT);
-  // The persona's client hints: the defaults, and the high-entropy ones the target's preferences call for here.
   const sentHints = trustworthy
     ? [...CLIENT_HINT_DEFAULTS, ...highEntropyHintsFor(opt, u, opt.document && !inFrame, inFrame)]
     : [];
@@ -2229,9 +1511,7 @@ async function transportFetchHop(targetUrl, opt) {
     const v = clientHintValue(name, hintEnv);
     if (v !== null) pushOnce(name, v, true);
   }
-  // Chrome's order for this kind of request (see `requestHeaderTemplate`), and the same list for the kernel, which adds
-  // Referer/Origin/Accept-Encoding/Cookie after this and used to re-sort by a fixed rank of its own (cookie last,
-  // anything unknown — every high-entropy hint, `content-type`, a page's own header — behind `priority`).
+  // Order headers according to Chrome's wire template and pass the order list to the kernel via X-ZP-Header-Order.
   const template = requestHeaderTemplate(opt.document ? (opt.criticalRestart ? 'critical-restart' : 'navigation') : 'sub',
     sentHints.filter(n => seen.has(n)));
   const ordered = orderRequestHeaders(headerEntries, template);
@@ -2241,10 +1521,6 @@ async function transportFetchHop(targetUrl, opt) {
   const method = opt.method;
   const bodyU8 = opt.body;
   const outgoing = logOutgoingHeaders(u, method, headerEntries);
-  // Plain object — no Request constructor, so forbidden headers survive.
-  // The kernel reads `headerEntries` first (preferred) and `arrayBuffer`
-  // for the body (still a function so the kernel's existing extractor
-  // doesn't change shape).
   const reqLike = {
     url: u,
     method,
@@ -2257,34 +1533,21 @@ async function transportFetchHop(targetUrl, opt) {
     resp = await withTransportDeadline(self.kernelFetch(reqLike), u, method);
   } catch (e) {
     logTransportEvent(u, method, 0, performance.now() - txT0, 0);
-    // Record WHY. The page only ever sees "502 (Bad Gateway)", which tells us
-    // nothing about whether the kernel refused, the handshake failed, or the
-    // stream died — and these failures are intermittent, so a reproduction
-    // without the reason attached is wasted. Goes to the same trace ring the
-    // kernel uses, readable via the SW's `__zpTraceDump` message.
     try {
       const reason = (e && (e.message || e.code)) || String(e);
       (self.__zpRustTrace = self.__zpRustTrace || []).push(
         `sw:transport-fail ${method} ${String(u).slice(0, 120)} after=${Math.round(performance.now() - txT0)}ms err=${reason}`
       );
     } catch {}
-    // A script's fetch()/XHR that never reached a server is a network error, as natively — the promise rejects, the
-    // XHR fires `error` with status 0. It used to resolve with our 502 page: Cloudflare's interactive widget probes an
-    // IPv6-only host (`brunhild.challenges.cloudflare.com`; this machine has no IPv6, so natively it fails at once)
-    // and through the proxy read "Cloudflare answered 502" instead — then ignored the checkbox click (2026-10-13).
-    // Element loads keep the page below: a non-ok status already fails them like a network error does.
+    // Return a network error for runtime fetch()/XHR so the caller rejects instead of receiving a synthetic 502 HTML page.
     if (opt.runtimeFetch) {
       logRefusal(e && (e.message || e.code) || 'TARGET_CONNECT_FAILED', 0, u, { runtimeFetch: true, timeout: !!(e && e.zpTransportTimeout) });
       return Response.error();
     }
-    // 타임아웃은 게이트웨이 타임아웃이다 — 502(연결 실패)와 구분해야
-    // 로그만 보고도 "상류가 멈췄다" 와 "연결이 거절됐다" 를 가른다.
+    // Distinguish connection failures (502) from upstream transport timeouts (504).
     if (e && e.zpTransportTimeout) return safeError(e.message, 504, u);
     return safeError(e && (e.message || e.code) || 'TARGET_CONNECT_FAILED', 502, u);
   }
-  // body length signal — Content-Length is upstream-authoritative when
-  // present; for chunked / unknown we estimate 0 to avoid double-buffer
-  // (probe is best-effort, not metering).
   let bodyLen = 0;
   try {
     const cl = resp && resp.headers && resp.headers.get('content-length');
@@ -2292,26 +1555,14 @@ async function transportFetchHop(targetUrl, opt) {
   } catch {}
   logTransportEvent(u, method, (resp && resp.status) || 0, performance.now() - txT0, bodyLen);
   outgoing.status = (resp && resp.status) || 0;
-  // Capture Set-Cookie from the response and feed into the RFC-6265
-  // jar scoped to the response URL so Domain/Path/Secure/HttpOnly
-  // attributes are honored on the next outgoing request.
+  // Capture response Set-Cookie headers (and X-ZP-Set-Cookie sidechannel lines) into the RFC 6265 cookie jar scoped to this hop's URL.
   try {
     const getSetCookie = resp && resp.headers && resp.headers.getSetCookie;
     const setCookies = typeof getSetCookie === 'function' ? resp.headers.getSetCookie() : (resp && resp.headers && resp.headers.get('set-cookie') ? [resp.headers.get('set-cookie')] : []);
     if (credentialsAllowed && opt.tab.cookieJar) {
-      // A script cannot read an HttpOnly cookie, so the page never hears of one.
       const noteForPage = change => { if (opt.cookieDelta && change && !change.httpOnly) opt.cookieDelta.push(change); };
-      // Cookies belong to this hop's response URL, never to the final document.
       const setMeta = opt.initiatorOpaque ? { crossSite: true } : undefined;
       for (const line of setCookies) noteForPage(opt.tab.cookieJar.setCookieLine(u, line, setMeta));
-      // Upstream Set-Cookie is also stripped by the Go server's
-      // ConstructorPolicy (otherwise target-site auth cookies would be
-      // readable by any proxy-origin page) and re-emitted into the
-      // X-ZP-Set-Cookie sidechannel. Without consuming the sidechannel,
-      // the jar would only see cookies that page-side JS set via
-      // `document.cookie = ...` and would miss every server-issued
-      // anti-bot token (NACT, etc.). The sidechannel values are joined
-      // by a tab character — match the server-side encoder.
       const sidechannel = resp.headers.get('X-ZP-Set-Cookie');
       if (sidechannel) {
         for (const line of sidechannel.split('\t')) {
@@ -2320,10 +1571,8 @@ async function transportFetchHop(targetUrl, opt) {
       }
     }
   } catch {}
-  // The preflight's own answer is judged by the caller (a redirect is a failure there).
   if (opt.preflight) return resp;
-  // A top-level navigation's `Accept-CH` sets what its origin's requests carry from now on, and its `Critical-CH` sends
-  // it once more when hints it names were missing (see `clientHintPrefs`). A redirect is followed instead.
+  // Update per-origin Accept-CH preferences on top-level navigations and reissue once if Critical-CH names missing hints.
   if (opt.document && !inFrame && resp && resp.headers && potentiallyTrustworthyURL(u)) {
     let hintOrigin = '';
     try { hintOrigin = new URL(u).origin; } catch {}
@@ -2371,8 +1620,7 @@ async function transportFetchHop(targetUrl, opt) {
     if (corsRequest) {
       const from = new URL(u).origin;
       const next = new URL(nextURL);
-      // A cors request does not follow a redirect to another origin that carries credentials in the URL,
-      // and one that has gone between two foreign origins no longer says where it came from.
+      // Reject cross-origin redirects carrying URL credentials, and taint Origin ('null') across two foreign origins.
       if (next.origin !== context.origin && (rawNext.username || rawNext.password)) {
         logRefusal('CORS_REDIRECT_CREDENTIALS', resp.status, nextURL, { method: txMethod, origin: corsOrigin });
         return Response.error();
@@ -2385,15 +1633,13 @@ async function transportFetchHop(targetUrl, opt) {
       tainted: opt.tainted, originTainted,
     }));
   }
-  // Commit navigation only after its final response. Subresources never mutate it.
+  // Commit navigation URL and top-level origin only after the final redirect hop.
   if (opt.document) {
     const entry = opt.tab.entries && opt.tab.entries.get(context.entryId);
     if (entry && entry.targetUrl === context.documentUrl) { entry.targetUrl = u; entry.baseUrl = u; }
-    // The tab's top-level origin decides whose client-hint preferences its documents' requests carry.
     if (!inFrame) { try { opt.tab.topOrigin = new URL(u).origin; } catch {} }
+    scheduleStateFlush();
   }
-  // What a script may read of a cross-origin answer — taken from the target's own headers, before the
-  // worker's policy block replaces them.
   const expose = corsRequest && opt.tainted ? corsExposedHeaders(resp.headers, corsCredentials) : undefined;
   const result = addCSP(resp, opt.request, opt.tab.servers, opt.tab, u);
   result.__zpFetchMeta = {
@@ -2414,25 +1660,14 @@ function shouldRewriteScript(req, resp) {
   const ct = resp && resp.headers && resp.headers.get('Content-Type') || '';
   return /\b(?:java|ecma)script\b/i.test(ct) || /\btext\/(?:x-)?javascript\b/i.test(ct);
 }
-// 2026-06-08 split-bundle (c.1) Step 3: shadow-compare infrastructure
-// removed. The legacy ZPRewriter.rewriteScript path no longer exists, so
-// comparing against it is meaningless. The `applyScriptPatches` helper
-// below is retained for the future patch-mode marker-resolver port; its
-// envelope contract is documented inline.
 
-// Apply a patch envelope produced by `ZPBundle.rewriteScriptPatches` over the
-// original source. Patches are non-overlapping byte ranges (sorted by start
-// inside the Rust crate) — we walk them in order, splicing replacements
-// between untouched spans. Returns the rewritten source, or null when the
-// envelope is malformed (caller falls back to full re-emit).
+// Apply a sorted, non-overlapping patch envelope produced by ZPBundle.rewriteScriptPatches over source, returning null if malformed.
 function applyScriptPatches(source, envelopeJson) {
   if (typeof envelopeJson !== 'string' || envelopeJson.length === 0) return null;
   let env;
   try { env = JSON.parse(envelopeJson); } catch { return null; }
   if (!env || !Array.isArray(env.patches)) return null;
   const patches = env.patches;
-  // No patches → original source is already strict-safe (no dangerous
-  // identifiers / member accesses). Cheaper than re-encoding via OXC.
   if (patches.length === 0) return source;
   const out = [];
   let cursor = 0;
@@ -2449,15 +1684,73 @@ function applyScriptPatches(source, envelopeJson) {
   return out.join('');
 }
 
+function extractCharsetFromContentType(contentType) {
+  if (!contentType) return '';
+  const m = /;?\s*charset\s*=\s*["']?([^"';\s]+)/i.exec(String(contentType));
+  return m ? m[1].trim() : '';
+}
+function extractCharsetFromHTMLBytes(bytes) {
+  if (!bytes || !bytes.byteLength) return '';
+  const headLen = Math.min(bytes.byteLength, 2048);
+  let ascii = '';
+  try {
+    ascii = new TextDecoder('latin1').decode(bytes.subarray(0, headLen));
+  } catch {
+    for (let i = 0; i < headLen; i++) ascii += String.fromCharCode(bytes[i]);
+  }
+  const tagRe = /<meta\b[^>]*>/gi;
+  let m;
+  while ((m = tagRe.exec(ascii))) {
+    const tag = m[0];
+    const direct = /\bcharset\s*=\s*["']?\s*([a-zA-Z0-9._-]+)/i.exec(tag);
+    if (direct && direct[1]) return direct[1].trim();
+    const content = /\bcontent\s*=\s*["']([^"']*charset\s*=\s*[^"']+)["']/i.exec(tag);
+    if (content && content[1]) {
+      const sub = /charset\s*=\s*([a-zA-Z0-9._-]+)/i.exec(content[1]);
+      if (sub && sub[1]) return sub[1].trim();
+    }
+  }
+  return '';
+}
+function isUtf8CharsetLabel(label) {
+  if (!label) return true;
+  const norm = String(label).trim().toLowerCase();
+  return norm === 'utf-8' || norm === 'utf8' || norm === 'unicode-1-1-utf-8';
+}
+function decodeTextBytes(bytes, contentType, isHTML) {
+  const u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes || 0);
+  let charset = extractCharsetFromContentType(contentType);
+  if (!charset && isHTML) charset = extractCharsetFromHTMLBytes(u8);
+  const nonUtf8 = Boolean(charset && !isUtf8CharsetLabel(charset));
+  if (nonUtf8) {
+    try {
+      const dec = new TextDecoder(charset.trim().toLowerCase());
+      return { text: dec.decode(u8), charset: charset.trim(), nonUtf8: true };
+    } catch {}
+  }
+  return { text: new TextDecoder('utf-8').decode(u8), charset: 'utf-8', nonUtf8: false };
+}
+async function decodeResponseText(resp, isHTML) {
+  const buf = await resp.arrayBuffer();
+  const ct = (resp.headers && resp.headers.get('Content-Type')) || '';
+  return decodeTextBytes(new Uint8Array(buf), ct, !!isHTML);
+}
+function rewriteMetaCharsetToUtf8(html) {
+  if (!html) return html;
+  return html.replace(/<meta\b[^>]*>/gi, tag => {
+    if (/\bhttp-equiv\s*=\s*["']?content-type["']?/i.test(tag) && /\bcharset\s*=/i.test(tag)) {
+      return tag.replace(/(charset\s*=\s*)([a-zA-Z0-9._-]+)/i, '$1utf-8');
+    }
+    if (/\bcharset\s*=\s*["']?[a-zA-Z0-9._-]+["']?/i.test(tag)) {
+      return tag.replace(/(\bcharset\s*=\s*["']?)([a-zA-Z0-9._-]+)/i, '$1utf-8');
+    }
+    return tag;
+  });
+}
+
 async function rewriteScriptResponse(resp, opt) {
   rewriteStats.invocations++;
-  // 우리 에러 페이지(safeError)는 HTML 이다. 그걸 스크립트 리라이터에 넣으면
-  // 당연히 파싱에 실패하고, fail-closed 스텁이 "Blocked by ZeroProxy rewrite
-  // policy" 를 던진다 — **네트워크 실패가 정책 차단으로 둔갑한다.**
-  // 실제로 이것 때문에 Google 호스트들의 TLS 실패
-  // (`h2: response: tls: … received fatal alert: UnexpectedMessage`) 가
-  // "리라이터 파싱 실패" 로 보였다. 원인 규명을 정반대로 보내는 종류의 버그다.
-  // 문서 경로(transformDocumentResponse)에는 이미 같은 가드가 있다.
+  // Convert `safeError` HTML responses into `NetworkError` throws so the script rewriter does not mistake them for syntax errors and report a policy block.
   if (resp && resp.headers && resp.headers.get('X-ZP-Error') === '1') {
     const upstream = resp.headers.get('X-ZP-Error-Code') || 'TARGET_CONNECT_FAILED';
     const h = scriptResponseHeaders(resp, opt && opt.req);
@@ -2470,18 +1763,7 @@ async function rewriteScriptResponse(resp, opt) {
   let code = '';
   let cacheKey = '';
   try {
-    // 2026-06-08: dead init-rewriter helper call removed (helper
-    // deleted in split-bundle c.1 Step 3, call site forgotten). The
-    // ReferenceError it produced was swallowed by the outer try/catch
-    // and replaced with the "Blocked by ZeroProxy rewrite policy" block
-    // stub for every external `<script src>` — Wikipedia's
-    // `load.php?modules=startup` was the most visible victim because
-    // mw.loader surfaces the throw as an uncaught console error.
-    // ZPBundle.ready is guaranteed by the activate handler now, so
-    // `await initBundle()` below covers the lazy-retry case alone.
-    const source = await resp.text();
-    // C4: cache check before invoking the OXC pipeline. Hash inputs that
-    // affect output: transformer version, script kind, target URL, source bytes.
+    const source = (await decodeResponseText(resp, false)).text;
     try {
       const keyT0 = performance.now();
       cacheKey = await rewriteCacheKey(opt.kind || 'classic', opt.targetUrl || '', source);
@@ -2493,12 +1775,6 @@ async function rewriteScriptResponse(resp, opt) {
       }
       rewriteStats.misses++;
     } catch { cacheKey = ''; rewriteStats.misses++; }
-    // 2026-06-08 split-bundle (c.1) Step 2.2: SW primary swap. ZPBundle
-    // (modern OXC 0.133) is now the primary script rewriter; legacy
-    // ZPRewriter (OXC 0.60, in rewriter-rs/) only runs as a fallback if
-    // modern errors. Shadow-compare on NAVER + Wikipedia recorded 0
-    // divergence after Step 2.1.5 added `Function` / `eval` to
-    // DANGEROUS_GLOBALS and dropped the marker-unsafe patches path.
     try {
       await initBundle();
       if (self.ZPBundle && self.ZPBundle.ready) {
@@ -2510,32 +1786,15 @@ async function rewriteScriptResponse(resp, opt) {
         if (typeof rustCode === 'string' && rustCode.length > 0) {
           code = rustCode;
         } else if (rustCode === '' && source === '') {
-          // An empty script runs as nothing natively. Read as a failure, it got the policy stub below, which throws
-          // (an ad partner's user-sync script answered with an empty body on NYT: two uncaught NotSupportedErrors).
+          // Preserve empty script bodies as a no-op instead of treating empty output as a rewrite failure.
           code = '\n';
         }
       }
-    } catch (rustErr) { /* swallow; legacy fallback below */ }
-    // 2026-06-08 split-bundle (c.1) Step 3: legacy ZPRewriter.rewriteScript
-    // fallback dropped. The rewriter-rs/ crate's OXC JS path no longer
-    // exists; if ZPBundle (modern) failed above, we fail-closed to the
-    // POLICY_BLOCKED stub below — same posture as a real parse error.
+    } catch (rustErr) { /* fail-closed below */ }
     if (!code) {
-      // 2026-06-07 split-bundle (c.1) Step 1: blockSource was a Rust-side
-      // accessor for a static string. Inline the literal so we can drop
-      // the wrapper from the rewriter-rs JS glue in the next milestones.
       code = "throw new DOMException('Blocked by ZeroProxy rewrite policy','NotSupportedError');";
     } else {
-      // D2: append a fresh sourceMappingURL pointing to the proxy-side
-      // composer. The Rust rewriter already stripped the original pragma
-      // (which described the un-rewritten source) so this is the only
-      // map DevTools will see. We DON'T inline a data: URL because
-      // (a) every page-load would pay the compose cost regardless of
-      // whether DevTools is open, and (b) the JSON is large enough that
-      // injecting it would bloat the rewritten body significantly.
-      // Only emit for `classic` / `module` kinds — `event-handler`,
-      // `eval`, `function` are synthesised wrappers without a fetchable
-      // origin URL, so a sourceMappingURL there would 404.
+      // Append a sourceMappingURL pointing to /zp/api/sourcemap for classic, module, and worker scripts.
       const kind = opt.kind || 'classic';
       const target = opt.targetUrl || '';
       if (target && (kind === 'classic' || kind === 'module' || kind === 'worker')) {
@@ -2543,8 +1802,6 @@ async function rewriteScriptResponse(resp, opt) {
         code = code + '\n//# sourceMappingURL=' + mapURL + '\n';
       }
       if (cacheKey) {
-        // Cache only successful rewrites — never the fail-closed block stub,
-        // so a transient parser bug never gets pinned in the cache.
         rewriteCacheSet(cacheKey, code);
       }
     }
@@ -2555,9 +1812,7 @@ async function rewriteScriptResponse(resp, opt) {
 }
 async function transformDocumentResponse(resp, opt) {
   await ensureRuntimeConfig();
-  // 타깃 문서가 선언한 정책을 기억해 둔다 — 페이지가 부른 `fetch()` 는
-  // /zp/api/fetch 로 오므로 브라우저가 계산한 요청별 정책이 없다. 여러 값이면
-  // 마지막 유효 토큰이 이긴다(명세).
+  // Record the last valid `Referrer-Policy` token declared on the document response into `opt.entry`.
   try {
     const declared = resp.headers.get('Referrer-Policy');
     if (declared && opt && opt.entry) {
@@ -2565,79 +1820,93 @@ async function transformDocumentResponse(resp, opt) {
       if (token) opt.entry.referrerPolicy = token;
     }
   } catch {}
-  // Only transform HTML payloads. Anything else (302 redirect, JSON, binary)
-  // passes through unchanged — addCSP/streaming preserved.
-  //
-  // The guard used to be `status >= 300`, which also let every 4xx/5xx HTML
-  // *body* through un-rewritten. That is not a redirect — it is a document the
-  // browser renders and executes. Cloudflare's managed challenge is exactly
-  // that shape (403 + `cf-mitigated: challenge` + a full HTML page), so the
-  // interstitial reached the page with no prelude, no membrane and no URL
-  // rewriting: its `/cdn-cgi/challenge-platform/...` script resolved against
-  // the PROXY origin, Go answered POLICY_BLOCKED, and the challenge could
-  // never run ("Just a moment..." forever). Worse in general — an error page
-  // carrying ABSOLUTE URLs would have loaded them straight from the browser,
-  // which is a containment escape, not just a fidelity bug.
-  // So: skip redirects only (3xx has no renderable body anyway) and keep every
-  // other HTML status on the rewrite path.
+  // Transform all non-3xx HTML responses (including 4xx/5xx challenge or error pages) except internal safeError pages.
   if (!resp || !isHTMLResponse(resp)) return resp;
   if (resp.status >= 300 && resp.status < 400) return resp;
-  // Our own error pages (safeError) are already proxy-origin documents built
-  // from fixed markup — rewriting them against the target URL would inject a
-  // membrane into a page that has nothing to contain.
   if (resp.headers && resp.headers.get('X-ZP-Error') === '1') return resp;
 
-  // Phase C — progressive streaming render. Used ONLY when the kernel actually
-  // streamed this document (X-ZP-Stream marker, set in build_streaming_js_response
-  // for 2xx text/html gzip|identity). The body is piped through the streaming
-  // HtmlTxn so the page renders as bytes arrive — the fix for NAVER's withheld
-  // END_STREAM (~60s) where the buffered `resp.text()` below would block. Falls
-  // back to the buffered path (which keeps fail-closed MALFORMED_HTML + the
-  // post-redirect CSS host-rewrite) on host mismatch or any failure.
+  const contentTypeHeader = (resp.headers && resp.headers.get('Content-Type')) || '';
+  const headerCharset = extractCharsetFromContentType(contentTypeHeader);
+  const nonUtf8Header = Boolean(headerCharset && !isUtf8CharsetLabel(headerCharset));
+  let prefetchedBytes = null;
+
+  // Pipe kernel-streamed UTF-8 HTML responses through HtmlTxn for progressive rendering unless redirected across hosts.
   const kernelStreamed = resp.headers && resp.headers.get('X-ZP-Stream') === '1';
-  if (kernelStreamed && resp.body) {
+  if (kernelStreamed && resp.body && !nonUtf8Header) {
     try {
       await initBundle();
       if (self.ZPBundle && self.ZPBundle.ready && typeof self.ZPBundle.HtmlTxn === 'function') {
         const targetUrl = (opt.entry && (opt.entry.targetUrl || opt.entry.baseUrl)) || '';
-        // Post-redirect host mismatch needs a whole-doc CSS regex (see the
-        // buffered path below) — not streamable. Use the buffered path there.
         const finalUrl = (resp.headers && resp.headers.get('X-ZP-Final-URL')) || '';
         let hostMismatch = false;
         if (finalUrl && targetUrl) {
           try { hostMismatch = new URL(targetUrl).host !== new URL(finalUrl).host; } catch {}
         }
         if (!hostMismatch) {
-          const streamed = streamDocumentResponse(resp, opt, targetUrl);
-          if (streamed) return streamed;
+          if (headerCharset) {
+            const streamed = streamDocumentResponse(resp, opt, targetUrl);
+            if (streamed) return streamed;
+          } else {
+            const reader = resp.body.getReader();
+            const first = await reader.read();
+            const firstChunk = (!first.done && first.value) ? (first.value instanceof Uint8Array ? first.value : new Uint8Array(first.value)) : new Uint8Array(0);
+            const metaCharset = extractCharsetFromHTMLBytes(firstChunk);
+            if (metaCharset && !isUtf8CharsetLabel(metaCharset)) {
+              const chunks = firstChunk.byteLength ? [firstChunk] : [];
+              let total = firstChunk.byteLength;
+              while (!first.done) {
+                const next = await reader.read();
+                if (next.done) break;
+                const u8 = next.value instanceof Uint8Array ? next.value : new Uint8Array(next.value);
+                chunks.push(u8);
+                total += u8.byteLength;
+              }
+              prefetchedBytes = new Uint8Array(total);
+              let off = 0;
+              for (const c of chunks) { prefetchedBytes.set(c, off); off += c.byteLength; }
+            } else {
+              const replayStream = new ReadableStream({
+                start(controller) {
+                  if (firstChunk.byteLength) controller.enqueue(firstChunk);
+                  if (first.done) controller.close();
+                },
+                async pull(controller) {
+                  try {
+                    const next = await reader.read();
+                    if (next.done) controller.close();
+                    else controller.enqueue(next.value);
+                  } catch (err) {
+                    controller.error(err);
+                  }
+                },
+                cancel(reason) {
+                  try { return reader.cancel(reason); } catch {}
+                },
+              });
+              const streamed = streamDocumentResponse(resp, opt, targetUrl, replayStream);
+              if (streamed) return streamed;
+              prefetchedBytes = new Uint8Array(await new Response(replayStream).arrayBuffer());
+            }
+          }
         }
       }
     } catch { /* fall through to buffered */ }
   }
 
   let html = '';
-  try { html = await resp.text(); } catch { return resp; }
+  try {
+    const rawBytes = prefetchedBytes || new Uint8Array(await resp.arrayBuffer());
+    const decoded = decodeTextBytes(rawBytes, contentTypeHeader, true);
+    html = decoded.nonUtf8 ? rewriteMetaCharsetToUtf8(decoded.text) : decoded.text;
+  } catch { return resp; }
   let transformed = html;
-  // C2: malformed-HTML policy is FAIL-CLOSED → MALFORMED_HTML error page.
-  // The prior implementation fell open (ship raw HTML on lol_html error),
-  // which meant target inline scripts could execute UN-rewritten and the
-  // membrane / OXC pipeline would all be bypassed — the literal opposite
-  // of strict mode. Track success explicitly so we route to A5 instead of
-  // leaking the raw body.
+  // Fail-closed to MALFORMED_HTML if the HTML rewriter throws or produces empty output so un-rewritten inline scripts never execute.
   let transformOk = false;
   let transformFailure = '';
   try {
     await initBundle();
     if (self.ZPBundle && self.ZPBundle.ready && typeof self.ZPBundle.transformHtml === 'function') {
-      // HTML rewrite base stays at the originally requested URL — using the
-      // post-redirect URL re-exposes a separate NAVER-login script-completion
-      // hang (see .ai/trap-notebook/INDEX.md 2026-05-31 diagnostic entry).
-      // We post-process stylesheet links below to fix the redirect-host
-      // mismatch without making scripts initialise on the "real" host.
       const targetUrl = (opt.entry && (opt.entry.targetUrl || opt.entry.baseUrl)) || '';
-      // C2: separate "transform threw" (malformed HTML) from "transform
-      // returned empty". Both route to fail-closed because the alternative
-      // is shipping the un-rewritten body, which is a strict-mode escape.
       const out = self.ZPBundle.transformHtml(html, targetUrl);
       if (typeof out === 'string' && out.length > 0) {
         transformed = out;
@@ -2645,10 +1914,7 @@ async function transformDocumentResponse(resp, opt) {
       } else {
         transformFailure = 'empty transform output';
       }
-      // Post-process stylesheet URLs only — repoint /foo.css that 404s at
-      // the originally requested host (pay.naver.com) to the post-redirect
-      // host (nid.naver.com). Scripts intentionally stay broken on the
-      // original host so the login JS bails early and the page renders.
+      // Repoint stylesheet links from the pre-redirect host to X-ZP-Final-URL when a cross-host redirect occurred.
       const finalUrl = (resp.headers && resp.headers.get('X-ZP-Final-URL')) || '';
       if (finalUrl) {
         try {
@@ -2656,8 +1922,6 @@ async function transformDocumentResponse(resp, opt) {
           const oUrl = new URL(origin);
           const fUrl = new URL(finalUrl);
           if (oUrl.host !== fUrl.host) {
-            // zp-htmltx percent-encodes more aggressively than encodeURIComponent
-            // (dots/underscores too). Match the exact encoded host substring.
             const aggrEnc = s => encodeURIComponent(s).replace(/[.~!*'()_-]/g,
               c => '%' + c.charCodeAt(0).toString(16).toUpperCase().padStart(2, '0'));
             const encOrigHost = aggrEnc(oUrl.host);
@@ -2673,17 +1937,8 @@ async function transformDocumentResponse(resp, opt) {
   } catch (e) {
     transformFailure = (e && (e.message || e.code)) || 'transform threw';
   }
-  // C2 fail-closed: if the HTML transform pipeline produced no usable
-  // output, route to the A5 MALFORMED_HTML page instead of shipping the
-  // raw body. The prior fail-open behaviour bypassed every membrane
-  // invariant for any input lol_html refused to parse — the strict-mode
-  // escape vector the "탈출 없는 감옥" design forbids.
   if (!transformOk) {
     const targetUrl = (opt.entry && (opt.entry.targetUrl || opt.entry.baseUrl)) || '';
-    // Surface the reason: a 502 from here and a 502 from a transport failure
-    // are indistinguishable in the page console, and the HTML rewriter can
-    // fail-closed for reasons worth knowing (a wasm panic shows up as a bare
-    // "unreachable" — see the zp-bundle panic hook).
     try {
       (self.__zpRustTrace = self.__zpRustTrace || []).push(
         `sw:html-transform-fail ${String(targetUrl).slice(0, 120)} reason=${String(transformFailure).slice(0, 160)}`
@@ -2691,11 +1946,6 @@ async function transformDocumentResponse(resp, opt) {
     } catch {}
     return safeError('MALFORMED_HTML', 502, targetUrl);
   }
-  // Prelude virtualURL stays at the originally requested URL — using the
-  // post-redirect URL here triggers the NAVER-login script-completion hang
-  // (see .ai/trap-notebook/INDEX.md 2026-05-31 diagnostic entry). HTML rewrite
-  // already absolutized root-relative URLs against the final URL above, so
-  // static resources resolve correctly without virtualURL surgery.
 
   const preludeHTML = buildRuntimePrelude(opt.tab, opt.entry);
   const injected = injectPrelude(transformed, preludeHTML);
@@ -2704,33 +1954,17 @@ async function transformDocumentResponse(resp, opt) {
   headers.set('Content-Type', 'text/html; charset=utf-8');
   return new Response(injected, { status: resp.status, statusText: resp.statusText, headers });
 }
-// Phase C streaming render. Pipes the kernel's decoded-HTML ReadableStream
-// through the wasm `HtmlTxn` (incremental rewrite + prelude injection at
-// <head>) so the page renders progressively. Returns a streaming Response, or
-// null if the txn couldn't be constructed (caller falls back to buffered).
-//
-// Strict-mode fail-closed is preserved: on a rewrite error mid-stream we
-// `controller.error` (the page sees a network failure / what already rendered)
-// instead of shipping un-rewritten bytes. The prelude is injected by HtmlTxn at
-// the <head> open tag, so NO separate injectPrelude is needed here.
-function streamDocumentResponse(resp, opt, targetUrl) {
+// Pipe decoded HTML bytes through ZPBundle.HtmlTxn for progressive rewriting and prelude injection, failing closed on stream errors.
+function streamDocumentResponse(resp, opt, targetUrl, bodyStream) {
   const preludeHTML = buildRuntimePrelude(opt.tab, opt.entry);
   let txn;
   try { txn = new self.ZPBundle.HtmlTxn(targetUrl, ORIGIN, preludeHTML); }
   catch { return null; }
-  // Diagnostics for the document pipe. The kernel reports how many decoded
-  // bytes it enqueued (`tx:h2-stream-deflate-end out=…`); these counters say
-  // how many of them actually reached the page. A gap between the two localises
-  // a stalled document to this TransformStream rather than to the network.
   const stats = { id: (self.__zpStreamSeq = (self.__zpStreamSeq || 0) + 1), url: targetUrl.slice(-40), in: 0, out: 0, chunks: 0, state: 'open', err: '' };
-  // Keep the last few streams: a navigation often fetches the document twice
-  // (first attempt cancelled, then re-requested), so a single global would
-  // report the wrong one.
   self.__zpStreamStats = ((self.__zpStreamStats || []).concat([stats])).slice(-6);
   const ts = new TransformStream({
     transform(chunk, controller) {
       try {
-        // chunk is a Uint8Array of decoded (gunzipped) HTML bytes.
         stats.chunks++;
         stats.in += (chunk && chunk.byteLength) || 0;
         const out = txn.write(chunk);
@@ -2746,9 +1980,7 @@ function streamDocumentResponse(resp, opt, targetUrl) {
         const tail = txn.end();
         if (tail && tail.byteLength) { stats.out += tail.byteLength; controller.enqueue(tail); }
         stats.state = 'closed';
-        // ★스트리밍 문서의 압축 크기는 **여기서야** 알 수 있다 — 커널이
-        // 펌프를 마치면서 전역에 썬기 때문이다. 헤더로는 못 실는다(헤더가
-        // 먼저 나간다). 이게 없으면 문서만 encoded == decoded 로 남아 드러난다.
+        // Deliver the pre-decompression wire byte count recorded by the kernel pump once the stream finishes flushing.
         deliverStreamEncoded(streamIdForReport);
       } catch (e) {
         stats.state = 'flush-error';
@@ -2758,16 +1990,12 @@ function streamDocumentResponse(resp, opt, targetUrl) {
     },
   });
   const headers = new Headers(resp.headers);
-  // 커널이 달아 준 스트림 id. 헤더 자체는 fetch 리스너가 지우며
-  // 클라이언트/목적지와 짝지어 둔다.
   const streamIdForReport = resp.headers.get('X-ZP-Stream-Id') || '';
-  headers.delete('Content-Length');     // decoded plaintext, unknown length
-  headers.delete('X-ZP-Stream');        // strip the SW-internal marker
+  headers.delete('Content-Length');
+  headers.delete('X-ZP-Stream');
   headers.set('Content-Type', 'text/html; charset=utf-8');
-  // 스트리밍 문서에도 버퍼 경로(`addCSP`)와 **같은** 보안 헤더를 건다.
-  // 빠져 있던 동안 프록시 문서에는 CSP 가 없었다.
   applyZPSecurityHeaders(headers, opt.request, opt.tab && opt.tab.servers, opt.tab, targetUrl);
-  const out = new Response(resp.body.pipeThrough(ts), {
+  const out = new Response((bodyStream || resp.body).pipeThrough(ts), {
     status: resp.status,
     statusText: resp.statusText,
     headers,
@@ -2779,10 +2007,7 @@ function isHTMLResponse(resp) {
   return /\btext\/html\b/i.test(ct) || /\bapplication\/xhtml\+xml\b/i.test(ct);
 }
 function buildRuntimePrelude(tab, entry) {
-  // documentCookie is what the page's JS will see for `document.cookie`
-  // on this navigation — only non-HttpOnly cookies that match the target
-  // URL's domain/path/secure. The page maintains its own jar but seeds
-  // it from this string on boot.
+  // Seed initial non-HttpOnly document.cookie values matching entry.targetUrl.
   const documentCookie = tab.cookieJar ? tab.cookieJar.documentCookieFor(entry.targetUrl) : '';
   const boot = {
     tabId: tab.tabId,
@@ -2791,58 +2016,24 @@ function buildRuntimePrelude(tab, entry) {
     documentCookie,
     runtimeToken: tab.runtimeToken || '',
     servers: tab.servers || [],
-    // D4 — empty string when the operator hasn't enabled `-wt-public-url`;
-    // page-realm virtual `WebTransport` falls back to the rejected stub
-    // path (WT_UNSUPPORTED) when this is empty.
     wtGateway: runtimeConfig.wtGateway || '',
     wtGatewayCertHashes: Array.isArray(runtimeConfig.wtGatewayCertHashes) ? runtimeConfig.wtGatewayCertHashes : [],
-    // D5 embedded TURN: `{urls,username,credential}` tuples. The page's
-    // RTCPeerConnection runs relay-only through them; empty (no
-    // `-rtc-turn-addr`) leaves the RTC_GATEWAY_UNAVAILABLE stub.
     rtcICEServers: Array.isArray(runtimeConfig.rtcICEServers) ? runtimeConfig.rtcICEServers : [],
-    // The document was opened by an opaque one (a popup of a sandboxed frame): it is opaque too.
     ...(entry.opaque ? { opaque: true } : null),
-    // `document.referrer`: the Referer the navigation carried (transportFetchHop).
     ...(typeof entry.documentReferrer === 'string' ? { referrer: entry.documentReferrer } : null),
   };
   const bootJSON = JSON.stringify(boot).replace(/</g, '\\u003c');
-  // The chain consumer must run before the target's anti-bot JS does (it
-  // scrubs proxy-origin localStorage on naver.com, so that key family is
-  // useless for hop hand-off). State now travels in the URL fragment —
-  // immune to localStorage scrubs, survives reloads, no SW round trip
-  // required. The inline script pops the front of `zp_chain`, rewrites
-  // the current fragment to drop the consumed entry, and after the
-  // per-hop wait re-encodes the remaining chain into the next URL's
-  // fragment before calling location.assign on it.
+  // Consume zp_chain hop state from the URL fragment before target scripts run.
   const prewarmInline = '(function(){try{var p=new URLSearchParams(location.hash.slice(1));var c=p.get("zp_chain");if(!c)return;var chain;try{chain=JSON.parse(atob(decodeURIComponent(c)));}catch(e){return;}if(!Array.isArray(chain)||!chain.length)return;var next=chain.shift();var wait=Math.max(0,Math.min(120000,Number(next.waitMs)||0));var u=new URL(next.path,location.origin);var np=new URLSearchParams(u.hash.startsWith("#")?u.hash.slice(1):u.hash);if(chain.length){np.set("zp_chain",encodeURIComponent(btoa(JSON.stringify(chain))));}else{np.delete("zp_chain");}u.hash="#"+np.toString();var assign=location.assign.bind(location);p.delete("zp_chain");try{history.replaceState(null,"","#"+p.toString());}catch(e){}setTimeout(function(){try{assign(u.toString());}catch(e){}},wait);}catch(e){}})();';
-  // CSP 는 **헤더로만** 낸다. 2026-08-13 에는 문서 안에도 같은 정책의 `<meta http-equiv>` 를 맨 앞에
-  // 박았는데, 그 근거("스트리밍 응답에서는 헤더가 강제되지 않는다")는 2026-08-26 에 틀린 것으로 판명됐다
-  // (측정에 쓴 브라우저 데몬이 CSP 를 통째로 꺼 두고 있었다). 이후 "두 겹" 으로 남겨 둔 것이다.
-  //
-  // 2026-10-06 에 뺐다. 네이티브 Chrome 148 은 **문서에 CSP meta 가 하나라도 있으면** 스크립트를 못 돌리는
-  // sandbox 프레임(`sandbox=""`, `allow-same-origin` 만)의 `<script src>` 를 받아 오지 않는다 — 헤더
-  // CSP 만 있을 때는 받아 온다(같은 문서로 실측: 헤더 CSP 는 FETCHED, meta CSP 는 허용 정책이든
-  // `default-src 'none'` 이든 NOT FETCHED). 프록시 문서는 그 meta 때문에 같은 프레임에서 네이티브와
-  // 달리 스크립트를 요청하지 않았다. 헤더가 정본이고(응답 커밋부터 문서 전체에 걸린다) meta 는 그보다
-  // 약하므로 실효 정책은 변하지 않는다. 타깃 문서가 스스로 건 meta CSP 는 그대로 살아 있다(교집합).
-  // `data-zp-internal` 은 직렬화 세정기가 "이건 우리 것" 을 알아보는 표식이다.
-  // 외부 에셋 스크립트는 src 로 판별되지만 **인라인**은 그럴 수 없어
-  // `outerHTML` 에 그대로 남아 있었다. data-zp-* 는 어차피 페이지에게
-  // 가려진다(getAttributeNames / attributes 필터).
+  // Tag inline prelude scripts with `data-zp-internal` so DOM serialization strips them.
   return '<script nonce=zp data-zp-internal>' + prewarmInline + '</script>' +
     '<script nonce=zp src=' + ZP.assetURL('zp-core.js') + '></script>' +
-    // 2026-06-08 split-bundle (c.1) Step 4: legacy rust-rewriter.js script
-    // tag dropped. zp-page-bundle.js inlines the wasm + initSync's so
-    // `globalThis.ZPBundle.ready === true` by the time runtime-prelude's
-    // IIFE runs — the modern bundle covers both JS and CSS rewrite.
     '<script nonce=zp src=' + ZP.assetURL('zp-page-bundle.js') + '></script>' +
     '<script nonce=zp id=__zp-boot type=application/json>' + bootJSON + '</script>' +
     '<script nonce=zp src=' + ZP.assetURL('runtime-prelude.js') + '></script>';
 }
 function injectPrelude(html, prelude) {
-  // Inject before the first <script>, falling back to <head>/document start.
-  // The prelude must run before any target script that touches location,
-  // network, or storage APIs — earlier is better.
+  // Inject at the start of <head> (or <html>/document start) so the membrane initializes before any target script runs.
   const headMatch = /<head[^>]*>/i.exec(html);
   if (headMatch) {
     const i = headMatch.index + headMatch[0].length;
@@ -2858,6 +2049,10 @@ function injectPrelude(html, prelude) {
 
 function scriptResponseHeaders(resp, req) {
   const h = new Headers(resp.headers);
+  h.delete('Content-Security-Policy');
+  h.delete('Content-Security-Policy-Report-Only');
+  h.delete('X-Content-Security-Policy');
+  h.delete('X-WebKit-CSP');
   h.set('Content-Type', 'text/javascript; charset=utf-8');
   h.set('Cache-Control', 'no-store');
   h.set('X-Content-Type-Options', 'nosniff');
@@ -2870,38 +2065,25 @@ function scriptResponseHeaders(resp, req) {
 async function handleMessage(event) {
   const msg = event.data || {};
   const reply = event.ports && event.ports[0];
-  // Proxied-page keepalive ping (runtime-prelude `startSWKeepAlive`). Receiving
-  // this event is the whole point — it resets the SW idle timer so the
-  // in-memory tab state (tabs/shareRoutes/clientContext) survives long
-  // fetch-quiet gaps (notably the ~60s streamed-document withhold). No reply,
-  // no work; just return so we never touch the kernel for a heartbeat.
+  // Keepalive ping from runtime-prelude to reset the SW idle timer during long fetch-quiet gaps.
   if (msg && msg.type === '__zpKeepAlive') return;
   if (msg && msg.type === ZP.MSG.ENCODED_SIZE_QUERY) {
     const key = String(msg.url || '');
-    // 문서 칸이 먼저다 — 페이지가 묻는 것은 언제나 자기 문서다.
     const size = docEncodedByUrl.get(key) || streamEncodedByUrl.get(key) || 0;
     if (size) { docEncodedByUrl.delete(key); streamEncodedByUrl.delete(key); }
     if (reply) reply.postMessage({ ok: true, size });
     return;
   }
-  // Diagnostic: dump the kernel trace ring WITHOUT touching the kernel. The
-  // full __zpKernelProbe awaits initKernel(), which hangs once the kernel wasm
-  // has trapped (poisoned instance) — exactly when we most need the panic line
-  // the panic-hook pushed here. self.__zpRustTrace is a plain JS array, so it
-  // survives the wasm trap. No init, immediate reply.
+  // Dump the JS-array trace ring without calling initKernel() so diagnostics still work after a WASM trap.
   if (msg && msg.type === '__zpTraceDump') {
     if (reply) reply.postMessage({ ok: true, trace: (self.__zpRustTrace || []).slice(-400), streamStats: self.__zpStreamStats || null });
     return;
   }
-  // 거절 로그 덤프 — 페이지의 `__zp_refusals()` 가 읽는다. 커널을 건드리지
-  // 않으므로 wasm 이 죽어 있어도 답한다.
   if (msg && msg.type === '__zpRefusalDump') {
     if (reply) reply.postMessage({ ok: true, refusals: refusalLog.slice(-MAX_REFUSAL_LOG) });
     return;
   }
   if (msg && msg.type === '__zpKernelEchoTest') {
-    // 2026-06-08 split-bundle (c.3): echoSync is a kernel-half export now.
-    // Probe through initKernel() — initBundle() doesn't carry kernel*.
     try { await initKernel(); } catch {}
     let result;
     try {
@@ -2916,9 +2098,6 @@ async function handleMessage(event) {
   }
   if (msg && msg.type === '__zpKernelProbe') {
     let initErr = null;
-    // 2026-06-08 split-bundle (c.3): the diagnostic probe should reflect
-    // the *post-init* kernel state. Force-init the kernel half before
-    // reporting (independent of whether anything has yet routed a fetch).
     try { await initBundle(); } catch (e) { initErr = (e && e.message) || String(e); }
     try { await initKernel(); } catch (e) { initErr = initErr || (e && e.message) || String(e); }
     if (reply) reply.postMessage({ probe: {
@@ -2931,11 +2110,6 @@ async function handleMessage(event) {
       bundleVersion: self.ZPBundle && self.ZPBundle.bundleVersion ? self.ZPBundle.bundleVersion() : null,
       kernelVersion: self.ZPKernel && self.ZPKernel.kernelVersion ? self.ZPKernel.kernelVersion() : null,
       rustTrace: (self.__zpRustTrace || []).slice(-400),
-      // 2026-06-09 perf telemetry — see `rewriteStats` declaration.
-      // hitRatio rounded so probe output stays compact; raw counts
-      // are also included for ad-hoc analysis. cacheKeyShare is the
-      // % of `rewriteLatencyMs` spent on the SHA-256 cache key —
-      // when this dominates, the cache key is a pessimization.
       rewriteStats: {
         invocations: rewriteStats.invocations,
         hits: rewriteStats.hits,
@@ -2951,15 +2125,7 @@ async function handleMessage(event) {
         cacheEntries: rewriteCache.size,
         cacheBytes: rewriteCacheBytes,
       },
-      // 2026-06-09 transport header debug — last N outgoing fetches.
-      // Compare with chrome://net-export / Wireshark capture from a
-      // real Chrome 148 hit to spot anti-bot trigger gaps.
       outgoingHeaders: outgoingHeaderLog.slice(),
-      // 2026-06-09 transport-stage perf telemetry. NAVER cold-load
-      // attribution: with rewriter at ~1% of wall time, this surfaces
-      // where the other 99% lives (per-fetch yamux+TLS+h2 cost +
-      // upstream RTT). Top-K slowest entries are visible in the
-      // ring buffer; cumulative `transportStats` reflects SW lifetime.
       transportStats: {
         requests: transportStats.requests,
         totalLatencyMs: Math.round(transportStats.totalLatencyMs),
@@ -2977,36 +2143,32 @@ async function handleMessage(event) {
   const ok = data => reply && reply.postMessage(Object.assign({ ok: true }, data || {}));
   const fail = code => reply && reply.postMessage({ ok: false, error: code });
   try {
+    if (!cookieJarLoaded) await ensureCookieJarLoaded();
     if (msg.type === ZP.MSG.OPEN_SHARE) {
       const routeKey = String(msg.routeKey || '');
       if (!routeKey || /[^A-Za-z0-9_-]/.test(routeKey)) { fail('MALFORMED_ROUTE'); return; }
-      // Launcher pre-nav: if `reuseTabId` names an existing tab, append a
-      // new entry to it instead of allocating a fresh tab. Keeps the
-      // cookieJar (NACT/NID/etc.) populated by the warm-up navigation
-      // available to the follow-up nav to a deep subdomain. The follow-up
-      // nav is a separate ZP_OPEN_SHARE call from the launcher, fired
-      // before the actual page navigation happens.
+      // Reuse an existing tab when reuseTabId is specified so warm-up cookies remain available to follow-up navigations.
       let tab = null;
       if (msg.reuseTabId) {
         tab = tabs.get(String(msg.reuseTabId)) || null;
       }
-      // The window the launcher (or an opener) is in: the viewport and media preferences the first navigation's client
-      // hints report, before a document of the tab can say so itself.
       const openerEnv = sanitizeClientEnv(msg.env);
       if (tab) {
         if (openerEnv) tab.clientEnv = openerEnv;
         const entryId = randomEntryId();
         const targetUrl = ZP.canonicalTargetURL(msg.targetUrl).href;
-        tab.entries.set(entryId, { entryId, targetUrl, baseUrl: targetUrl, title: '', stateClone: null, scrollX: 0, scrollY: 0, createdAt: Date.now(), opaque: !!msg.opaque });
-        shareRoutes.set(routeKey, { tabId: tab.tabId, entryId });
+        tab.entries.set(entryId, { entryId, targetUrl, baseUrl: targetUrl, title: '', stateClone: null, scrollX: 0, scrollY: 0, createdAt: Date.now(), opaque: !!msg.opaque, frameRoute: false });
+        shareRoutes.set(routeKey, { tabId: tab.tabId, entryId, targetURL: targetUrl, frameRoute: false });
+        scheduleStateFlush();
         ok({ path: ZP.makeSharePath(routeKey), servers: tab.servers, tabId: tab.tabId, reused: true });
         return;
       }
       tab = createTab(msg.targetUrl, msg.servers, msg.challengeCompat);
       if (openerEnv) tab.clientEnv = openerEnv;
-      // A popup an opaque document opened is opaque itself (see opaqueEntry).
-      if (msg.opaque) { const first = tab.entries.get(tab.activeEntryId); if (first) first.opaque = true; }
-      shareRoutes.set(routeKey, { tabId: tab.tabId, entryId: tab.activeEntryId });
+      const first = tab.entries.get(tab.activeEntryId);
+      if (msg.opaque && first) first.opaque = true;
+      shareRoutes.set(routeKey, { tabId: tab.tabId, entryId: tab.activeEntryId, targetURL: first ? first.targetUrl : '', frameRoute: false });
+      scheduleStateFlush();
       ok({ path: ZP.makeSharePath(routeKey), servers: tab.servers, tabId: tab.tabId, reused: false });
       return;
     }
@@ -3017,15 +2179,13 @@ async function handleMessage(event) {
       if (!routeKey || /[^A-Za-z0-9_-]/.test(routeKey)) { fail('MALFORMED_ROUTE'); return; }
       const targetUrl = ZP.canonicalTargetURL(msg.targetUrl).href;
       const baseUrl = msg.baseUrl ? ZP.canonicalTargetURL(msg.baseUrl, targetUrl).href : targetUrl;
-      // parentTargetUrl is the embedder page's virtual URL — used as Referer
-      // for the iframe document fetch so origin-aware endpoints see the
-      // embedder host (otherwise they receive Referer = iframe's own host and
-      // 404 / 403 — observed on NAVER shopsquare.naver.com).
+      // Record parentTargetUrl so the iframe document fetch sends the embedder's virtual URL as Referer.
       let parentTargetUrl = '';
       try { if (msg.parentTargetUrl) parentTargetUrl = ZP.canonicalTargetURL(msg.parentTargetUrl).href; } catch {}
       const entryId = String(msg.entryId || randomEntryId());
-      tab.entries.set(entryId, { entryId, targetUrl, baseUrl, parentTargetUrl, title: '', stateClone: null, scrollX: 0, scrollY: 0, createdAt: Date.now(), opaque: !!msg.opaque });
-      shareRoutes.set(routeKey, { tabId: tab.tabId, entryId });
+      tab.entries.set(entryId, { entryId, targetUrl, baseUrl, parentTargetUrl, title: '', stateClone: null, scrollX: 0, scrollY: 0, createdAt: Date.now(), opaque: !!msg.opaque, frameRoute: true });
+      shareRoutes.set(routeKey, { tabId: tab.tabId, entryId, targetURL: targetUrl, frameRoute: true });
+      scheduleStateFlush();
       ok({ path: ZP.makeSharePath(routeKey) });
       return;
     }
@@ -3034,27 +2194,20 @@ async function handleMessage(event) {
       if (!tab) return;
       const targetUrl = ZP.canonicalTargetURL(msg.targetUrl).href;
       const baseUrl = msg.baseUrl ? ZP.canonicalTargetURL(msg.baseUrl, targetUrl).href : targetUrl;
-      const entry = { entryId: msg.entryId, targetUrl, baseUrl, title: '', stateClone: null, scrollX: 0, scrollY: 0, createdAt: Date.now(), opaque: !!msg.opaque };
+      const prevEntry = tab.entries.get(msg.entryId);
+      const callerCtx = event.source && event.source.id ? clientContext.get(event.source.id) : null;
+      const callerEntry = callerCtx && callerCtx.tabId === tab.tabId ? tab.entries.get(callerCtx.entryId) : null;
+      const isFrame = Boolean((prevEntry && (prevEntry.frameRoute || prevEntry.parentTargetUrl)) || (callerEntry && (callerEntry.frameRoute || callerEntry.parentTargetUrl)) || msg.frameRoute);
+      const parentTargetUrl = (prevEntry && prevEntry.parentTargetUrl) || (callerEntry && callerEntry.parentTargetUrl) || '';
+      const entry = { entryId: msg.entryId, targetUrl, baseUrl, parentTargetUrl, title: '', stateClone: null, scrollX: 0, scrollY: 0, createdAt: Date.now(), opaque: !!msg.opaque, frameRoute: isFrame };
       tab.entries.set(entry.entryId, entry);
-      tab.activeEntryId = entry.entryId;
-      if (msg.routeKey) shareRoutes.set(String(msg.routeKey), { tabId: tab.tabId, entryId: entry.entryId });
+      if (!isFrame || !tab.activeEntryId) tab.activeEntryId = entry.entryId;
+      if (msg.routeKey) shareRoutes.set(String(msg.routeKey), { tabId: tab.tabId, entryId: entry.entryId, targetURL: targetUrl, frameRoute: isFrame });
+      scheduleStateFlush();
       ok();
       return;
     }
-    // 2026-08-13 — 클라이언트가 자기 탭을 명시적으로 등록한다.
-    //
-    // `contextFor` 는 (a) Referer 로 share 경로를 되짚거나 (b) 이미 바인딩된
-    // clientId 로만 탭을 찾는다. 그런데 `srcdoc` / `blob:` / `about:blank`
-    // 문서는 내비게이션 요청이 없어 (b) 가 채워질 일이 없고, 그 문서의
-    // 서브리소스는 Referer 도 우리 origin 이 아니라 (a) 도 실패한다. 결과:
-    // **최상위 문서에서는 정상 로드되는 바로 그 URL 이** srcdoc iframe 에서
-    // 오면 거절당했다 (NAVER 장바구니 위 Braze 오버레이가 이미지 전부 실패).
-    //
-    // 프렐류드는 이런 문서에도 주입되고 boot 설정으로 자기 tabId/entryId 를
-    // 안다. 부팅 직후 이 메시지를 보내 clientId 를 묶어 준다. A2 불변식은
-    // 그대로다 — runtimeTabForMessage 가 per-tab capability token 을 요구하므로
-    // 토큰 없는 클라이언트는 자기를 아무 탭에나 붙일 수 없다. srcdoc 은 부모의
-    // entry 를 물려받는데, 그게 명세상 맞다 (srcdoc 은 부모의 URL/base 를 쓴다).
+    // Bind `clientId` on boot for clients created without a navigation request (`srcdoc`, `blob:`, `about:blank`).
     if (msg.type === ZP.MSG.BIND_CLIENT) {
       const tab = runtimeTabForMessage(event, msg, fail);
       if (!tab) return;
@@ -3062,9 +2215,8 @@ async function handleMessage(event) {
       if (!entry) { fail('SW_NOT_READY'); return; }
       const sourceId = event.source && event.source.id;
       if (sourceId) bindClientContext(sourceId, tab, entry);
-      // A top-level document's window is what its tab's client hints report (a frame's own size is not: Chrome sends
-      // the top window's viewport on a frame's requests too — measured).
       if (msg.env && msg.env.top === true) { const env = sanitizeClientEnv(msg.env); if (env) tab.clientEnv = env; }
+      scheduleStateFlush();
       ok({ bound: !!sourceId });
       return;
     }
@@ -3076,22 +2228,19 @@ async function handleMessage(event) {
       entry.baseUrl = ZP.canonicalTargetURL(msg.baseUrl, entry.targetUrl).href;
       const sourceId = event.source && event.source.id;
       if (sourceId) bindClientContext(sourceId, tab, entry);
+      scheduleStateFlush();
       ok({ baseUrl: entry.baseUrl });
       return;
     }
-    // <meta name="referrer"> 는 응답 헤더와 **같은 자격**의 정책 선언이고,
-    // 나중에 파싱된 쪽이 이긴다. 헤더만 보던 동안 meta 로만 정책을 선언한
-    // 페이지는 우리 쪽에서 기본값으로 떨어졌다 — 페이지가 부른 fetch 는
-    // Request.referrerPolicy 가 빈 문자열이라(문서 정책은 객체에 반영되지
-    // 않는다) 그 자리를 메울 것이 없었다. 프렐류드가 읽어서 알려 준다.
+    // Apply document referrer policies declared via `<meta name="referrer">` to `entry.referrerPolicy` so runtime fetches honor them.
     if (msg.type === ZP.MSG.REFERRER_POLICY) {
       const tab = runtimeTabForMessage(event, msg, fail);
       if (!tab) return;
       const entry = tab.entries.get(msg.entryId || tab.activeEntryId);
       if (!entry) { fail('SW_NOT_READY'); return; }
       const token = String(msg.policy || '').trim().toLowerCase();
-      // 알 수 없는 토큰은 무시한다(정책 이름을 임의 문자열로 밀어 넣지 못하게).
       if (['', 'no-referrer', 'no-referrer-when-downgrade', 'origin', 'origin-when-cross-origin', 'same-origin', 'strict-origin', 'strict-origin-when-cross-origin', 'unsafe-url'].includes(token)) entry.referrerPolicy = token;
+      scheduleStateFlush();
       ok({ referrerPolicy: entry.referrerPolicy || '' });
       return;
     }
@@ -3108,16 +2257,13 @@ async function handleMessage(event) {
       const tab = runtimeTabForMessage(event, msg, fail);
       if (!tab) return;
       const entry = tab.entries.get(msg.entryId);
-      if (entry) { entry.scrollX = Number(msg.scrollX) || 0; entry.scrollY = Number(msg.scrollY) || 0; }
+      if (entry) { entry.scrollX = Number(msg.scrollX) || 0; entry.scrollY = Number(msg.scrollY) || 0; scheduleStateFlush(); }
       ok();
       return;
     }
     if (msg.type === ZP.MSG.COOKIE_SET) {
       const tab = runtimeTabForMessage(event, msg, fail);
       if (!tab) return;
-      // Page sends ZP_COOKIE_SET with the virtualURL it observed, so the
-      // jar can scope the cookie by Domain/Path against the right host
-      // (default Domain = the target host, not the SW origin).
       if (tab.cookieJar && msg.targetUrl && msg.cookie) {
         applyCookieWrite(tab, String(msg.targetUrl), String(msg.cookie), msg.wid, event.source && event.source.id);
       }
@@ -3139,15 +2285,15 @@ async function handleMessage(event) {
       const entry = { entryId, targetUrl, baseUrl: targetUrl, title: '', stateClone: null, scrollX: 0, scrollY: 0, createdAt: Date.now() };
       tab.entries.set(entryId, entry);
       tab.activeEntryId = entryId;
-      shareRoutes.set(routeKey, { tabId: tab.tabId, entryId });
+      shareRoutes.set(routeKey, { tabId: tab.tabId, entryId, targetURL: targetUrl, frameRoute: false });
+      scheduleStateFlush();
       const submitId = ZP.randomId('sub');
       pendingSubmissions.set(submitId, { submitId, routeKey, tabId: tab.tabId, entryId, targetUrl, method, headers: Array.isArray(msg.headers) ? msg.headers : [], body, expiresAt: Date.now() + SUBMISSION_TTL_MS });
       ok({ submitId });
       return;
     }
     if (msg.type === ZP.MSG.WS_OPEN) { await openRuntimeStream(event, msg, ok, fail); return; }
-    // D5: module 워커가 직접 읽은 blob: 소스를 stash — 페이지가 브로커한
-    // 요청으로, 워커는 이어서 `/zp/api/worker-script?srctok=` 를 import 한다.
+    // Stash `blob:` worker sources read by a module worker so it can `import('/zp/api/worker-script?srctok=...')`.
     if (msg.type === ZP.MSG.WORKER_STASH) {
       const src = typeof msg.src === 'string' ? msg.src : '';
       if (!src || src.length > 4000000) { fail('POLICY_BLOCKED'); return; }
@@ -3175,15 +2321,9 @@ async function openRuntimeStream(event, msg, ok, fail) {
   const cookieURL = new URL(target.href);
   cookieURL.protocol = target.protocol === 'wss:' ? 'https:' : 'http:';
   const cookie = tab.cookieJar ? tab.cookieJar.cookieHeader(cookieURL.href) : '';
-  // Step 13: Rust kernelStream (crates/zp-kernel-bundle).
-  // 2026-06-08 split-bundle (c.3): kernel wasm is lazy — first ZP_WS_OPEN
-  // is what actually triggers the multi-MB kernel wasm instantiation.
   try { await initKernel(); } catch { fail('SW_NOT_READY'); return; }
   if (typeof self.kernelStream !== 'function') { fail('SW_NOT_READY'); return; }
-  // C1: defense-in-depth — runtime prelude validates sub-protocol tokens
-  // before sending ZP_WS_OPEN, but a compromised page realm could bypass
-  // that. Re-validate so a malformed protocol header never reaches the
-  // upstream handshake (RFC 6455 §4.1).
+  // Re-validate RFC 6455 section 4.1 sub-protocol tokens before passing them to the upstream handshake.
   const requestedProtocols = Array.isArray(msg.protocols) ? msg.protocols.slice() : [];
   for (const p of requestedProtocols) {
     if (typeof p !== 'string' || !/^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/.test(p)) {
@@ -3193,7 +2333,7 @@ async function openRuntimeStream(event, msg, ok, fail) {
   }
   let stream;
   try {
-    stream = await self.kernelStream({ url: target.href, protocols: requestedProtocols, userAgent: ZP.TARGET_USER_AGENT, origin, cookie, tabId: tab.tabId, streamIsolationKey: tab.streamIsolationKey, servers: tab.servers || [] });
+    stream = await self.kernelStream({ url: target.href, protocols: requestedProtocols, userAgent: ZP.TARGET_USER_AGENT, origin, cookie, tabId: tab.tabId, isolationKey: tab.streamIsolationKey, streamIsolationKey: tab.streamIsolationKey, servers: tab.servers || [] });
   } catch (e) {
     fail(e && (e.message || e.code) || 'TARGET_CONNECT_FAILED');
     return;
@@ -3272,17 +2412,11 @@ function runtimeTabForMessage(event, msg, fail) {
   return runtimeMessageAuthorized(event, tab, msg, fail) ? tab : null;
 }
 function runtimeMessageAuthorized(event, tab, msg, fail) {
-  // A2 hardening: every privileged ZP_* message must (a) carry the per-tab
-  // runtime capability token AND (b) originate from a known Service Worker
-  // client. event.source missing means we cannot attribute the message —
-  // reject rather than guess.
+  // Require both the per-tab runtime capability token and a known SW client source.
   if (!tab.runtimeToken || msg.runtimeToken !== tab.runtimeToken) { fail('POLICY_BLOCKED'); return false; }
   const source = event.source;
   if (!source || !source.id) { fail('POLICY_BLOCKED'); return false; }
   const ctx = clientContext.get(source.id);
-  // If client context exists it must match. If it doesn't exist yet (e.g.
-  // first message from a freshly opened document before BASE_UPDATE), the
-  // token is sufficient proof of capability and we accept.
   if (ctx && ctx.tabId !== tab.tabId) { fail('POLICY_BLOCKED'); return false; }
   return true;
 }
@@ -3292,21 +2426,12 @@ function createTab(targetUrl, servers, challengeCompat) {
   const tabId = ZP.randomId('t');
   const entryId = randomEntryId();
   const relayServers = ZP.relayServersForShare(servers || [], { allowLoopbackWS: true });
-  // Cookie jar is shared across all tabs viewing the same target origin so
-  // anti-bot warm-up cookies (NACT/NID/etc.) issued in one tab immediately
-  // benefit every other tab targeting the same site. The IDB layer above
-  // ensures the cookies also persist across SW restarts — the NAVER 60s
-  // anti-credential-stuffing lock is paid ONCE per first-cold-visit per
-  // browser profile rather than on every tab open.
-  // challengeCompat is the per-tab operator opt-in (B-series arm sender).
-  // Persisted on the tab so every response routed through this tab can take
-  // the armed CSP projection without re-reading the message stream. The
-  // header/URL classifier (Go side) is the second of two signals; this flag
-  // alone grants no egress, no eval, no cache skip.
+  // Share the RFC 6265 cookie jar across tabs targeting the same registrable domain.
   const targetOrigin = originKeyForURL(target);
   const tab = { tabId, activeEntryId: entryId, entries: new Map(), originMap: new Map(), cookieJar: getOrCreateJarForOrigin(targetOrigin), cookieJarOrigin: targetOrigin, storageNamespaces: new Map(), runtimeProfile: {}, streamIsolationKey: ZP.bytesToBase64Url(crypto.getRandomValues(new Uint8Array(32))), runtimeToken: ZP.randomId('rt'), servers: relayServers, challengeCompat: !!challengeCompat, topOrigin: new URL(target).origin, clientEnv: null };
-  tab.entries.set(entryId, { entryId, targetUrl: target, baseUrl: target, title: '', stateClone: null, scrollX: 0, scrollY: 0, createdAt: Date.now() });
+  tab.entries.set(entryId, { entryId, targetUrl: target, baseUrl: target, title: '', stateClone: null, scrollX: 0, scrollY: 0, createdAt: Date.now(), frameRoute: false });
   tabs.set(tabId, tab);
+  scheduleStateFlush();
   return tab;
 }
 function cleanupPendingSubmissions() {
@@ -3316,13 +2441,15 @@ function cleanupPendingSubmissions() {
   }
 }
 function randomEntryId() { return ZP.randomId('e'); }
-function bindClientContext(clientId, tab, entry) { if (clientId) clientContext.set(clientId, { tabId: tab.tabId, entryId: entry.entryId, targetUrl: entry.targetUrl, baseUrl: entry.baseUrl || entry.targetUrl }); }
+function bindClientContext(clientId, tab, entry) {
+  if (clientId) {
+    clientContext.set(clientId, { tabId: tab.tabId, entryId: entry.entryId, targetUrl: entry.targetUrl, baseUrl: entry.baseUrl || entry.targetUrl });
+    scheduleStateFlush();
+  }
+}
 function contextFromPath(path) { const p = parseSharePath(path); const state = p && shareRoutes.get(p.routeKey); const tab = state && tabs.get(state.tabId); const entry = tab && tab.entries.get(state.entryId); if (entry) return { tabId: tab.tabId, entryId: entry.entryId, targetUrl: entry.targetUrl, baseUrl: entry.baseUrl || entry.targetUrl }; return null; }
 function contextFromURL(u) { if (u.origin === ORIGIN) return resourceContext.get(u.pathname + u.search) || contextFromPath(u.pathname); return resourceContext.get(u.href) || null; }
 function contextFor(req, clientId) { const ref = req.headers.get('Referer'); if (ref) { try { const ctx = contextFromURL(new URL(ref)); if (ctx) return ctx; } catch {} } if (clientId && clientContext.has(clientId)) return clientContext.get(clientId); return null; }
-// A2 hardening: multi-tab "first available" fallbacks removed. Privileged
-// paths must resolve a tab explicitly (URL param, referer, capability token,
-// or client context). Silently piggy-backing on another tab leaks data.
 function rememberResourceContext(requestURL, targetUrl, ctx) {
   const next = { tabId: ctx.tabId, entryId: ctx.entryId, targetUrl: ctx.targetUrl, baseUrl: targetUrl };
   const key = requestURL.origin === ORIGIN ? requestURL.pathname + requestURL.search : requestURL.href;
@@ -3330,36 +2457,33 @@ function rememberResourceContext(requestURL, targetUrl, ctx) {
   resourceContext.set(targetUrl, next);
   while (resourceContext.size > 2048) resourceContext.delete(resourceContext.keys().next().value);
 }
-// RFC 6265 cookie jar (JS port; the Go-side jar was removed once the SW
-// became the sole cookie owner).
-// Replaces the prior flat tab.documentCookie string + name-only merge
-// helper which discarded every Set-Cookie attribute except name/value
-// (no Domain/Path/Secure/HttpOnly scoping). That caused cookie leakage
-// between subdomains —
-// www.naver.com cookies were echoed to mail.naver.com, nid login
-// cookies polluted www, and back navigation rendered pages cold-state
-// because the merged cookie blob no longer matched the per-host
-// expectations. Cookies are now scoped by (Domain, Path, Name) and
-// re-emitted only to URLs that match.
-// Shared cookie jars keyed by target-origin (eTLD+host:port string the user
-// originally typed). Multiple tabs viewing the same target share the same
-// jar so a NACT issued in tab A's first navigation is immediately available
-// to tab B's pstatic.net sub-resource fetch. RFC 6265 domain/path matching
-// inside the jar handles per-host scoping — sub-resources to s.pstatic.net
-// still only see cookies whose Domain attribute matches.
-//
-// Records are durably mirrored to IndexedDB so the NAVER 60-second
-// anti-credential-stuffing slow lane is paid ONCE per first-cold-visit per
-// browser profile, not on every tab open. Without persistence, every tab
-// close drops NACT/NID/long-term tokens and the next NAVER nav restarts
-// the lock.
-const sharedJars = new Map(); // originKey → jar
+// RFC 6265 cookie jars keyed by registrable domain and mirrored to IndexedDB across SW restarts.
+const sharedJars = new Map();
 const COOKIE_DB_NAME = 'zp-cookies';
 const COOKIE_DB_VERSION = 1;
 const COOKIE_DB_STORE = 'jars';
 const COOKIE_FLUSH_INTERVAL_MS = 60_000;
-const COOKIE_SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000; // session cookies: 7d
+const COOKIE_SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const STATE_TABS_KEY = '__zp_state_tabs__';
+const STATE_ROUTES_KEY = '__zp_state_routes__';
 let cookieDbPromise = null;
+let cookieJarLoaded = false;
+let cookieFlushTimer = null;
+let stateFlushTimer = null;
+function scheduleCookieFlush() {
+  if (cookieFlushTimer !== null) return;
+  cookieFlushTimer = setTimeout(() => {
+    cookieFlushTimer = null;
+    flushDirtyJarsToIDB();
+  }, 20);
+}
+function scheduleStateFlush() {
+  if (stateFlushTimer !== null) return;
+  stateFlushTimer = setTimeout(() => {
+    stateFlushTimer = null;
+    flushStateToIDB();
+  }, 20);
+}
 function openCookieDb() {
   if (cookieDbPromise) return cookieDbPromise;
   cookieDbPromise = new Promise((resolve, reject) => {
@@ -3385,11 +2509,16 @@ async function loadAllStoredJars() {
       const store = tx.objectStore(COOKIE_DB_STORE);
       const req = store.getAll();
       req.onsuccess = () => {
+        const rows = req.result || [];
         const now = Date.now();
-        for (const entry of req.result || []) {
-          if (!entry || !entry.targetOrigin || !Array.isArray(entry.records)) continue;
-          // Strip expired before mounting — a 7-day-old session cookie that
-          // already passed its synthetic TTL should not be revived.
+        let tabsRecord = null;
+        let routesRecord = null;
+        for (const entry of rows) {
+          if (!entry || !entry.targetOrigin) continue;
+          if (entry.targetOrigin === STATE_TABS_KEY) { tabsRecord = entry; continue; }
+          if (entry.targetOrigin === STATE_ROUTES_KEY) { routesRecord = entry; continue; }
+          if (String(entry.targetOrigin).startsWith('__zp_state_')) continue;
+          if (!Array.isArray(entry.records)) continue;
           const live = entry.records.filter(r => {
             if (!r) return false;
             if (r.maxAge != null) {
@@ -3400,9 +2529,174 @@ async function loadAllStoredJars() {
           });
           getOrCreateJarForOrigin(entry.targetOrigin, live);
         }
+        if (tabsRecord && Array.isArray(tabsRecord.tabs)) {
+          for (const st of tabsRecord.tabs) {
+            if (!st || !st.tabId) continue;
+            let tab = tabs.get(st.tabId);
+            if (!tab) {
+              const jarOrigin = st.cookieJarOrigin || originKeyForURL(st.topOrigin || '');
+              tab = {
+                tabId: st.tabId,
+                activeEntryId: st.activeEntryId || '',
+                entries: new Map(),
+                originMap: new Map(),
+                cookieJar: getOrCreateJarForOrigin(jarOrigin),
+                cookieJarOrigin: jarOrigin,
+                storageNamespaces: new Map(),
+                runtimeProfile: {},
+                streamIsolationKey: st.streamIsolationKey || ZP.bytesToBase64Url(crypto.getRandomValues(new Uint8Array(32))),
+                runtimeToken: st.runtimeToken || ZP.randomId('rt'),
+                servers: Array.isArray(st.servers) ? st.servers.slice() : [],
+                challengeCompat: !!st.challengeCompat,
+                topOrigin: st.topOrigin || '',
+                clientEnv: st.clientEnv || null,
+              };
+              tabs.set(tab.tabId, tab);
+            }
+            if (Array.isArray(st.entries)) {
+              for (const e of st.entries) {
+                if (!e || !e.entryId || tab.entries.has(e.entryId)) continue;
+                tab.entries.set(e.entryId, {
+                  entryId: e.entryId,
+                  targetUrl: e.targetUrl || '',
+                  baseUrl: e.baseUrl || e.targetUrl || '',
+                  parentTargetUrl: e.parentTargetUrl || '',
+                  title: e.title || '',
+                  stateClone: null,
+                  scrollX: Number(e.scrollX) || 0,
+                  scrollY: Number(e.scrollY) || 0,
+                  createdAt: Number(e.createdAt) || now,
+                  opaque: !!e.opaque,
+                  frameRoute: !!e.frameRoute,
+                  referrerPolicy: e.referrerPolicy || '',
+                  ...(typeof e.documentReferrer === 'string' ? { documentReferrer: e.documentReferrer } : null),
+                });
+              }
+            }
+            if (!tab.activeEntryId && tab.entries.size > 0) {
+              tab.activeEntryId = tab.entries.keys().next().value;
+            }
+          }
+        }
+        if (routesRecord) {
+          if (Array.isArray(routesRecord.routes)) {
+            for (const r of routesRecord.routes) {
+              if (!r || !r.routeKey || !r.tabId || shareRoutes.has(r.routeKey)) continue;
+              if (!tabs.has(r.tabId)) continue;
+              shareRoutes.set(r.routeKey, {
+                tabId: r.tabId,
+                entryId: r.entryId || '',
+                targetURL: r.targetURL || '',
+                frameRoute: !!r.frameRoute,
+              });
+            }
+          }
+          if (Array.isArray(routesRecord.clients)) {
+            for (const c of routesRecord.clients) {
+              if (!c || !c.clientId || !c.tabId || clientContext.has(c.clientId)) continue;
+              if (!tabs.has(c.tabId)) continue;
+              clientContext.set(c.clientId, {
+                tabId: c.tabId,
+                entryId: c.entryId || '',
+                targetUrl: c.targetUrl || '',
+                baseUrl: c.baseUrl || c.targetUrl || '',
+              });
+            }
+          }
+        }
+        cookieJarLoaded = true;
         resolve();
       };
-      req.onerror = () => resolve();
+      req.onerror = () => { cookieJarLoaded = true; resolve(); };
+    });
+  } catch {
+    cookieJarLoaded = true;
+  }
+}
+async function ensureCookieJarLoaded() {
+  if (cookieJarLoaded) return;
+  try { await restorePromise; } catch {}
+  cookieJarLoaded = true;
+}
+function serializeTabsState() {
+  const out = [];
+  for (const [, tab] of tabs) {
+    if (!tab || !tab.tabId) continue;
+    const entries = [];
+    if (tab.entries) {
+      for (const [, e] of tab.entries) {
+        if (!e || !e.entryId) continue;
+        entries.push({
+          entryId: e.entryId,
+          targetUrl: e.targetUrl || '',
+          baseUrl: e.baseUrl || e.targetUrl || '',
+          parentTargetUrl: e.parentTargetUrl || '',
+          title: e.title || '',
+          scrollX: Number(e.scrollX) || 0,
+          scrollY: Number(e.scrollY) || 0,
+          createdAt: Number(e.createdAt) || Date.now(),
+          opaque: !!e.opaque,
+          frameRoute: !!e.frameRoute,
+          referrerPolicy: e.referrerPolicy || '',
+          documentReferrer: typeof e.documentReferrer === 'string' ? e.documentReferrer : undefined,
+        });
+      }
+    }
+    out.push({
+      tabId: tab.tabId,
+      activeEntryId: tab.activeEntryId || '',
+      cookieJarOrigin: tab.cookieJarOrigin || originKeyForURL(tab.topOrigin || ''),
+      streamIsolationKey: tab.streamIsolationKey || '',
+      runtimeToken: tab.runtimeToken || '',
+      servers: Array.isArray(tab.servers) ? tab.servers.slice() : [],
+      challengeCompat: !!tab.challengeCompat,
+      topOrigin: tab.topOrigin || '',
+      clientEnv: tab.clientEnv || null,
+      entries,
+    });
+  }
+  return out;
+}
+function serializeRoutesState() {
+  const routes = [];
+  for (const [routeKey, state] of shareRoutes) {
+    if (!routeKey || !state || !state.tabId) continue;
+    const tab = tabs.get(state.tabId);
+    const entry = tab && tab.entries && tab.entries.get(state.entryId);
+    routes.push({
+      routeKey,
+      tabId: state.tabId,
+      entryId: state.entryId || '',
+      targetURL: state.targetURL || (entry && entry.targetUrl) || '',
+      frameRoute: !!(state.frameRoute || (entry && entry.frameRoute)),
+    });
+  }
+  const clients = [];
+  for (const [clientId, ctx] of clientContext) {
+    if (!clientId || !ctx || !ctx.tabId) continue;
+    clients.push({
+      clientId,
+      tabId: ctx.tabId,
+      entryId: ctx.entryId || '',
+      targetUrl: ctx.targetUrl || '',
+      baseUrl: ctx.baseUrl || ctx.targetUrl || '',
+    });
+  }
+  return { routes, clients };
+}
+async function flushStateToIDB() {
+  try {
+    const db = await openCookieDb();
+    const tabsSnap = serializeTabsState();
+    const routesSnap = serializeRoutesState();
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction(COOKIE_DB_STORE, 'readwrite');
+      const store = tx.objectStore(COOKIE_DB_STORE);
+      const now = Date.now();
+      store.put({ targetOrigin: STATE_TABS_KEY, tabs: tabsSnap, updatedAt: now });
+      store.put({ targetOrigin: STATE_ROUTES_KEY, routes: routesSnap.routes, clients: routesSnap.clients, updatedAt: now });
+      tx.oncomplete = resolve;
+      tx.onerror = () => reject(tx.error);
     });
   } catch {}
 }
@@ -3425,61 +2719,37 @@ async function flushDirtyJarsToIDB() {
     });
   } catch {}
 }
-// Boot: kick off async restore. Tabs created before restore completes will
-// race-create empty jars; the IDB load will MERGE entries into those jars
-// rather than replace, so cookies issued during the warm-up window are not
-// dropped on top by the restore.
 const restorePromise = loadAllStoredJars();
-// Periodic background flush. Also flush on `unload`-equivalent transitions
-// where possible — SW lifecycle doesn't have a true `beforeunload`, but
-// `freeze`/`activate` happen at predictable points.
-setInterval(() => { flushDirtyJarsToIDB(); }, COOKIE_FLUSH_INTERVAL_MS);
+setInterval(() => { flushDirtyJarsToIDB(); flushStateToIDB(); }, COOKIE_FLUSH_INTERVAL_MS);
 self.addEventListener('message', evt => {
   if (evt.data && evt.data.type === ZP.MSG.FLUSH_COOKIES) {
-    evt.waitUntil ? evt.waitUntil(flushDirtyJarsToIDB()) : flushDirtyJarsToIDB();
+    const p = Promise.all([flushDirtyJarsToIDB(), flushStateToIDB()]);
+    if (evt.waitUntil) evt.waitUntil(p);
   }
 });
 
-// 2026-08-13 — 쿠키 jar 키를 origin 이 아니라 **등록가능 도메인(eTLD+1)** 으로
-// 잡는다. origin 키는 서브도메인마다 jar 를 갈라 놓아서, `nid.naver.com` 으로
-// 시작한 탭에서 로그인한 뒤 `www.naver.com` 을 새 탭으로 열면 NID_AUT/NID_SES
-// 가 없는 빈 jar 를 받아 **로그아웃 상태로 보였다**. 브라우저는 쿠키를 Domain
-// 속성 기준으로 서브도메인끼리 공유하므로, 우리도 그 경계에 맞춰야 한다.
-// jar 내부의 RFC 6265 domainMatch 가 여전히 호스트별 스코핑을 강제하므로
-// 키를 넓혀도 엉뚱한 호스트로 쿠키가 새지 않는다.
-//
-// 공개 접미사 목록(PSL)은 번들에 없다. 아래 휴리스틱은 `naver.com` →
-// naver.com, `example.co.kr` → example.co.kr 처럼 실제로 마주치는 형태를
-// 커버한다. **중요**: 같은 함수를 쿠키 파서의 "Domain 이 공개 접미사면 거부"
-// 검사에도 쓴다. 두 곳이 같은 경계를 보게 해서, 넓힌 키가 `Domain=co.kr`
-// 같은 초광역 쿠키를 받아들이는 구멍으로 이어지지 않게 한다.
+// Compute the registrable domain (eTLD+1) to align subdomain cookie-jar sharing with public-suffix rejection.
 const SECOND_LEVEL_SUFFIX = new Set([
   'co', 'ne', 'or', 'ac', 'go', 're', 'pe', 'kg', 'seoul', 'busan',
   'com', 'net', 'org', 'gov', 'edu', 'mil', 'int', 'info', 'biz', 'nom',
 ]);
 function registrableDomain(host) {
   const h = String(host || '').toLowerCase().replace(/\.$/, '');
-  if (!h || /^\d+(\.\d+)*$/.test(h) || h.indexOf(':') >= 0) return h; // IP / IPv6 literal
+  if (!h || /^\d+(\.\d+)*$/.test(h) || h.indexOf(':') >= 0) return h;
   const parts = h.split('.');
   if (parts.length <= 2) return h;
-  // `example.co.kr` 형태: 마지막이 2글자 ccTLD 이고 그 앞이 알려진
-  // 2단계 접미사면 세 라벨을 잡는다. 그 외에는 두 라벨.
   const tld = parts[parts.length - 1];
   const sld = parts[parts.length - 2];
   if (tld.length === 2 && SECOND_LEVEL_SUFFIX.has(sld)) return parts.slice(-3).join('.');
   return parts.slice(-2).join('.');
 }
-// A cookie whose Domain attribute IS the public suffix (`com`, `co.kr`) must be
-// rejected — otherwise one site could write a cookie every sibling under that
-// suffix would carry. `registrableDomain` defines where that boundary is.
+// Reject cookies whose Domain attribute is a public suffix (e.g., com or co.kr).
 function isPublicSuffixDomain(dom) {
   const d = String(dom || '').toLowerCase().replace(/\.$/, '');
   if (!d) return true;
-  if (/^\d+(\.\d+)*$/.test(d) || d.indexOf(':') >= 0) return false; // IP literal
+  if (/^\d+(\.\d+)*$/.test(d) || d.indexOf(':') >= 0) return false;
   const parts = d.split('.');
-  if (parts.length < 2) return true;                       // `com`
-  // `co.kr` 자체도 공개 접미사다. registrableDomain 은 두 라벨짜리를 그대로
-  // 돌려주므로 여기서 따로 잡아야 한다.
+  if (parts.length < 2) return true;
   if (parts.length === 2 && parts[1].length === 2 && SECOND_LEVEL_SUFFIX.has(parts[0])) return true;
   return registrableDomain(d) !== d;
 }
@@ -3489,7 +2759,6 @@ function originKeyForURL(targetUrl) {
 function getOrCreateJarForOrigin(originKey, initialRecords) {
   let jar = sharedJars.get(originKey);
   if (jar) {
-    // Merge initial records (used by IDB restore arriving after first tab).
     if (Array.isArray(initialRecords) && initialRecords.length) jar.merge(initialRecords);
     return jar;
   }
@@ -3498,19 +2767,10 @@ function getOrCreateJarForOrigin(originKey, initialRecords) {
   return jar;
 }
 
-// ── cookie changes → every document that can see them ────────────────────────
-// A page keeps its own copy of the jar (what `document.cookie` and `cookieStore`
-// read); the jar here is the truth and every response, from any document, lands
-// in it. Each accepted change goes out, as a normalized record, to every window
-// client whose document is on a host that can see the cookie — in this tab and in
-// every other tab sharing the jar. Hosts that cannot see it never hear of it, so a
-// third-party frame is not handed another site's cookie value. HttpOnly changes
-// never leave the worker. A page that made the request also gets the change in the
-// response metadata (so it is there when the promise resolves); changes carry an id
-// and a page applies each once.
+// Broadcast non-HttpOnly cookie changes to window clients whose virtual host domain-matches the cookie.
 const cookieEpoch = ZP.randomId('ck');
 let cookieChangeSeq = 0;
-const cookiePushQueue = new Map(); // jar → [{ change, sourceClientId }]
+const cookiePushQueue = new Map();
 function cookieChangeVisibleToHost(change, host) {
   return change.hostOnly ? host === change.domain : (host === change.domain || host.endsWith('.' + change.domain));
 }
@@ -3520,7 +2780,6 @@ function queueCookiePush(jar, change, sourceClientId) {
   if (!queue) {
     queue = [];
     cookiePushQueue.set(jar, queue);
-    // One microtask later: every Set-Cookie line of a response lands first.
     Promise.resolve().then(() => flushCookiePush(jar)).catch(() => {});
   }
   queue.push({ change, sourceClientId: sourceClientId || '' });
@@ -3545,11 +2804,9 @@ async function flushCookiePush(jar) {
 function createCookieJar(initialRecords, notify) {
   const records = Array.isArray(initialRecords) ? initialRecords.slice() : [];
   let dirty = false;
-  function markDirty() { dirty = true; }
+  function markDirty() { dirty = true; scheduleCookieFlush(); }
   function canonHost(h) { return String(h || '').toLowerCase().replace(/\.$/, ''); }
-  // Chrome sends a Secure cookie to https and also to loopback over http (`localhost`,
-  // `*.localhost`, 127.0.0.0/8, ::1) — the dev-server case. Anything stricter makes a
-  // `SameSite=None; Secure` cookie that works natively vanish on a local target.
+  // Treat loopback origins (`localhost`, `*.localhost`, `127.0.0.0/8`, `::1`) as secure for cookies over HTTP so `SameSite=None; Secure` cookies work on local targets just as in Chrome.
   function secureForCookies(u) {
     if (u.protocol === 'https:' || u.protocol === 'wss:') return true;
     const h = canonHost(u.hostname);
@@ -3602,9 +2859,7 @@ function createCookieJar(initialRecords, notify) {
       const v = aeq >= 0 ? attr.slice(aeq + 1).trim() : '';
       if (k === 'domain' && v) {
         const dom = canonHost(v.replace(/^\./, ''));
-        // jar 를 등록가능 도메인 단위로 공유하게 되면서, `Domain=co.kr` 같은
-        // 공개 접미사 쿠키를 받아 주면 그 아래 모든 사이트가 그걸 물고 나가는
-        // 구멍이 된다. 브라우저와 같은 규칙으로 거부한다.
+        // Reject public-suffix Domain attributes so a cookie jar shared per registrable domain cannot leak cookies across unrelated sites under the suffix.
         if (!dom || isPublicSuffixDomain(dom) || !domainMatch(host, dom, false)) continue;
         rec.domain = dom;
         rec.hostOnly = false;
@@ -3622,9 +2877,7 @@ function createCookieJar(initialRecords, notify) {
     }
     return rec;
   }
-  // What a `Set-Cookie` did, as a record a page can apply without parsing anything
-  // itself: the jar's decision (Domain accepted or not, session cookies, deletion) is
-  // the only one. `expires` is null for a session cookie.
+  // Produces a pre-parsed cookie mutation record (`expires` is null for session cookies) so pages apply the jar's exact Domain, session, and deletion decisions without re-parsing.
   function changeFor(rec, deleted) {
     return {
       id: cookieEpoch + ':' + (++cookieChangeSeq),
@@ -3634,11 +2887,9 @@ function createCookieJar(initialRecords, notify) {
       deleted: !!deleted,
     };
   }
-  // `meta.sourceClientId`: the document that wrote it itself (it already has it).
   function setCookieLine(url, line, meta) {
     const rec = parse(line, url);
     if (!rec) return null;
-    // A cross-site context keeps only SameSite=None cookies (the default is Lax).
     if (meta && meta.crossSite && rec.sameSite !== 'none') return null;
     const report = deleted => {
       const change = changeFor(rec, deleted);
@@ -3657,12 +2908,7 @@ function createCookieJar(initialRecords, notify) {
       }
       return report(true);
     }
-    // Session cookies (neither Expires nor Max-Age) survive across SW
-    // restarts via the IDB layer — without this synthetic TTL their
-    // `expires==null` would be persisted indefinitely and never pruned.
-    // 7 days mirrors the upper bound NAVER's NACT lifecycle uses in
-    // practice; longer would leak stale anti-bot tokens, shorter would
-    // re-trigger the 60s slow-lane on weekly use.
+    // Bound session cookies persisted in IndexedDB with a synthetic TTL so they do not accumulate indefinitely across worker restarts.
     if (rec.maxAge == null && rec.expires == null) {
       rec.expires = Date.now() + COOKIE_SESSION_TTL_MS;
       rec.session = true;
@@ -3707,10 +2953,6 @@ function createCookieJar(initialRecords, notify) {
     return cookiesForURL(url, false).map(r => r.name + '=' + r.value).join('; ');
   }
   function snapshot() {
-    // Return non-expired records for IDB serialisation. HttpOnly stays in —
-    // it's a server-side flag that gates `document.cookie` exposure, not
-    // jar membership. Strip the `creation` jitter to keep serialised blobs
-    // stable across short-interval flushes (smaller IDB writes).
     const now = Date.now();
     return records.filter(r => !expired(r, now)).map(r => ({
       name: r.name, value: r.value,
@@ -3724,12 +2966,7 @@ function createCookieJar(initialRecords, notify) {
     }));
   }
   function merge(restored) {
-    // Used by the IDB restore path when records arrive AFTER live cookies
-    // already populated the jar (e.g. a fast warm-up navigation finished
-    // before the IDB GET resolved). Restored records DO NOT clobber live
-    // ones with the same (name, domain, path) tuple — the live value is the
-    // freshest authoritative one. Restored records also do not mark the
-    // jar dirty (no need to re-persist what we just loaded).
+    // Preserve live records over late-arriving IndexedDB restore entries with the same (name, domain, path) tuple, and avoid marking the jar dirty for freshly loaded state.
     const now = Date.now();
     for (const r of restored) {
       if (!r || !r.name || !r.domain) continue;
@@ -3741,7 +2978,6 @@ function createCookieJar(initialRecords, notify) {
         }
       }
       if (liveIdx >= 0) continue;
-      // Skip already-expired restored records.
       if (r.maxAge != null) {
         if (r.maxAge <= 0) continue;
         if (r.creation + r.maxAge * 1000 <= now) continue;
@@ -3752,9 +2988,7 @@ function createCookieJar(initialRecords, notify) {
   function consumeDirty() { const was = dirty; dirty = false; return was; }
   return { setCookieLine, cookieHeader, documentCookieFor, snapshot, merge, consumeDirty };
 }
-// A cookie the page wrote with document.cookie reaches the worker twice when a synchronous request carries
-// it too (the message and the request); the write id makes the second a no-op. The id rides on the change, so
-// the writer — which has the cookie already — can tell the push of its own write.
+// Deduplicates `document.cookie` writes that arrive via both postMessage and a synchronous request header, and echoes `wid` on the change event so the originating document ignores its own write.
 function applyCookieWrite(tab, targetUrl, line, wid, sourceClientId) {
   if (!line || !tab.cookieJar) return;
   if (wid) {
@@ -3765,17 +2999,7 @@ function applyCookieWrite(tab, targetUrl, line, wid, sourceClientId) {
   }
   tab.cookieJar.setCookieLine(String(targetUrl), String(line), { sourceClientId, wid });
 }
-// An element the page marked `crossorigin` (and module scripts, fonts, `mask-image`…) is a cors-mode request of its
-// document: the browser's CORS rules apply to it as to a fetch(), against the document's virtual origin, and its
-// credentials mode says whether cookies go along. The browser only sees the worker's answer, which always allows its
-// own origin, so the worker is where the target's answer is held to them. (`null` for a no-cors load.)
-//
-// A `fetch()` has no destination: the parent of a frame the worker does not control (srcdoc, blob:, document.write)
-// fetches that frame's images itself and hands over a blob URL, and that fetch is not the element's request.
-//
-// A frame the worker does not control (a blank frame written to by script, a blob: document) cannot request its
-// elements itself: its parent fetches them and says what the element asked for in `X-ZP-Element-CORS`
-// (`anonymous` / `use-credentials`; absent for a plain element), which stands in for the missing destination.
+// Enforces virtual-origin CORS and credential rules for subresource elements (`crossorigin`, module scripts, fonts), using `X-ZP-Element-CORS` when a parent frame proxies the fetch on behalf of an uncontrolled child document (`srcdoc`, `blob:`, `document.write`).
 function elementCorsOptions(req, entry) {
   const hint = req.headers.get('X-ZP-Element-CORS');
   let credentials;
@@ -3785,23 +3009,16 @@ function elementCorsOptions(req, entry) {
   else return null;
   return { elementCors: true, mode: 'cors', credentials, opaqueOrigin: !!(entry && entry.opaque) };
 }
-// ---- Fetch-spec CORS for a page's own fetch()/XHR ----------------------------------------------
-// The page's request goes out from here, so the worker is where a browser's CORS rules have to be
-// applied: without them a cross-origin read the target never allowed succeeds, which no real browser
-// does. Everything below is the Fetch Standard's algorithm (CORS check, CORS-preflight fetch,
-// CORS-safelisted headers, response tainting), using the document's *virtual* origin.
+// Enforces Fetch Standard CORS checks, preflights, safelisted headers, and header filtering against the document's virtual origin because the browser sees every proxy response as same-origin.
 const CORS_SAFE_RESPONSE_HEADERS = ['cache-control', 'content-language', 'content-length', 'content-type', 'expires', 'last-modified', 'pragma'];
 const CORS_PREFLIGHT_DEFAULT_AGE_S = 5;
 const CORS_PREFLIGHT_MAX_AGE_S = 7200;
 const CORS_PREFLIGHT_CACHE_CAP = 256;
 const corsPreflightCache = new Map();
 function corsSafelistedMethod(method) { return method === 'GET' || method === 'HEAD' || method === 'POST'; }
-// A header value a CORS-safelisted request header may carry: short, and free of the bytes that make a
-// value "unsafe" (control characters other than tab, and `"():<>?@[\]{}`).
 function corsSafeHeaderValue(value) {
   return value.length <= 128 && !/[\u0000-\u0008\u000a-\u001f"():<>?@[\\\]{}\u007f]/.test(value);
 }
-// The request-header names that make a request need a preflight (lowercase, sorted, unique).
 function corsUnsafeHeaderNames(headers, implicit) {
   const out = new Set();
   for (const [name, value] of headers.entries()) {
@@ -3820,8 +3037,6 @@ function corsUnsafeHeaderNames(headers, implicit) {
 function corsTokenList(value) {
   return value ? value.split(',').map(t => t.trim()).filter(Boolean) : [];
 }
-// The "CORS check": the response names this origin (or everyone, for a request without credentials),
-// and a request with credentials is also allowed them.
 function corsCheck(headers, requestOrigin, credentials) {
   const allowed = headers.get('access-control-allow-origin');
   if (allowed === null) return false;
@@ -3829,8 +3044,6 @@ function corsCheck(headers, requestOrigin, credentials) {
   if (allowed !== requestOrigin) return false;
   return !credentials || headers.get('access-control-allow-credentials') === 'true';
 }
-// Which response headers a script may read: the safelisted ones and what the response exposes. `*` exposes
-// every header the target sent (not the ones the worker adds), and only without credentials.
 function corsExposedHeaders(headers, credentials) {
   const names = new Set(CORS_SAFE_RESPONSE_HEADERS);
   for (const token of corsTokenList(headers.get('access-control-expose-headers'))) {
@@ -3840,7 +3053,7 @@ function corsExposedHeaders(headers, credentials) {
   }
   return { names: Array.from(names) };
 }
-// A cors response shows the page only what it exposes (the worker's own `X-ZP-*` channel stays).
+// Retains internal `X-ZP-*` control headers while stripping unexposed upstream headers from CORS responses.
 function corsFilterHeaders(headers, expose) {
   if (!expose) return;
   const visible = new Set(expose.names);
@@ -3852,13 +3065,10 @@ function corsFilterHeaders(headers, expose) {
 function corsPreflightAllows(entry, method, names, credentials) {
   const wildcard = list => !credentials && list.includes('*');
   if (!corsSafelistedMethod(method) && !wildcard(entry.methods) && !entry.methods.includes(method)) return false;
-  // The Fetch Standard keeps `Authorization` out of the `*` wildcard; the Chrome this is measured against
-  // (148) lets it through, so a page that works there must work here.
+  // Match Chromium's behavior of allowing `Authorization` under a wildcard `Access-Control-Allow-Headers: *` when credentials are omitted.
   for (const name of names) if (!entry.headers.includes(name) && !wildcard(entry.headers)) return false;
   return true;
 }
-// The preflight: an OPTIONS request without credentials that must answer 2xx, pass the CORS check, and
-// allow the method and every non-safelisted header. Answers are cached (per tab) for Max-Age seconds.
 async function runCORSPreflight(url, opt, method, names, requestOrigin, credentials) {
   const key = [opt.tab.tabId, requestOrigin, url, credentials ? 1 : 0].join('\n');
   const now = Date.now();
@@ -3893,20 +3103,9 @@ async function runCORSPreflight(url, opt, method, names, requestOrigin, credenti
 function isCORSPreflight(req) { return req.method === 'OPTIONS' && req.headers.has('Access-Control-Request-Method'); }
 function corsPreflight(req) { const h = new Headers(); applyCORS(h, req); h.set('Access-Control-Max-Age', '86400'); h.set('Cache-Control', 'no-store'); return new Response(null, { status: 204, headers: h }); }
 function applyCORS(h, req) {
-  // `mode:'cors'` + 자격증명 요청(모듈 워커 import(), 크리덴셜 fetch)에는
-  // `ACAO:*` 가 스펙상 무효 — 응답이 통째로 거부돼 "Failed to fetch" 가 된다.
-  // Origin 헤더가 없는 요청(일부 모듈 로더 경로)에는 요청 URL 의 오리진을
-  // 되비춘다 — 이 핸들러의 응답은 어차피 같은 오리진에만 간다.
+  // Reflect the concrete request origin so credentialed `mode: 'cors'` requests (such as module worker `import()`) succeed, and omit `Access-Control-Allow-Credentials: true` when falling back to `*`.
   const origin = req && (req.headers.get('Origin') || (req.url ? new URL(req.url).origin : '')) || '*';
   h.set('Access-Control-Allow-Origin', origin);
-  // ★`*` 와 `Allow-Credentials: true` 는 명세상 **함께 못 쓴다** — 브라우저가
-  // 응답 전체를 거부한다. 예전에는 무조건 credentials 를 켰고, Origin 헤더가
-  // 없는 요청에서 정확히 그 조합이 나왔다. 실제 피해는 관측되지 않았는데
-  // (Origin 이 없으면 CORS 요청이 아니라 브라우저가 헤더를 안 본다) 잘못된
-  // 조합을 내보낼 이유는 없다. 구체 오리진을 되비출 때만 켠다.
-  //
-  // 이게 CORS 의 **유일한** 구현이다. Go 쪽 `ConstructorPolicy` 에도 CORS
-  // 방출이 있었지만 2026-08-21 실측 결과 호출자가 없는 죽은 코드였다.
   if (origin !== '*') {
     h.set('Vary', h.get('Vary') ? h.get('Vary') + ', Origin' : 'Origin');
     h.set('Access-Control-Allow-Credentials', 'true');
@@ -3915,36 +3114,12 @@ function applyCORS(h, req) {
   h.set('Access-Control-Allow-Headers', req && req.headers.get('Access-Control-Request-Headers') || '*');
   h.set('Access-Control-Expose-Headers', '*');
 }
-// addCSP wraps a kernel response with the SW-emitted policy block. The fourth
-// arg `tab` (optional) carries the per-tab arm opt-in: when armed AND the
-// kernel response carries the internal X-ZP-Challenge-Compat marker (emitted
-// by the Go server's ApplyChallengeCompat when ITS two-signal gate held), the
-// CSP gains the Cloudflare challenge-host whitelist. The marker is ALWAYS
-// stripped before the response reaches the page (B4 strip obligation):
-// leaking it would expose a proxy-internal control header and undermine the
-// fingerprint-blind contract. The Cache-Control overwrite is delegated to the
-// Go server's ConstructorPolicy — this wrapper only fills in the no-store
-// default when upstream sent nothing, which is the correct floor for both
-// armed and disarmed paths.
-// 2026-08-13 — addCSP 의 헤더 적용부를 분리했다.
-//
-// `addCSP` 는 `new Response(resp.body, …)` 를 만들어 돌려주는 형태라 이미
-// 파이프한 스트림에는 쓸 수 없었고, 그래서 `streamDocumentResponse` 는
-// 상류 헤더를 그대로 쓰고 **우리 CSP 를 아예 안 붙였다**. 스트리밍이 문서의
-// 기본 경로이므로 사실상 모든 프록시 문서에 CSP 가 없었다.
-// 실측(수정 전): 런처 페이지에서는 외부 이미지가 차단되는데, 같은 이미지가
-// 프록시 문서에서는 그대로 로드됐다.
-// 타깃이 헤더로 브라우저를 조종하는 자리. Go 의 `internal/headers/policy.go`
-// `hidden` 과 **같은 목록**이어야 한다 — static-policy 가드가 둘을 대조한다.
-// `Refresh: <delay>[;url=<url>]` 를 **지우는 대신 옮긴다.** 지우기만 하면
-// 탈출은 막히지만 타깃이 의도한 리다이렉트가 통째로 사라진다(실측: 착지 실패).
-// htmltx 가 `<meta http-equiv=refresh>` 에 하는 것과 같은 처리 — url 부분만
-// 런처의 `?via=` 경로로 바꾼다. delay 만 있는 형태는 자기 자신 재로드라 그대로 둔다.
+// Rewrites the target URL inside a `Refresh` response header into a launcher `?via=` URL so header-driven redirects stay inside the proxy instead of escaping or failing to land.
 function proxiedRefreshValue(raw, targetUrl) {
   const s = String(raw || '');
   if (!s) return '';
   const at = s.toLowerCase().indexOf('url=');
-  if (at < 0) return s; // delay-only — 프록시 URL 을 다시 부르는 것이라 안전하다
+  if (at < 0) return s;
   const head = s.slice(0, at);
   let v = s.slice(at + 4).trim();
   if (v.length >= 2 && ((v[0] === '"' && v.endsWith('"')) || (v[0] === "'" && v.endsWith("'")))) v = v.slice(1, -1);
@@ -3955,80 +3130,34 @@ function proxiedRefreshValue(raw, targetUrl) {
   if (!/^https?:/i.test(abs)) return '';
   return head + 'url=' + ORIGIN + ZP.CONTROL_PREFIX + '?via=' + encodeURIComponent(abs);
 }
-// hop-by-hop + Location. Go `internal/headers/policy.go` 의 `isHopByHop` +
-// Location 제외 정책과 **같은 목록**이어야 한다 — static-policy 가 양방향으로 대조한다.
-// ── 타깃 응답 헤더 정책 (빌드가 픽스처에서 박아 넣는다) ────────────────────
-//
-// 목록은 `crates/zp-shared/testdata/response_header_policy.json` 하나뿐이다.
-// 예전엔 Go `internal/headers/policy.go` 에도 같은 목록이 있었고 가드가 양쪽
-// 일치만 봤는데, 2026-08-21 에 재 보니 **Go 쪽은 테스트 말고 호출자가 없는
-// 죽은 코드**였다. "Go 가 막고 있다" 는 믿음이 실제 탈출을 낳았다
-// (2026-08-20 `Refresh`). 사본을 지우고 여기 하나만 남겼다.
+// Target response header strip lists injected from `crates/zp-shared/testdata/response_header_policy.json` at build time.
 const ZP_HOP_BY_HOP_HEADERS = __ZP_HOP_BY_HOP_HEADERS__;
 const ZP_TARGET_POLICY_HEADERS = __ZP_TARGET_POLICY_HEADERS__;
-// 브라우저가 타깃 엔드포인트로 **직접** 보고서를 보내게 만드는 헤더.
-// CSP 리포트는 Service Worker 가 가로챌 수 없어 릴레이를 우회한다 = IP 유출.
+// Browser reporting headers (`Report-To`, `Reporting-Endpoints`, `NEL`, `Content-Security-Policy-Report-Only`) that trigger out-of-band browser egress bypassing the Service Worker.
 const ZP_REPORTING_HEADERS = __ZP_REPORTING_HEADERS__;
-// The CSP every proxied realm runs under. The WebTransport gateway is its own
-// origin (a separate UDP port) and WebTransport is governed by connect-src —
-// so the document header, its meta copy and the worker bootstrap must all
-// admit it, or the wrapper's session is refused before it leaves the realm.
+// Admits the WebTransport gateway origin in `connect-src` across document headers, meta tags, and worker bootstraps.
 function proxiedCSP(servers, challengeCompat) {
   return ZP.fixedCSP(servers || [], {
     challengeCompat: !!challengeCompat,
     extraConnect: runtimeConfig.wtGateway ? [runtimeConfig.wtGateway] : [],
   });
 }
+// Enforces the proxy CSP on response headers, strips internal `X-ZP-Challenge-Compat` and out-of-band reporting/navigation/hop-by-hop headers, and rewrites `Refresh` headers to stay within the proxy.
 function applyZPSecurityHeaders(h, req, servers, tab, targetUrl) {
-  // 문서 응답은 `/zp/p/<token>` 으로 오는데 페이지가 보는 내비게이션
-  // 타이밍 이름은 **가상 URL** 이다. 요청 URL 로는 둘을 이을 수 없으므로
-  // 목적지를 아는 이 자리에서 함께 실어 보낸다(둘 다 직후에 지워진다).
+  // Attach the virtual target URL alongside `X-ZP-Encoded-Size` or `X-ZP-Stream-Id` so Navigation Timing entries on `/zp/p/<token>` documents match the page's virtual URL.
   try { if (targetUrl && (h.get('X-ZP-Encoded-Size') || h.get('X-ZP-Stream-Id'))) h.set('X-ZP-Encoded-For', targetUrl); } catch {}
   const rawRefresh = h.get('Refresh');
-  // B4: read once, then delete unconditionally — defense in depth against a
-  // disarmed tab somehow seeing the header (e.g. server bug, racing reload).
   const responseSignalled = h.get('X-ZP-Challenge-Compat') === '1';
   h.delete('X-ZP-Challenge-Compat');
   const armedHere = !!(tab && tab.challengeCompat) && responseSignalled;
+  h.delete('Content-Security-Policy');
+  h.delete('Content-Security-Policy-Report-Only');
+  h.delete('X-Content-Security-Policy');
+  h.delete('X-WebKit-CSP');
   h.set('Content-Security-Policy', proxiedCSP(servers, armedHere));
-  // 2026-08-14 — 브라우저가 타깃에게 **직접** 보고하게 만드는 헤더를 전부 지운다.
-  //
-  // 실측(nid.naver.com): 응답에 `Content-Security-Policy-Report-Only` 가 실려
-  // 오고 그 안에 `report-uri https://nid.naver.com/login/api/csp.repo.naver.only`
-  // 가 있다. 이름이 `Content-Security-Policy` 와 달라서 위의 `set` 이 건드리지
-  // 못했고, 그대로 페이지에 적용되고 있었다. 위반이 하나 생길 때마다 브라우저가
-  // 그 엔드포인트로 POST 하는데 **CSP 리포트는 Service Worker 가 가로챌 수 없다**
-  // — 릴레이를 우회하는 직접 egress, 즉 실제 IP 유출 경로다.
-  //
-  // Report-To / Reporting-Endpoints / NEL 도 같은 부류(네트워크 오류·경고를
-  // 브라우저가 지정 엔드포인트로 직접 전송)라 함께 지운다. 우리 정책에는
-  // report-uri 가 없으므로 지우는 쪽이 기능 손실도 없다.
   for (const name of ZP_REPORTING_HEADERS) h.delete(name);
-  // 2026-08-20 — 타깃이 **헤더로** 지시하는 것들.
-  //
-  // 예전 주석은 "Go 의 ConstructorPolicy 가 이미 걷어내는데 문서 응답만
-  // 안 지난다" 고 적혀 있었다. 2026-08-21 실측: Go 쪽은 **테스트 말고
-  // 호출자가 하나도 없는 죽은 코드**라 어떤 응답도 안 지난다. 여기가
-  // 유일한 구현이다.
-  //
-  // ★`Refresh` 가 **진짜 탈출**이었다. 비표준이지만 크롬이 지원하는 헤더판
-  // meta refresh 다. 마크업이 아니라 응답 헤더라 htmltx 가 볼 수 없고, meta 쪽만
-  // 막아 둔 상태였다. 내비게이션 축 매트릭스 실측: 문서가 프록시 밖으로 나가고
-  // 브라우저가 착지 오리진으로 직접 요청 2건을 냈다 = IP 유출.
-  // `Link: <…>; rel=preload` 도 같은 부류다 — 브라우저가 헤더만 보고 타깃 URL 을
-  // 직접 가지러 간다. `Clear-Site-Data` 는 프록시 오리진의 저장소를 타깃이
-  // 지우게 하고, `Alt-Svc` 는 다음 연결을 타깃이 지정한 프로토콜/포트로 돌린다.
   for (const name of ZP_TARGET_POLICY_HEADERS) h.delete(name);
-  // ★hop-by-hop + Location. Go 의 ConstructorPolicy 는 이미 걷어내는데 문서
-  // 응답은 커널→SW 경로라 Go 를 안 지난다 — 실측(2026-08-21): connection /
-  // keep-alive / trailer / proxy-authenticate / location 이 브라우저까지 갔다.
-  //
-  // Location 이 특히 위험하다. 리다이렉트는 위에서 우리가 따라가므로 페이지로
-  // 나가는 응답에 남아 있을 이유가 없고, 남아 있으면 브라우저가 따라간다.
-  // hop-by-hop 은 합성 Response 에서 의미가 없고 상류 구현을 드러낸다.
   for (const name of ZP_HOP_BY_HOP_HEADERS) h.delete(name);
-  // 지운 뒤에 **프록시 경로로 다시 심는다.** 목적지를 아는 경우에만 — 서브리소스
-  // 응답에는 targetUrl 이 없고, 거기 붙은 Refresh 는 어차피 의미가 없다.
   if (rawRefresh && targetUrl) {
     const next = proxiedRefreshValue(rawRefresh, targetUrl);
     if (next) h.set('Refresh', next);
@@ -4038,31 +3167,12 @@ function applyZPSecurityHeaders(h, req, servers, tab, targetUrl) {
   applyCORS(h, req);
   return h;
 }
-// ★2026-08-23 — 페이지가 자기 리소스의 **압축 크기**를 알 길이 없었다.
-// SW 가 합성한 응답은 encodedBodySize == decodedBodySize 로 측정돼
-// **모든 응답이 비압축처럼 보였다**(github 대조군 118/135 압축, 프록시 0/200).
-// 커널이 디코드 직전 와이어 바이트 수를 `X-ZP-Encoded-Size` 로 실어 주므로,
-// 여기서 그걸 **요청한 클라이언트에게만** 넘기고 헤더는 지운다.
-//
-// 브로드캐스트하지 않는 이유: 메시지에 타깃 URL 이 들어 있어 다른 탭에
-// 뿌리면 그 자체가 탭 간 유출이다. 함정노트 A2(multi-tab leak) 와 같은 부류.
-// 스트리밍 문서는 크기가 **나중에** 생기므로, 응답 시점에는 누구에게
-// 보내야 하는지만 적어 둔다. 배달은 transform 의 flush 가 부른다.
+// Relays pre-decompression wire byte counts (`X-ZP-Encoded-Size`) to the requesting client only so Resource Timing reports accurate `encodedBodySize` without leaking target URLs across tabs.
 const pendingStreamReports = new Map();
-// D5: blob:/data: 워커 소스 — 페이지가 읽은 소스를 부트스트랩 해시로 받아
-// 여기 stash 하고, 워커가 `/zp/api/worker-script?srctok=…` 로 한 번 가져가면
-// 지운다. 해시는 HTTP 요청에 안 실리지만 SW 의 fetch 핸들러에는 보인다.
+// One-time stash for `blob:`/`data:` worker sources passed via bootstrap URL hash and consumed by `/zp/api/worker-script?srctok=...`.
 const workerSrcStash = new Map();
-// 밀어 보내기가 실패한 것만 남는다. 키는 **페이지가 이미 아는 자기 URL** 이라
-// 질의응답으로 새로 알려주는 것은 없다(탭 간 노출 없음).
 const streamEncodedByUrl = new Map();
-// ★문서는 **별도 칸**에 넣는다. 둘을 한 FIFO 에 섞으면 서브리소스가 많은
-// 페이지가 **자기 문서 기록을 스스로 밀어낸다** — MDN 실측(2026-08-24):
-// 텔레메트리 비컨이 쏟아져 맵이 상한 32에 걸리고 문서 키가 축출됐다.
-// 페이지 부팅이 느린 첫 방문에서는 질의가 축출보다 늦어 **항상** 놓쳤고,
-// 그 결과 문서가 "압축 안 됨"(encoded == decoded)으로 보였다. 웜 로드에서는
-// 질의가 이겨서 통과했다 — 그래서 레이스처럼 보였지만 원인은 용량이다.
-// 내비게이션은 탭당 하나뿐이라 작은 칸으로 충분하다.
+// Keep navigation document sizes in a separate FIFO from subresources so bursts of subresource requests cannot evict the document's entry before the page queries it.
 const docEncodedByUrl = new Map();
 const DOC_ENCODED_CAP = 8;
 function isNavigationRequest(req) {
@@ -4083,15 +3193,9 @@ function deliverStreamEncoded(streamId) {
   const size = table && Number(table[streamId]);
   if (!size) return;
   try { delete table[streamId]; } catch {}
-  // ★내비게이션은 `resultingClientId` 라 **flush 시점에 아직 잡힐 수 없다**
-  // (실측: register/flush 는 둘 다 돈는데 clients.get 이 undefined 다).
-  // 그래서 밀어 보내는 걸 시도하되, 안 되면 URL 로 남겨 둔다 —
-  // 페이지가 자기 URL 로 물어보면 그때 돌려준다(경쟁 없음).
+  // Record by URL in addition to pushing via `postMessage` because a navigation's `resultingClientId` may not resolve or have its message listener attached at stream flush time.
   recordEncoded(pending.url, size, !!pending.isDoc);
   self.clients.get(pending.clientId).then(client => {
-    // 밀어 보낸 뒤에도 **지우지 않는다** — 페이지의 메시지 리스너가 아직
-    // 안 붙었을 수 있고, 그러면 메시지도 잃고 질의할 것도 없어진다.
-    // 지우는 건 질의에 답할 때 하나만(상한 32개로 묶여 있다).
     if (client) client.postMessage({ type: ZP.MSG.ENCODED_SIZE, url: pending.url, size });
   }).catch(() => {});
 }
@@ -4116,32 +3220,12 @@ async function reportEncodedSize(event, resp) {
     headers.delete('X-ZP-Encoded-For');
     const out = new Response(resp.body, { status: resp.status, statusText: resp.statusText, headers });
     const id = event.clientId || event.resultingClientId;
-    // ★`clients.get(resultingClientId)` 를 **await 하면 안 된다.**
-    //
-    // 내비게이션의 resulting client 는 **응답이 커밋돼야** 생긴다. 그런데 이
-    // await 는 응답 경로 위에 있다 — 응답이 클라이언트를 기다리고, 클라이언트는
-    // 응답을 기다리는 교착이다. Chrome 은 예약된 id 에 대해 이 promise 를
-    // 그냥 붙들고 있으므로 respondWith 가 영영 settle 되지 않는다.
-    //
-    // 증상이 지독하게 조용하다: SW 는 200 을 만들어 냈고(실측 92~210ms),
-    // 커널도 상류도 멀쩡하다. 브라우저만 커밋을 못 해서 iframe 이 영원히
-    // `about:blank` 로 남고 load 도 error 도 콘솔도 없다. CNN 실측
-    // (2026-08-25): 한 로드에서 문서 요청 6건이 이렇게 죽었고, 그중 하나가
-    // bounce 의 저장소 프레임이라 device_id → state/js → sspConfig → APS
-    // 광고 체인이 통째로 끊겼다.
-    //
-    // 이 메시지는 **진단용 텔레메트리**다. 페이지가 못 받아도 되고, 그래서
-    // 아래 recordEncoded 로 pull 경로가 이미 있다. 응답을 볼모로 잡을 값이
-    // 아니다 — 보내되 기다리지 않는다.
+    // Do not `await clients.get(resultingClientId)` on the response path: a navigation's resulting client only materializes after the response commits, so awaiting it deadlocks `respondWith`.
     if (id) {
       self.clients.get(id).then((client) => {
-        // 페이지는 타임을 **리라이트된 타깃 URL** 로 색인하므로 같은 이름으로 보낸다.
         if (client) client.postMessage({ type: ZP.MSG.ENCODED_SIZE, url: encFor || encodedSizeKey(event.request.url), size: Number(enc) || 0 });
       }).catch(() => {});
     }
-    // 내비게이션은 `resultingClientId` 라 이 시점에 클라이언트가 없을 수 있고,
-    // 있더라도 페이지의 리스너가 아직 안 붙었을 수 있다. 버퍼 경로 문서가
-    // 그러서 번번이 새다(MDN 에서 실측). URL 로도 남겨 두면 페이지가 당길 수 있다.
     if (encFor) {
       recordEncoded(encFor, Number(enc) || 0, isNavigationRequest(event.request));
     }
@@ -4160,17 +3244,11 @@ function encodedSizeKey(rawURL) {
 }
 function addCSP(resp, req, servers, tab, targetUrl) {
   const h = new Headers(resp.headers);
-  // B4: read once, then delete unconditionally — defense in depth against a
-  // disarmed tab somehow seeing the header (e.g. server bug, racing reload).
   applyZPSecurityHeaders(h, req, servers, tab, targetUrl);
   return new Response(resp.body, { status: resp.status, statusText: resp.statusText, headers: h });
 }
 function safeError(code, status = 400, targetUrl = '') {
-  // 커널이 주는 에러는 `CODE: 상세` 꼴이다 (예:
-  // `TARGET_HTTP_FAILED: h2: response: tls: process: received fatal alert:
-  // UnexpectedMessage`). 통째로 ERRORS 대조를 하면 못 찾아서 전부
-  // POLICY_BLOCKED 로 뭉개졌다 — 네트워크/TLS 실패가 "정책 차단" 으로
-  // 둔갑해 원인 추적을 정반대 방향으로 보낸다. 앞 토큰을 먼저 본다.
+  // Extract the leading error code token before `:` so detailed kernel errors (such as `TARGET_HTTP_FAILED: ...`) map to their specific error code instead of falling back to `POLICY_BLOCKED`.
   const detail = String(code == null ? '' : code);
   if (!ZP.ERRORS.includes(detail)) {
     const head = detail.split(':', 1)[0].trim();
@@ -4228,8 +3306,7 @@ function safeError(code, status = 400, targetUrl = '') {
       'Cache-Control': 'no-store',
       'Content-Security-Policy': ZP.fixedCSP(),
       'X-Content-Type-Options': 'nosniff',
-      // Marks this as OUR page, not the target's, so transformDocumentResponse
-      // (which now rewrites 4xx/5xx HTML bodies) leaves it alone.
+      // Marks synthetic proxy error pages so `transformDocumentResponse` does not rewrite them as upstream 4xx/5xx HTML bodies.
       'X-ZP-Error': '1',
       'X-ZP-Error-Code': code,
       'Access-Control-Allow-Origin': '*',
@@ -4241,16 +3318,12 @@ function safeError(code, status = 400, targetUrl = '') {
 }
 function escapeHTML(s) { return String(s).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&#34;',"'":'&#39;'}[ch])); }
 function workerBootstrap(url) {
-  // In a function: a classic worker's top-level `const` is a global lexical binding its own script can read.
+  // Wrap bootstrap state initialization in an IIFE so top-level bindings do not pollute a classic worker's global lexical scope.
   const head = "(function(){var p=new URLSearchParams(self.location.hash.slice(1));self.__ZP_WORKER_TARGET=p.get('u')||'about:blank';self.__ZP_WORKER_REF=p.get('ref')||'';self.__ZP_WORKER_TAB_ID=p.get('tab')||'';self.__ZP_WORKER_SERVERS=p.getAll('server');self.__ZP_WORKER_SRC_URL=p.get('srcu')||'';self.__ZP_WORKER_WT_GATEWAY=p.get('wtg')||'';self.__ZP_WORKER_WT_GATEWAY_HASHES=p.getAll('wtgh');try{self.__ZP_WORKER_RTC_ICE=JSON.parse(p.get('ice')||'[]')}catch(e){self.__ZP_WORKER_RTC_ICE=[]}})();";
-  // module 워커에는 importScripts 가 없다 — zp-core/prelude/타깃을 import()
-  // 체인으로 순차 로드한다(prelude 는 zp-core 가 이미 있으면 importScripts 를 건넌다).
+  // Module workers lack `importScripts`, so chain `import()` calls sequentially through `zp-core`, `zp-page-bundle`, `worker-prelude`, and the target script.
   const hashParams = url.hash ? new URLSearchParams(url.hash.slice(1)) : null;
   const mod = hashParams && hashParams.get('mod') === '1';
-  // D5: `src` 가 있으면 blob:/data: 워커 소스 — stash 해 두고 srctok 라우트로
-  // 서빙한다. 재작성은 worker-script 라우트가 한다.
   const src = hashParams ? hashParams.get('src') : null;
-  // `srcu` 는 워커가 직접 읽는 소스 URL(blob:/data:) — prelude 가 맡는다.
   const srcu = hashParams ? hashParams.get('srcu') : null;
   let scriptURL = "'/zp/api/worker-script?tab=' + encodeURIComponent(self.__ZP_WORKER_TAB_ID) + '&u=' + encodeURIComponent(self.__ZP_WORKER_TARGET)" + (mod ? " + '&kind=module'" : "");
   if (src != null) {
@@ -4258,13 +3331,6 @@ function workerBootstrap(url) {
     workerSrcStash.set(tok, src);
     scriptURL = "'/zp/api/worker-script?srctok=" + tok + "&tab=' + encodeURIComponent(self.__ZP_WORKER_TAB_ID) + '&u=' + encodeURIComponent(self.__ZP_WORKER_TARGET)" + (mod ? " + '&kind=module'" : "");
   }
-  // zp-page-bundle 은 self-contained(wasm 인라인 + initSync) 라 워커에서도
-  // importScripts/import() 만으로 `self.ZPBundle` 이 선다. 워커 realm 에
-  // 재작성기가 있어야 eval/Function/문자열 타이머/blob·data importScripts 를
-  // rewrite-then-execute 로 열 수 있다. 로드 실패는 치명적이지 않다 —
-  // worker-prelude 의 동적 코드 경로는 ZPBundle 부재 시 fail-closed 된다.
-  // srcu 워커는 타깃 스크립트 fetch 가 없다 — prelude 가 소스를 직접 읽어
-  // 실행(classic)하거나 fetch→브로커 stash→import(module) 한다.
   const body = srcu != null
     ? (mod
       ? head + "import('/zp/assets/zp-core.js?v=__ZP_BUILD_ID__').then(function(){return import('/zp/assets/zp-page-bundle.js?v=__ZP_BUILD_ID__').catch(function(){})}).then(function(){return import('/zp/assets/worker-prelude.js?v=__ZP_BUILD_ID__')}).catch(function(e){setTimeout(function(){throw e},0)});"
@@ -4272,10 +3338,7 @@ function workerBootstrap(url) {
     : (mod
       ? head + "var __zp_script_url=" + scriptURL + ";import('/zp/assets/zp-core.js?v=__ZP_BUILD_ID__').then(function(){return import('/zp/assets/zp-page-bundle.js?v=__ZP_BUILD_ID__').catch(function(){})}).then(function(){return import('/zp/assets/worker-prelude.js?v=__ZP_BUILD_ID__')}).then(function(){return import(__zp_script_url)}).catch(function(e){setTimeout(function(){throw e},0)});"
       : head + "importScripts('/zp/assets/worker-prelude.js?v=__ZP_BUILD_ID__');try{importScripts('/zp/assets/zp-page-bundle.js?v=__ZP_BUILD_ID__')}catch(e){};if(self.__zp_settle)self.__zp_settle();importScripts(" + scriptURL + ");");
-  // The worker's policy comes from this, its main script — not the page's.
-  // Its embedder policy too. A worker started by a `COEP: require-corp` (or `credentialless`) document must have a COEP
-  // of its own, or the browser refuses the script (`ERR_BLOCKED_BY_RESPONSE`); natively a blob worker inherits the owner's,
-  // but here every worker is this network response. `require-corp` satisfies any owner, and costs nothing here: what the
-  // worker loads after this (the prelude, the target's script, its fetches) is same-origin with the proxy.
+  // Emit `Cross-Origin-Embedder-Policy: require-corp` on the worker bootstrap response so workers spawned by COEP-isolated documents (`require-corp` or `credentialless`) are not blocked by the browser.
   return new Response(body, { headers: { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Security-Policy': proxiedCSP([], false), 'Cross-Origin-Embedder-Policy': 'require-corp', 'X-Content-Type-Options': 'nosniff' } });
 }
+

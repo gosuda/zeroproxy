@@ -6,6 +6,7 @@ Project onboarding, architecture, and build/test instructions live in [CLAUDE.md
 
 - Always follow the `deslop` skill (`.agents/skills/deslop/SKILL.md`): no AI-generated slop in tests, production code, comments, or docs.
 - Always follow the best-practices skills that match the work (`just-good-practices`, `code-health`, `testing-practices`, `api-design`, and the language-specific ones such as `go-practices`, `cpp-practices`, `shell-practices`). Read the matching skill before you start.
+- Write all code, comments, log/error strings, test names, assertion messages, and documentation in English only. Do not include Korean text in source files or documentation.
 
 ## Documentation
 

@@ -1,11 +1,6 @@
-// Does the ClientHello we send still look like the installed Chrome's?   npm run check:chrome-hello
-//
-// A TCP listener on 127.0.0.1 records the first flight of each connection while a real Chrome (a throw-away profile, no
-// automation flags) opens https://localhost:PORT/. The hello's extensions and the `trust_anchors` body are compared with what
-// the SW's captured spec and the rustls fork send. Exit 0: same. Exit 1: drift (the report says what). Exit 2: no Chrome.
-//
-// Why bytes and not a fingerprint service: tls.peet.ws compared our hello with WebView2's and called them equal, while a real
-// Chrome sends one more extension (0xca34, ERRATA 66). Compare with the browser the persona claims to be.
+// Compare the ClientHello extensions and trust_anchors payload emitted by the
+// service worker spec and rustls fork against a local Chrome installation.
+// Exit 0: identical. Exit 1: drift detected. Exit 2: Chrome not found.
 import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import net from 'node:net';
@@ -38,7 +33,7 @@ function chromeVersion(exe) {
 
 const isGrease = t => (t & 0x0f0f) === 0x0a0a && (t >> 8) === (t & 0xff);
 
-/** A ClientHello record → { exts: [{ type, body }] }, or null while the record is still incomplete. */
+/** Parse a ClientHello record into { exts: [{ type, body }] }, or return null if incomplete. */
 function parseHello(buf) {
   if (buf.length < 5 || buf[0] !== 0x16) return null;
   const recordLen = buf.readUInt16BE(3);
@@ -59,7 +54,7 @@ function parseHello(buf) {
   return { exts };
 }
 
-/** What the repo sends: the SW's spec extensions and the fork's trust_anchors body. */
+/** Read the expected ClientHello extension list and trust_anchors payload from the repository. */
 function repoHello() {
   const sw = fs.readFileSync(path.join(root, 'web/sw.js'), 'utf8');
   const b64 = /const CAPTURED_FINGERPRINT_B64 = '([^']+)'/.exec(sw)?.[1];

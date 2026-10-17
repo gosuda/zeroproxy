@@ -60,10 +60,7 @@ func TestTURNServerLifecycle(t *testing.T) {
 	if !strings.Contains(cred.Username, "session-A") {
 		t.Fatalf("username missing session-A label: %q", cred.Username)
 	}
-	// Successive calls must produce different usernames (timestamp differs)
-	// — actually they may share a timestamp if called in the same second,
-	// so we only assert that with an explicit different label the
-	// username differs.
+	// Distinct labels must produce distinct usernames even within the same second.
 	cred2, err := srv.IssueICEServerCreds("session-B")
 	if err != nil {
 		t.Fatalf("IssueICEServerCreds #2: %v", err)
@@ -84,11 +81,9 @@ func TestTURNServerRejectsBadAddr(t *testing.T) {
 	}
 }
 
-// The credentials the config endpoint hands the browser must authenticate
-// against the server's own handler. It minted TURN-REST usernames
-// ("<expiry>:<label>") but checked them with the plain long-term handler,
-// which parses the whole username as an integer — every browser allocation
-// was refused ("Invalid time-windowed username", 2026-09-30).
+// TestTURNServerAcceptsItsOwnCredentials verifies that TURN-REST credentials
+// ("<expiry>:<label>") issued by IssueICEServerCreds authenticate against the
+// server's LongTermTURNRESTAuthHandler.
 func TestTURNServerAcceptsItsOwnCredentials(t *testing.T) {
 	srv, err := NewTURNServer(TURNConfig{
 		Addr:         "127.0.0.1:0",

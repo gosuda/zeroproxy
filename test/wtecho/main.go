@@ -1,10 +1,9 @@
-// wtecho is a WebTransport echo target for browser tests of the D4 gateway.
+// wtecho is a WebTransport echo target for browser gateway tests.
 //
 // It listens on a random 127.0.0.1 UDP port with a self-signed ECDSA P-256
-// certificate valid for 13 days — the only kind a browser accepts through
-// `serverCertificateHashes` — and prints one JSON line
-// `{"addr":"127.0.0.1:port","certHash":"<base64url SHA-256>"}` so a test can
-// pin it. Bidirectional streams and datagrams are echoed back verbatim.
+// certificate valid for 13 days (required for browser `serverCertificateHashes`
+// pinning) and prints `{"addr":"127.0.0.1:port","certHash":"<base64url SHA-256>"}`.
+// Bidirectional streams and datagrams are echoed back verbatim.
 package main
 
 import (

@@ -1,8 +1,7 @@
 //! Performance baseline for `zp-rewriter`.
 //!
-//! Plan target (E3): patch-mode warm rewrite ≥5x faster than cold full re-emit
-//! on large scripts. We measure cold (new RewriterInstance per call) and warm
-//! (reused instance) latency across script size buckets.
+//! Measures cold (new `RewriterInstance` per call), warm (reused instance),
+//! and patch-only latency across script size buckets.
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use zp_rewriter::{rewrite_script, rewrite_script_patches, RewriteOpts, RewriterInstance, ScriptKind};

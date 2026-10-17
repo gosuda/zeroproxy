@@ -1,5 +1,5 @@
-// T6-3 진단: Turnstile armed 로드 시 wire/console/response 수집.
-// 사용: node scripts/turnstile-probe.cjs
+// Collect wire, console, and response diagnostics during a Turnstile challenge load.
+// Usage: node scripts/turnstile-probe.cjs
 'use strict';
 const { spawn } = require('node:child_process');
 const path = require('node:path');
@@ -77,10 +77,8 @@ function waitForHTTP(url, timeoutMs = 10000) {
   await page.waitForFunction(() => { const b = document.querySelector('#open button'); return b && !b.disabled; }, { timeout: 60000 });
   await page.click('#open button');
 
-  // 공유 URL 로 네비게이션될 때까지 대기 (런처가 location.assign 한다).
   await page.waitForFunction(() => location.pathname.startsWith('/zp/p/'), { timeout: 30000 }).catch(e => console.log('NAV-TIMEOUT', e.message));
 
-  // 45 초간 챌린지 클리어 대기 — title/url 변화를 폴링.
   const deadline = Date.now() + 45000;
   let last = '';
   while (Date.now() < deadline) {
@@ -94,7 +92,6 @@ function waitForHTTP(url, timeoutMs = 10000) {
     await new Promise(r => setTimeout(r, 500));
   }
 
-  // 챌린지 상태 덤프 — _cf_chl_opt, body 내용.
   try {
     const st = await page.evaluate(() => ({
       cfOpt: typeof window._cf_chl_opt !== 'undefined' ? Object.keys(window._cf_chl_opt).length : 'absent',

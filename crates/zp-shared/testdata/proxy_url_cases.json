@@ -1,18 +1,14 @@
 {
   "__doc": [
-    "`/zp/api/fetch?url=…` 빌더 파리티 픽스처.",
+    "Parity fixture for the `/zp/api/fetch?url=...` builder.",
     "",
-    "Rust zp_shared::subresource_proxy_url 과 페이지 realm 의 subresourceProxyPath",
-    "가 같은 입력에 **바이트 단위로 같은** 출력을 내야 한다.",
+    "Rust `zp_shared::subresource_proxy_url` and page-realm `subresourceProxyPath`",
+    "must produce byte-for-byte identical output for the same inputs.",
     "",
-    "왜: 이 문자열을 만드는 곳이 넷이었고 셋이 서로 달랐다.",
-    "  htmltx  — 프래그먼트를 파라미터 밖에 보존, tab 없음, NON_ALPHANUMERIC-(-._~)",
-    "  zp-css  — 프래그먼트를 파라미터 안으로 삼킴, form_urlencoded(공백→'+')",
-    "  프렐류드 — 프래그먼트를 파라미터 안으로 삼킴, encodeURIComponent, &tab= 붙임",
-    "프래그먼트를 삼키면 `<use href=\"sprite.svg#icon\">` 과 CSS url(...#id) 이",
-    "조각을 잃어 빈 채로 렌더된다.",
+    "Fragments (`#icon`) are preserved outside `?url=` so SVG `<use href=\"sprite.svg#icon\">`",
+    "and CSS `url(...#id)` references keep their fragment identifiers.",
     "",
-    "origin 은 항상 http://proxy.example, prefix 는 /zp/."
+    "origin is always http://proxy.example, prefix is /zp/."
   ],
   "cases": [
     {
@@ -71,7 +67,7 @@
     },
     {
       "id": "non-ascii",
-      "url": "https://t.example/한글.png",
+      "url": "https://t.example/\uD55C\uAE00.png",
       "tab": null,
       "want": "http://proxy.example/zp/api/fetch?url=https%3A%2F%2Ft.example%2F%ED%95%9C%EA%B8%80.png"
     },

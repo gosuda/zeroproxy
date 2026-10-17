@@ -1,119 +1,160 @@
 # ZeroProxy
 
-ZeroProxy is a client-owned virtual browsing prototype that runs target pages on the proxy origin without a browser extension. **Compatibility refactoring is in progress; this is not a production-acceptance declaration.** The current scope, known gaps, and planned behavior are in the [website compatibility refactor plan](.ai/design/website-compat-refactor.md).
+Most web proxies force an uncomfortable trade-off. Server-side proxies decrypt your traffic on a remote machine and break modern JavaScript applications. Browser extensions require installation permissions and still share the browser's underlying networking stack and storage.
 
-## Architecture and security boundary
+ZeroProxy takes a different path. Open a normal browser tab, point it at the ZeroProxy launcher, and browse any website inside a self-contained virtual environment. You do not need to install an extension or configure system-wide network settings. Every page runs inside a client-side JavaScript membrane that isolates cookies, storage, and DOM access per target site, while a WebAssembly transport kernel inside the Service Worker handles TLS encryption and HTTP framing directly in your browser. The Go server only forwards encrypted byte streams to your chosen transport, such as Tor with per-tab stream isolation or a local development connection.
 
-Target HTTP, HTTPS, and WebSocket requests use the browser-side transport path:
+> [!NOTE]
+> Website compatibility refactoring is in progress; this repository is a working prototype rather than a finished production release. Current scope, known limitations, and active engineering tracks live in the [website compatibility refactor plan](.ai/design/website-compat-refactor.md).
 
-```text
-Service Worker -> Rust WASM kernel -> WebSocket/yamux -> SOCKS5 CONNECT
-                                                       -> rustls for HTTPS -> HTTP/2 or HTTP/1.1
+## How It Works
+
+When you open a website through ZeroProxy, your browser and the local relay divide responsibilities so that page state and TLS sessions stay on the client.
+
+```mermaid
+flowchart LR
+    Page["Target Page (Membrane + OXC Rewriter)"] --> SW["Service Worker (Request Classifier)"]
+    SW --> Kernel["Rust WASM Kernel (rustls + HTTP/1.1 & HTTP/2)"]
+    Kernel --> Pipe["WebSocket + yamux Multiplexer"]
+    Pipe --> Relay["Go Relay Server"]
+    Relay --> Egress["Tor SOCKS5 or Direct Target"]
 ```
 
-The Go relay serves built assets and terminates the browser WebSocket/yamux pipe. With an external SOCKS5 listener it bridges each stream to that listener; with `-socks internal` it parses SOCKS5 CONNECT and dials the target directly. Target HTTP parsing, HTTPS TLS, cookies, redirects, and content rewriting remain browser-side responsibilities, not a server-side HTTP proxy. Optional WebTransport and WebRTC gateways are separate, explicitly configured Go services; their configuration is defined in [`cmd/zeroproxy-server/main.go`](cmd/zeroproxy-server/main.go).
+1. **You enter a URL in the launcher.** ZeroProxy encrypts the target address into a route like `/zp/p/<encrypted>#k=<key>&server=...`. Because the decryption key lives in the URL `#` fragment, the browser never sends that key to the server over HTTP.
+2. **The Service Worker intercepts every request.** Before a page loads, the Service Worker fetches the target response through the Rust WebAssembly kernel. The kernel establishes a TLS session with `rustls` and speaks HTTP/1.1 or HTTP/2 over a multiplexed `yamux` WebSocket tunnel to the Go relay.
+3. **HTML, CSS, and scripts are transformed before execution.** The Rust HTML and CSS transformers rewrite static links and stylesheets, while the OXC AST rewriter transforms JavaScript so accesses to `window`, `location`, `document`, and dynamic code evaluation route through the virtual membrane.
+4. **Each site gets its own isolated storage and network path.** The runtime membrane partitions `localStorage`, `sessionStorage`, IndexedDB, Cache Storage, and cookies by target origin. When paired with Tor, each tab authenticates to the SOCKS5 listener with separate credentials so tabs do not share Tor circuits.
 
-Keep these boundaries when changing compatibility behavior:
+## Quickstart
 
-- Target documents use encrypted `/zp/p/<encrypted>#k=<key>&server=...` routes. The fragment key stays client-side. URL envelopes use AES-256-CBC, HMAC-SHA256, and HKDF-separated keys, with MAC verification before decryption.
-- Service Worker-controlled requests must be classified; unknown traffic must not fall back to native target fetches.
-- Privileged runtime bridge operations require the document/tab capability context. Target code must not gain native networking or an uncontained clean realm.
-- Executable target JavaScript goes through the Rust OXC rewriter and runtime membrane. Rewrite failures must fail closed, not execute the original source or relax CSP.
-- `-socks internal` is **not an anonymity mode**. Target connections originate directly from the relay process. Tor egress and isolation need separate deployment verification.
+You can build and run ZeroProxy locally to test website compatibility or browse through a local Tor daemon.
 
-These are design constraints, not proof that every browser API and website currently preserves native semantics. Fetch/redirect/credential behavior, document state, cookies, realm installation, AST semantics, and streaming lifetime are the active refactor areas. A historical test count or screenshot does not establish current acceptance.
+### Prerequisites
 
-## Repository map
+Install the following tools before building from source:
 
-| Path | Responsibility |
-|---|---|
-| [`Cargo.toml`](Cargo.toml) | Current Rust workspace and dependencies. |
-| [`crates/zp-bundle`](crates/zp-bundle) | Service Worker rewriting/HTML/CSS/shared-policy WASM exports. |
-| [`crates/zp-kernel-bundle`](crates/zp-kernel-bundle) | Lazily loaded browser-side transport kernel: yamux, SOCKS5, rustls, HTTP, and target WebSocket handling. |
-| [`crates/zp-rewriter`](crates/zp-rewriter), [`crates/zp-htmltx`](crates/zp-htmltx), [`crates/zp-css`](crates/zp-css) | JavaScript AST, HTML, and CSS transformations. |
-| [`crates/zp-shared`](crates/zp-shared), [`crates/zp-transport-codec`](crates/zp-transport-codec) | Shared policy/URL contracts and transport codecs. |
-| [`crates/zp-page-bundle`](crates/zp-page-bundle), [`crates/zp-page-rt`](crates/zp-page-rt), [`web/zp-rt.js`](web/zp-rt.js) | Page-realm rewriting bundle and raw-WASM URL-policy runtime/glue. |
-| [`web/index.html`](web/index.html), [`web/zp-core.js`](web/zp-core.js) | Launcher and shared browser URL/policy helpers. |
-| [`web/sw.js`](web/sw.js) | Request classification, document/tab state, runtime bridge, transformation, and kernel integration. |
-| [`web/runtime-prelude.js`](web/runtime-prelude.js), [`web/worker-prelude.js`](web/worker-prelude.js) | Page/worker containment and browser API compatibility. |
-| [`cmd/zeroproxy-server`](cmd/zeroproxy-server), [`internal`](internal) | Go host, relay, optional gateways, and supporting packages. |
-| [`scripts/build.mjs`](scripts/build.mjs), [`scripts/test.mjs`](scripts/test.mjs) | Build and test entry points. |
-| [`test/js`](test/js), [`test/e2e`](test/e2e) | JavaScript contract/policy checks and real-browser E2E scenarios, including the E1 escape matrix. |
-| [`.github/workflows/ci.yml`](.github/workflows/ci.yml) | Remote build and verification workflow; use its current steps rather than historical command lists. |
+- **Rust** with the `wasm32-unknown-unknown` target defined in [`rust-toolchain.toml`](rust-toolchain.toml).
+- **`wasm-bindgen-cli`** matching the `wasm-bindgen` version pinned in [`Cargo.lock`](Cargo.lock).
+- **Go** matching [`go.mod`](go.mod), **Node.js LTS**, and **npm**.
+- **A modern Chromium or Firefox browser** with Service Worker and WebAssembly support.
+- **Tor** (optional), required only when you want anonymous egress and per-tab stream isolation.
 
-## Requirements
+### 1. Build the Server and Browser Assets
 
-- Rust and the `wasm32-unknown-unknown` target specified by [`rust-toolchain.toml`](rust-toolchain.toml).
-- `wasm-bindgen-cli` matching the `wasm-bindgen` version resolved in [`Cargo.lock`](Cargo.lock); the CI workflow records its installation procedure.
-- Go matching [`go.mod`](go.mod), Node.js LTS, and npm. npm dependencies provide the JavaScript build tools and Puppeteer.
-- A browser with Service Worker and WebAssembly support. Browser E2E uses Puppeteer's Chrome for Testing.
-- For anonymous target browsing, a Tor SOCKS5 listener with stream isolation. Tor is not required for internal-relay compatibility tests.
+> [!WARNING]
+> Confirm that Rust, `wasm-bindgen-cli`, and Go are installed before running `npm run build` on a machine that already has a working `dist/` directory. The build script cleans `dist/` before compiling and will remove your runnable bundle if a required compiler is missing.
 
-## Remote verification first
-
-On memory-constrained machines, keep local work to editing and lightweight inspection. Push the working branch and use the [CI workflow](.github/workflows/ci.yml) for compilation and actual browser E2E instead of starting parallel local Rust builds, browser processes, or language servers. Do not run a local build merely to duplicate an in-flight CI run.
-
-CI builds deployable assets once and reuses them for WASM checks and serial Chromium E2E, including the E1 escape matrix. The workflow runs on branch pushes, pull requests, and manual dispatch. Relevant entry points in [`package.json`](package.json):
-
-- `npm run test:js`: lightweight Node behavior checks without compiling or starting a browser.
-- `npm run test:wasm:ci`: WASM checks against already-built `dist/` assets; does not build.
-- `npm run test:e2e:ci`: actual browser proxy/E1/request-contract scenarios against built assets; does not build. `ZP_E2E_DIST` and `ZP_E2E_ARTIFACTS` select the build and evidence directories.
-
-The real-site runner, [`test/e2e/real-site-regression.test.js`](test/e2e/real-site-regression.test.js) (`npm run dogfood:real-site`), is a **separate opt-in run**, not part of deterministic CI. For the exact commit under review, inspect both the CI/browser result and any separately collected real-site evidence. A launcher title, successful build, or old green run is not evidence that the target page rendered correctly. Review screenshots and reported failures, and keep missing evidence explicit.
-
-Internal-relay tests do not start Tor or prove Tor anonymity, production deployment safety, or compatibility with every site. Operational dogfood guidance is in [`PRODUCTION_ROLLOUT.md`](PRODUCTION_ROLLOUT.md).
-
-## Build and run locally
-
-When local resources permit, build from the repository root:
+Run the build from the repository root:
 
 ```sh
 npm ci
 npm run build
 ```
 
-The build writes the Go server and browser assets under `dist/`:
+This step compiles the Go server binary and the WebAssembly bundles into `dist/`:
 
 ```text
-dist/zeroproxy-server                  relay server (.exe on Windows)
-dist/web/                              built browser assets
-dist/web/__zp/zp_bundle_sw_bg.wasm      Service Worker rewrite bundle
-dist/web/__zp/zp_kernel_sw_bg.wasm      lazy transport kernel
-dist/web/__zp/zp_page_bundle_bg.wasm    page-realm bundle
-dist/web/__zp/zp_page_rt.wasm           raw page runtime
+dist/zeroproxy-server                  Go relay server (.exe on Windows)
+dist/web/                              Built browser assets served to clients
+dist/web/__zp/zp_bundle_sw_bg.wasm     Service Worker HTML/CSS/JS rewrite bundle
+dist/web/__zp/zp_kernel_sw_bg.wasm     Lazily loaded transport kernel (yamux, SOCKS5, rustls, HTTP)
+dist/web/__zp/zp_page_bundle_bg.wasm   Page-realm dynamic script rewriter
+dist/web/__zp/zp_page_rt.wasm          Raw WASM runtime for synchronous URL policy checks
 ```
 
-The build can clean existing artifacts before compiling. Confirm toolchain availability first if `dist/` contains your only runnable build. Always serve **`dist/web`**, not the source `web/` directory: the source directory lacks generated WASM/glue assets.
+### 2. Start the Relay Server
 
-For Tor-free compatibility testing:
+Choose either local test mode (no Tor required) or Tor mode.
+
+> [!CAUTION]
+> Do not use `-socks internal` when you need network anonymity. In internal mode, the Go relay dials target servers directly from your machine's IP address. Use an external Tor SOCKS5 listener with `IsolateSOCKSAuth` whenever anonymity matters.
+
+> [!IMPORTANT]
+> Always pass `-web dist/web` to the server. Passing the source `-web web` directory causes HTTP `503` errors because the compiled WebAssembly bundles only exist under `dist/web/`.
+
+**Option A: Local compatibility test mode (direct connection, no Tor)**
 
 ```sh
 ./dist/zeroproxy-server -web dist/web -addr :8080 -socks internal
 ```
 
-For Tor egress, configure a listener with stream isolation, for example:
+**Option B: Anonymous browsing through Tor**
 
-```text
-SocksPort 127.0.0.1:9050 IsolateSOCKSAuth
-```
-
-A development listener can be started separately:
+Start a local Tor SOCKS5 listener with stream isolation enabled:
 
 ```sh
 mkdir -p /tmp/zeroproxy-tor
 tor --SocksPort "127.0.0.1:9050 IsolateSOCKSAuth" --DataDirectory /tmp/zeroproxy-tor
 ```
 
-Wait for Tor to report `Bootstrapped 100% (done)`, then start the relay:
+Once Tor prints `Bootstrapped 100% (done)`, start the ZeroProxy relay:
 
 ```sh
 ./dist/zeroproxy-server -web dist/web -addr :8080 -socks 127.0.0.1:9050
 ```
 
-After building browser assets, `go run ./cmd/zeroproxy-server` accepts the same server flags. Core defaults are `-addr :8080`, `-web dist/web`, and `-socks 127.0.0.1:9050`; see the server source for optional gateway flags.
+### 3. Open the Launcher
 
-Open **`http://proxy.localhost:8080/zp/`** from the start so launcher, Service Worker, and encrypted target routes share one origin. The server can start without Tor being reachable; browsing still requires the selected SOCKS5 transport.
+Open **`http://proxy.localhost:8080/zp/`** in your browser, type a destination URL, and press **Open**. Starting from `proxy.localhost` keeps the launcher, the Service Worker, and all encrypted target routes on a single secure context origin.
 
-## Historical records
+## Core Security Guarantees
 
-[`.ai/trap-notebook`](.ai/trap-notebook) preserves past failures, fixes, and later corrections. Its old paths and measurements are historical references, not the current architecture or acceptance checklist. Retired specifications are available in repository history; current work is tracked by the [compatibility refactor plan](.ai/design/website-compat-refactor.md).
+ZeroProxy enforces four isolation rules so untrusted websites cannot break out of their virtual tab or leak your real network identity:
+
+- **No direct network egress:** Target pages cannot open native connections to external servers. Content Security Policy headers and membrane hooks force all HTTP fetches, XMLHttpRequests, WebSockets, beacons, and subresources through the Service Worker and relay tunnel. Optional WebTransport and WebRTC TURN relays are disabled by default and require explicit server flags in [`cmd/zeroproxy-server/main.go`](cmd/zeroproxy-server/main.go).
+- **No access to the real browser realm:** Target scripts never receive the real `window`, `Location`, or an uncontained iframe realm. Cross-origin frames and popups receive filtered handles that enforce HTML cross-origin security rules across virtual origins.
+- **Strict per-site storage partitioning:** Even though every proxied tab shares the physical `proxy.localhost` origin in the browser, the membrane isolates cookies, `localStorage`, `sessionStorage`, IndexedDB, Cache Storage, BroadcastChannel, and Origin Private File System directories by target origin.
+- **Fail-closed script and HTML transformation:** Every executable script passes through the Rust OXC parser and AST rewriter before running. If a script or HTML document cannot be rewritten safely, ZeroProxy blocks execution and renders an isolated error page instead of running untransformed code.
+- **Client-held URL keys:** Target URLs are encrypted with AES-256-CBC and authenticated with HMAC-SHA256 using HKDF-derived keys. The decryption key stays in the URL `#` fragment on the client.
+
+## Verification and Testing Commands
+
+On machines with limited RAM, prefer pushing branches to the [GitHub Actions CI workflow](.github/workflows/ci.yml) rather than running parallel local Rust builds and headless browsers. When running checks locally, use the following commands:
+
+| Check | Command | What It Verifies |
+| :--- | :--- | :--- |
+| **JavaScript unit and policy suite** | `npm run test:js` | Fast Node.js checks for URL policy, Service Worker routing, and membrane contracts without starting a browser. |
+| **Rust workspace tests** | `cargo test --workspace` | Unit and property tests for OXC AST rewriting, HTML/CSS transforms, share URL encryption, and transport codecs. |
+| **Go server and host tests** | `go test ./...` | Relay bridging, SOCKS5 framing, HTTP host handlers, CSP headers, and TURN/WebTransport gateways. |
+| **WASM bundle integration** | `npm run test:wasm:ci` | Contract checks against prebuilt WebAssembly artifacts in `dist/`. |
+| **Browser end-to-end suite** | `npm run test:e2e:ci` | Real Chromium E2E tests against `dist/`, including the E1 containment escape matrix and native-vs-proxy differential checks. |
+| **TLS ClientHello check** | `npm run check:chrome-hello` | Verifies that the Rust kernel's TLS ClientHello matches the installed Chrome browser's extension set and `trust_anchors` payload. |
+| **Real-site smoke test (opt-in)** | `npm run dogfood:real-site` | Launches a fresh Chromium profile and loads live external sites through the proxy ([`test/e2e/real-site-regression.test.js`](test/e2e/real-site-regression.test.js)). |
+
+## Repository Map
+
+The codebase splits responsibilities across Rust (compiled to WebAssembly), JavaScript (Service Worker and page membrane), and Go (the local relay server):
+
+| Path | Responsibility |
+| :--- | :--- |
+| [`Cargo.toml`](Cargo.toml) | Rust workspace configuration and shared dependency pins. |
+| [`crates/zp-engine`](crates/zp-engine) | Unified Rust facade over script rewriting, streaming HTML transformation, CSS rewriting, and source map composition. |
+| [`crates/zp-bundle`](crates/zp-bundle) | Service Worker WebAssembly exports wrapping `zp-engine` and shared policy helpers. |
+| [`crates/zp-kernel-bundle`](crates/zp-kernel-bundle) | Lazily loaded browser transport kernel (`yamux`, SOCKS5, `rustls`, HTTP/1.1, HTTP/2, and target WebSockets). |
+| [`crates/zp-rewriter`](crates/zp-rewriter), [`crates/zp-htmltx`](crates/zp-htmltx), [`crates/zp-css`](crates/zp-css) | OXC JavaScript AST rewriter, streaming `lol_html` HTML transformer, and SWC CSS URL rewriter. |
+| [`crates/zp-shared`](crates/zp-shared), [`crates/zp-transport-codec`](crates/zp-transport-codec) | CSP builders, share URL encryption, error codes, and SOCKS5/HTTP/1.1 wire codecs. |
+| [`crates/zp-page-bundle`](crates/zp-page-bundle), [`crates/zp-page-rt`](crates/zp-page-rt), [`web/zp-rt.js`](web/zp-rt.js) | Slim page-realm script rewriter and synchronous raw-WASM URL policy runtime. |
+| [`web/index.html`](web/index.html), [`web/zp-core.js`](web/zp-core.js) | Browser launcher UI, route constants, binary fetch envelope codec, and shared URL helpers. |
+| [`web/sw.js`](web/sw.js) | Service Worker entry point for request classification, tab context, rewrite caching, and kernel dispatch. |
+| [`web/membrane/`](web/membrane), [`web/runtime-prelude.js`](web/runtime-prelude.js), [`web/worker-prelude.js`](web/worker-prelude.js) | Virtual browser membrane modules for page and worker realms. |
+| [`cmd/zeroproxy-server`](cmd/zeroproxy-server), [`internal/`](internal) | Go CLI entry point, embeddable `internal/httphost` handler, WebSocket relay, and optional WebTransport/TURN gateways. |
+| [`scripts/build.mjs`](scripts/build.mjs), [`scripts/test.mjs`](scripts/test.mjs) | Cross-language build pipeline and test runner scripts. |
+| [`test/js`](test/js), [`test/e2e`](test/e2e), [`test/browser`](test/browser) | Node contract tests, Puppeteer E2E suites, and interactive browser diagnostic runners. |
+
+## Documentation Index
+
+Use the documents below to explore ZeroProxy's architecture, security status, operational procedures, and debugging workflows:
+
+| Document | Scope |
+| :--- | :--- |
+| [`CLAUDE.md`](CLAUDE.md) | Architecture overview, crate responsibilities, build and test commands, and contributor workflow rules. |
+| [`AGENTS.md`](AGENTS.md) | Code quality and documentation standards for contributors and automated agents. |
+| [`PRODUCTION_ROLLOUT.md`](PRODUCTION_ROLLOUT.md) | Operator dogfood checklist, runtime monitoring signals, and rollback procedure. |
+| [`REFACTOR.md`](REFACTOR.md) | Component boundaries and embedding interfaces (`zp-engine`, `Dialer`, membrane bridge, and `internal/httphost`). |
+| [`PHASE2_STATUS.md`](PHASE2_STATUS.md) | Subsystem verification matrix, security gate evidence, and intentional compatibility trade-offs. |
+| [`ERRATA.md`](ERRATA.md) | Catalog of resolved containment and compatibility defects alongside open residuals. |
+| [`HANDOFF.md`](HANDOFF.md) | Current engineering scope, real-site compatibility status, and browser diagnostic workflows. |
+| [`.ai/design/website-compat-refactor.md`](.ai/design/website-compat-refactor.md) | Website compatibility design, responsibility boundaries, and active refactor tracks. |
+| [`.ai/trap-notebook/README.md`](.ai/trap-notebook/README.md) & [`.ai/trap-notebook/INDEX.md`](.ai/trap-notebook/INDEX.md) | Indexed reference of subtle browser, AST rewriter, Service Worker, and TLS traps. |
+| [`test/browser/README.md`](test/browser/README.md) | Cross-site browser diagnostic probes covering isolation, fidelity, console noise, and prototype shapes. |
+| [`test/browser/hole-matrix/README.md`](test/browser/hole-matrix/README.md) | Containment escape matrix runner and two-axis verdict classifier for subresource URLs. |

@@ -1,35 +1,24 @@
 //! Yamux multiplex client: one shared `WsStream` carries N concurrent
 //! target streams. Eliminates the per-request WebSocket handshake cost
-//! that dominates page-load latency when 30+ subresources need fresh
-//! TCP connections.
+//! when opening multiple TCP connections.
 //!
-//! TLS still runs **inside** each yamux stream — the relay server sees
-//! yamux framing + ciphertext, never plaintext. yamux is purely about
-//! WebSocket-handshake amortisation; the client-TLS invariant is
-//! untouched.
+//! TLS still runs inside each yamux stream: the relay server sees
+//! yamux framing and ciphertext, never plaintext.
 //!
 //! ## Driver pattern
 //!
 //! `yamux::Connection` exposes only `poll_*` APIs, and `poll_new_outbound`
 //! cannot be called concurrently with `poll_next_inbound` (both need
-//! `Pin<&mut Connection>`). The standard workaround is a single owning
-//! driver task that owns the `Connection` and serves requests from a
-//! channel:
-//!
-//! ```text
-//! WsStream ─┬─→ yamux::Connection ──→ driver_task (spawn_local)
-//!           ↑                            ↑
-//!           │                            │ Cmd::OpenStream → oneshot
-//!           └─ MuxSession (Rc, Clone) ───┘
-//! ```
+//! `Pin<&mut Connection>`). A single owning driver task holds the
+//! `Connection` and serves `Cmd::Open` requests from `MuxSession` over an
+//! mpsc/oneshot channel pair.
 //!
 //! The driver also drains inbound streams (a SOCKS5+TLS+HTTP client
-//! never accepts inbound streams, so they're silently dropped — the
-//! server doesn't initiate any).
+//! never accepts inbound streams, so they are dropped).
 //!
 //! ## Lifecycle
 //!
-//! [`get_session`] returns a process-singleton (`thread_local`, fine on
+//! [`get_or_open`] returns a process-singleton (`thread_local` on
 //! single-threaded WASM). The first call opens the WebSocket and spawns
 //! the driver. Subsequent calls reuse the existing session. A driver
 //! that observes WS EOF/error tears down the session so the next call
@@ -113,8 +102,6 @@ impl AsyncWrite for MuxStream {
     }
 }
 
-// ----- session singleton ----------------------------------------------------
-
 thread_local! {
     static SESSION: RefCell<Option<MuxSession>> = const { RefCell::new(None) };
 }
@@ -123,26 +110,16 @@ thread_local! {
 /// `relay_url` is the WebSocket URL of the byte-pipe endpoint (e.g.
 /// `wss://proxy.example/zp/ws-pipe`).
 ///
-/// If the cached session's driver has died (WS dropped, GoAway received,
-/// etc.) the caller's `open_stream` will fail and a follow-up call lands
-/// here — but the cached session still says "I'm fine". Detecting death
-/// vs busy is non-trivial with mpsc::unbounded; the simplest robust
-/// recovery is to invalidate the cache when `open_stream` fails (see
-/// `transport::fetch::fetch`).
+/// If the cached session's driver has exited, `open_stream` fails and the
+/// caller invalidates the cache via [`invalidate`] (see `transport::fetch::fetch`).
 pub(crate) async fn get_or_open(relay_url: &str) -> io::Result<MuxSession> {
     if let Some(s) = SESSION.with(|c| c.borrow().clone()) {
         return Ok(s);
     }
     let ws = WsStream::open(relay_url).await?;
-    // 2026-06-13 throughput fix: NAVER 메인 같은 이미지-heavy 페이지에서
-    // 28+ 동시 스트림이 단일 WS/yamux 세션으로 다중화되며 throughput 붕괴
-    // → 모든 다운로드가 ~243s stall 후 동시 release (real Chrome 측정).
-    // 원인: (a) split_send_size 기본 16KB 라 500KB 이미지 = 32 frame, 28
-    // 스트림 × 32 = ~900 frame 이 단일 WS 를 통과하며 frame-당 wasm wake
-    // 오버헤드, (b) per-stream receive window 가 256KB 에서 시작해 RTT 마다
-    // 성장 — proxied high-latency 경로에서 성장이 느려 sender 가 자주 stall.
-    // split_send_size 를 256KB 로 키워 frame 수 1/16 + WS message 오버헤드
-    // 감소. max_connection_receive_window 는 기본 1GiB 유지 (충분).
+    // Raise split_send_size from the 16 KiB default to 256 KiB to reduce
+    // per-frame WebSocket message and WASM wakeup overhead when multiplexing
+    // many concurrent streams.
     let mut cfg = Config::default();
     cfg.set_split_send_size(256 * 1024);
     let rx_pending = ws.rx_pending();
@@ -154,9 +131,8 @@ pub(crate) async fn get_or_open(relay_url: &str) -> io::Result<MuxSession> {
     Ok(session)
 }
 
-/// Forget the cached session. Called when `open_stream` fails — likely
-/// the WS / yamux session is dead and the next request should open a
-/// fresh one.
+/// Clear the cached session when `open_stream` fails so the next request
+/// opens a fresh WebSocket and yamux session.
 pub(crate) fn invalidate() {
     SESSION.with(|c| *c.borrow_mut() = None);
 }
@@ -164,15 +140,10 @@ pub(crate) fn invalidate() {
 /// Driver task: owns the yamux `Connection`, multiplexes inbound polling
 /// with outbound `Open` commands. Exits when either side closes.
 ///
-/// The key invariant: **inbound polling must never pause**. yamux's state
-/// machine advances by reading frames off the wire, so a request blocked
-/// on `poll_new_outbound` will deadlock unless we keep draining inbound
-/// concurrently — outbound opens depend on the server's RST/ACK frames
-/// flowing through the same socket. A naive `select! { open => ..., inb
-/// => .. }` that `.await`s `poll_new_outbound` inside the open arm stops
-/// the inbound pump until the open completes, and the open never
-/// completes because the inbound pump stopped. The poll_fn below drives
-/// both each tick.
+/// Inbound polling must never pause: yamux's state machine advances by
+/// reading frames off the wire, so a request blocked on `poll_new_outbound`
+/// will deadlock unless inbound frames continue draining concurrently.
+/// The `poll_fn` below drives both directions on each tick.
 async fn drive(
     mut conn: Connection<WsStream>,
     mut cmd_rx: mpsc::UnboundedReceiver<Cmd>,
@@ -190,9 +161,9 @@ async fn drive(
                     Poll::Pending => break,
                 }
             }
-            // (2) Always poll inbound — drives the yamux state machine
-            //     reads. Without this, frames pile up in the WS recv
-            //     buffer and the outbound open never sees its ACK.
+            // (2) Always poll inbound to drive yamux state machine reads.
+            //     Without this, frames pile up in the WS recv buffer and
+            //     outbound opens never see their ACK.
             let mut made_progress = false;
             match Pin::new(&mut conn).poll_next_inbound(cx) {
                 Poll::Ready(Some(Ok(stream))) => {
@@ -227,14 +198,8 @@ async fn drive(
             // Never park while the socket still holds un-parsed frames.
             // `poll_next_inbound` reports `Pending` once it has taken what it
             // wants for this tick, and `made_progress` only covers new inbound
-            // streams / completed opens — never plain DATA frames for existing
-            // streams, which is all a response body is. Parking there left the
-            // queued remainder untouched until the next WebSocket message
-            // arrived; against NAVER that was the upstream's 60s keepalive
-            // PING, so a document that was already fully delivered to the relay
-            // froze mid-parse for exactly 60s (kernel pump stuck at ~189 KB of
-            // 241 KB, zero CPU, no deflate-end). Re-polling here costs one extra
-            // pass and only while data is genuinely pending.
+            // streams and completed opens, not plain DATA frames for existing
+            // streams.
             if made_progress || rx_pending.has_buffered() {
                 // Re-poll immediately to drain anything else ready.
                 cx.waker().wake_by_ref();

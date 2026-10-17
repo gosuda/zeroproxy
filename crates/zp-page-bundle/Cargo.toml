@@ -7,27 +7,11 @@ license.workspace = true
 [lib]
 crate-type = ["cdylib", "rlib"]
 
-# 2026-06-08 split-bundle (c.2): page-realm wasm bundle. Strict subset
-# of zp-bundle. No kernel, no transport, no
-# rustls/h2/mlkem/tokio/flate2/brotli/ruzstd/rtcgw/wtproxy/membrane.
-# Page realm doesn't make outbound network calls — the SW does, and
-# the SW continues to load the full `zp-bundle` via
-# importScripts('/__zp/zp_bundle_sw.js').
-#
-# 2026-06-09 E3 size win: CSS rewriter (swc_common + swc_css_*) +
-# transitive `url` dep dropped from the page bundle. Audit confirmed
-# only the SW realm calls `ZPBundle.rewriteCSS` (web/sw.js); the page
-# realm only ever invokes rewriteScript on dynamic <script> inserts
-# via __ZP_EXEC_*. The build script's page-bundle binding already
-# gates `rewriteCSS` on `typeof wbg.rewriteCSS === 'function' ? ... :
-# null`, so the surface degrades gracefully. SW bundle keeps the full
-# CSS rewriter so `rewriteCSSResponse` still works.
+# Page-realm WASM bundle: JS script rewriting (`zp-rewriter`) and shared URL
+# primitives (`zp-shared`). Excludes the transport stack, HTML transformer, and
+# CSS parser, which run exclusively in the Service Worker (`zp-bundle` and
+# `zp-kernel-bundle`).
 [dependencies]
 zp-shared = { workspace = true }
 zp-rewriter = { workspace = true }
-# 2026-06-09 E3 size win: zp-htmltx + its lol_html (HTML5 tokenizer)
-# transitive dep dropped — page bundle never calls transformHtml.
-# The SW realm owns HTML rewriting for cross-origin documents via
-# the full `zp-bundle`; the page realm only ever rewrites <script>
-# bodies via `rewriteScript`, which lives in zp-rewriter directly.
 wasm-bindgen = { workspace = true }

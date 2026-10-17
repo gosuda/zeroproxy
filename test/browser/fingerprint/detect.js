@@ -1,18 +1,18 @@
-// 타깃 사이트가 "나 프록시를 통과하고 있나?" 를 알아내려고 할 때 실제로 볼 만한
-// 자리들을 그대로 훑는다. 우리 목록을 점검하는 게 아니라 **적의 코드를 돌린다.**
+// Probe DOM, storage, timing, CSS, and prototype surfaces that a target page
+// can inspect to detect the proxy membrane.
 (function () {
   const hits = [];
   const add = (where, what) => hits.push({ where, what: String(what).slice(0, 160) });
   const ZP = /(^|[^a-z])zp[^a-z]|zeroproxy|__zp/i;
 
-  // ① 전역 이름
+  // Global property names on window.
   try {
     for (const k of Object.getOwnPropertyNames(window)) {
       if (/^__zp|^ZP$|zeroproxy/i.test(k)) add('window prop', k);
     }
   } catch (e) { add('window prop', 'err:' + e.name); }
 
-  // ② 문서 마크업 — 가장 흔한 검사다. 통째로 훑어 우리 흔적을 찾는다.
+  // Document outerHTML markup and proxy URLs.
   try {
     const html = document.documentElement.outerHTML;
     for (const m of html.match(/data-zp-[a-z-]+/gi) || []) add('outerHTML attr', m);
@@ -20,7 +20,7 @@
     if (/\/zp\/(assets|api)\//.test(html)) add('outerHTML url', (html.match(/\/zp\/(assets|api)\/[^"'\s]{0,40}/) || [])[0]);
   } catch (e) { add('outerHTML', 'err:' + e.name); }
 
-  // ③ 속성 열거 — getAttribute 는 가려도 attributes/getAttributeNames 가 샐 수 있다.
+  // Attribute enumeration via getAttributeNames() and element.attributes.
   try {
     const els = document.querySelectorAll('*');
     const seen = new Set();
@@ -31,7 +31,7 @@
     }
   } catch (e) { add('attributes', 'err:' + e.name); }
 
-  // ④ 스크립트 태그 — 우리가 주입한 것이 보이는가
+  // Injected script tags in document.scripts.
   try {
     for (const s of document.scripts) {
       const src = s.src || '';
@@ -39,27 +39,21 @@
     }
   } catch (e) { add('scripts', 'err:' + e.name); }
 
-  // ⑤ 저장소 키
+  // Storage keys in localStorage and sessionStorage.
   try {
     for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i); if (ZP.test(k)) add('localStorage', k); }
     for (let i = 0; i < sessionStorage.length; i++) { const k = sessionStorage.key(i); if (ZP.test(k)) add('sessionStorage', k); }
   } catch (e) { add('storage', 'err:' + e.name); }
 
-  // ⑥ 후킹의 모양 — 네이티브면 [native code] 여야 하고, 접근자/데이터 구분도 실제와 같아야 한다.
+  // Function.prototype.toString checks for proxy-specific identifiers.
+  // Pages legitimately wrap their own globals (e.g., fetch), so only flag
+  // non-native wrappers that leak proxy identifiers.
   try {
     const fns = [
       ['fetch', window.fetch], ['setAttribute', Element.prototype.setAttribute],
       ['getAttribute', Element.prototype.getAttribute], ['appendChild', Node.prototype.appendChild],
       ['createObjectURL', URL.createObjectURL], ['Worker', window.Worker],
     ];
-    // ★2026-08-22 — 예전에는 "네이티브가 아니면 우리 탓" 으로 셌다. 그건
-    // 틀렸다 — **페이지가 자기 API 를 감싸는 건 정상**이다. github.com 은 자기
-    // `fetch` 를 감싸고(`X-Fetch-Nonce` 처리), 그걸 우리 흔적으로 올려 불렀다.
-    // 대조군(프록시 없이 직접 로드)에서 바이트 단위로 같은 문자열이 나오는 것을
-    // 확인했다.
-    //
-    // 안에서는 '누가 감쌌는가' 를 알 수 없으므로, 우리 식별자가 드러난 때만
-    // 센다. 그게 실제로 적에게 보이는 tell 이기도 하다.
     const OURS = /__zp|__ZP|ZeroProxy|ZPBundle|proxy\.localhost|\/zp\//;
     for (const [name, fn] of fns) {
       if (typeof fn !== 'function') continue;
@@ -74,19 +68,14 @@
     }
   } catch (e) { add('toString', 'err:' + e.name); }
 
-  // ⑦ 리소스 타이밍 — 우리 에셋 이름이 남는가
+  // Resource timing entry names.
   try {
     for (const e of performance.getEntriesByType('resource')) {
       if (/\/zp\/|zeroproxy|prelude|zp-core|zp_page|__zp/i.test(e.name)) add('resource timing', e.name);
     }
   } catch (e) { add('resource timing', 'err:' + e.name); }
 
-  // ⑦-b 타이밍이 우리가 하는 말과 모순되는가 (2026-08-22 신설)
-  //
-  // 이름은 디프록시했는데 타이밍 필드는 그대로 둬서, `controller === null` 이라
-  // 말해 놓고 모든 리소스가 `workerStart > 0` 이었다. 명세상 그건 불가능한
-  // 조합이라 한 줄로 검사된다. 여기서는 "값이 뭐냐" 가 아니라 **우리 진술과
-  // 어긋나는가**만 본다 — 절대값은 사이트마다 다르고 판정 근거가 못 된다.
+  // Resource and navigation timing consistency with navigator.serviceWorker.controller.
   try {
     var es = performance.getEntriesByType('resource');
     var controlled = !!(navigator.serviceWorker && navigator.serviceWorker.controller);
@@ -97,7 +86,6 @@
         if (es[i].nextHopProtocol === '') emptyProto++;
       }
       if (worker) add('timing', 'workerStart>0 on ' + worker + '/' + es.length + ' with no controller');
-      // SW 도 없는데 프로토콜이 전부 비어 있으면 누군가 응답을 합성한 것이다.
       if (emptyProto === es.length) add('timing', 'nextHopProtocol empty on all ' + es.length);
     }
     var nav = performance.getEntriesByType('navigation')[0];
@@ -107,11 +95,8 @@
         add('timing', 'navigation claims cache but was not cached');
       }
     }
-    // ★알려진 미해결: 우리 응답은 전부 "압축 안 됨" 으로 보인다.
-    // SW 가 합성한 본문이라 브라우저가 encoded == decoded 로 잰다.
-    // 실측(github): 대조군 118/135 가 압축, 프록시는 0/200.
-    // 지어내면 안 되는 값이다 — 진짜 압축 크기는 트랜스포트만 안다.
-    // 고치려면 SW 가 상류의 실제 encoded 크기를 헤더로 넘겨야 한다.
+    // Synthetic service-worker responses report encodedBodySize == decodedBodySize
+    // unless the upstream encoded size is forwarded.
     var sized = 0, compressed = 0;
     for (var j = 0; j < es.length; j++) {
       if (!es[j].decodedBodySize) continue;
@@ -121,31 +106,16 @@
     if (sized >= 20 && compressed === 0) {
       add('timing', 'no response compressed (' + sized + ' sized entries) — known open item');
     }
-    // 문서 하나는 아직 남아 있다. 스트리밍 경로가 상류의 Content-Encoding/Length 를
-    // 떨구고 평문을 흘려보내므로 커널이 인코딩 크기를 실을 자리가 없고,
-    // `/zp/p/<token>` 요청을 페이지가 보는 이름(가상 URL)으로 잇는 매핑도 없다.
     if (nav && nav.decodedBodySize > 50000 && nav.encodedBodySize === nav.decodedBodySize) {
       add('timing', 'navigation body uncompressed — known open item (streaming path)');
     }
   } catch (e) { add('timing', 'err:' + e.name); }
 
-  // ⑦-c 컬렉션 표면이 실제 인터페이스와 다른가 (2026-08-24 신설)
-  //
-  // 우리는 `querySelectorAll` / `getElementsByTagName` / `document.scripts` /
-  // `attributes` 를 필터 Proxy 로 감싸 우리 자산을 숨긴다. 그 Proxy 가 여섯
-  // 자리에 **한 벌의 가짜 표면**을 씌우고 있었다. 실브라우저 실측(example.com):
-  //   NodeList        forEach/values/keys/entries 있음, @@iterator === Array.prototype.values
-  //   HTMLCollection  넷 다 undefined,               @@iterator === Array.prototype.values
-  //   NamedNodeMap    넷 다 undefined,               @@iterator === Array.prototype.values
-  // 그리고 실제 메서드는 접근할 때마다 **같은 객체**다.
-  //
-  // 여기서는 "값이 뭐냐" 가 아니라 **자기모순과 동일성**만 본다 — 사이트마다
-  // 다를 수 없는 것들이라 대조군 없이도 판정이 선다.
+  // Collection wrapper surface and method identity checks on NodeList, HTMLCollection, and NamedNodeMap.
   try {
     var hc = document.scripts;
     var nl = document.querySelectorAll('*');
     var nn = document.body && document.body.attributes;
-    // (a) `in` 은 없다는데 값은 있다 — 한 줄짜리 탐지기다.
     var pairs = [['document.scripts', hc], ['attributes', nn]];
     for (var pi = 0; pi < pairs.length; pi++) {
       var nm = pairs[pi][0], c = pairs[pi][1];
@@ -154,36 +124,25 @@
       for (var mi = 0; mi < meth.length; mi++) {
         var k = meth[mi];
         if (typeof c[k] === 'function' && !(k in c)) add('collection', nm + '.' + k + ' exists but not `in`');
-        // HTMLCollection/NamedNodeMap 에는 애초에 없어야 한다.
         else if (typeof c[k] === 'function') add('collection', nm + '.' + k + ' should be undefined');
       }
     }
-    // (b) @@iterator 동일성 — 셋 다 Array.prototype.values 여야 한다.
     var iters = [['document.scripts', hc], ['querySelectorAll', nl], ['attributes', nn]];
     for (var ii = 0; ii < iters.length; ii++) {
       var inm = iters[ii][0], ic = iters[ii][1];
       if (!ic) continue;
       if (ic[Symbol.iterator] !== Array.prototype.values) add('collection', inm + ' @@iterator is not Array.prototype.values');
     }
-    // (c) NodeList 의 순회 메서드도 Array.prototype.* 와 같은 객체여야 한다.
     if (nl.forEach !== Array.prototype.forEach) add('collection', 'NodeList.forEach is not Array.prototype.forEach');
-    // (d) 메서드 동일성이 접근마다 흔들리면 그것만으로 후킹이 드러난다.
     if (nl.forEach !== nl.forEach) add('collection', 'NodeList.forEach identity unstable');
     if (hc.item !== hc.item) add('collection', 'HTMLCollection.item identity unstable');
     if (nn && nn.getNamedItem !== nn.getNamedItem) add('collection', 'NamedNodeMap.getNamedItem identity unstable');
-    // (e) 이름 기반 접근으로 숨긴 것이 되돌아 나오는가.
     var named = hc['__zp-boot'] || (hc.namedItem && hc.namedItem('__zp-boot'));
     if (named) add('collection', 'named access returns a hidden node: ' + (named.id || named.src || '?'));
   } catch (e) { add('collection', 'err:' + e.name); }
 
-  // ⑧ data-zp-* 이름공간이 정말 닫혀 있는가 — 읽기·쓰기·삭제 표면 전부.
-  //    2026-08-26 실측: 훅이 getAttribute/hasAttribute/getAttributeNames/
-  //    attributes **넷뿐**이라 NS 변종·Attr 노드·dataset·named getter 가 전부
-  //    뚫려 있었다. 목록이 아니라 **규칙**으로 닫혔는지 여기서 매번 확인한다.
+  // Verify that `data-zp-*` attributes are hidden across all read, write, dataset, and Attr node surfaces.
   try {
-    // ★한 노드만 고르면 안 된다 — 문서 순서상 맨 앞은 우리 자산 script 이고
-    // 거기엔 표식이 없어서 축이 통째로 조용해진다(실측으로 밟았다). 적이 실제로
-    // 하듯 **문서를 훑으며** 알려진 표식 이름을 찔러 본다.
     var ZPNAMES = ['data-zp-target-url', 'data-zp-internal', 'data-zp-blocked-ping', 'data-zp-blocked-rel'];
     var ZPN = ZPNAMES[0];
     var els = document.querySelectorAll('*');
@@ -191,7 +150,6 @@
     for (var pi = 0; pi < els.length && pi < 300; pi++) probeEls.push(els[pi]);
     probeEls.push(document.documentElement);
     var host = probeEls[0] || document.documentElement;
-    // 'data-zp-target-url' → 'zpTargetUrl'
     var zpDatasetKey = function () { return ZPN.replace(/^data-/, '').replace(/-([a-z])/g, function (_, c2) { return c2.toUpperCase(); }); };
     var reads = [
       ['getAttribute', function () { return host.getAttribute(ZPN); }],
@@ -219,8 +177,7 @@
       if (got) add('zp-namespace read', reads[ri][0] + ' -> ' + (got && got.value !== undefined ? got.value : got));
     }
     host = probeEls[0] || document.documentElement;
-    // 쓰기가 통하면 페이지가 `data-zp-internal` 로 **자기 노드를 자기 눈에서**
-    // 지울 수 있다 — 진짜 브라우저는 절대 재현 못 하는 신호다.
+    // Setting `data-zp-internal` from page script must not hide the page's own node from querySelectorAll.
     var probe = document.createElement('div');
     probe.className = '__zpns';
     (document.body || document.documentElement).appendChild(probe);
@@ -241,24 +198,17 @@
     if (host.dataset !== host.dataset) add('zp-namespace', 'el.dataset identity unstable');
   } catch (e) { add('zp-namespace', 'err:' + e.name); }
 
-  // ⑨ 프레임/문서 정체
+  // Document baseURI and referrer checks.
   try {
     if (/proxy\.localhost|\/zp\/p\//.test(document.baseURI)) add('baseURI', document.baseURI);
     if (/proxy\.localhost|\/zp\/p\//.test(document.referrer)) add('referrer', document.referrer);
   } catch (e) { add('identity', 'err:' + e.name); }
 
-  // ⑩ CSS 를 통한 정체 노출 — 우리가 url() 을 프록시 URL 로 바꿔 **쓰므로**,
-  // 되돌려 주지 않는 읽기 표면이 하나라도 있으면 페이지가 자기 스타일을 다시
-  // 읽는 것만으로 프록시 오리진과 내부 API 경로를 알아낸다. 2026-09-10 실측:
-  // 이런 표면이 16개였다(인라인 프로퍼티 / cssText / getPropertyValue /
-  // getAttribute 일가 / getComputedStyle / CSSRule.cssText).
-  //
-  // 목록으로 적지 않는다 — 페이지에 실제로 있는 스타일을 통째로 훑는다.
+  // CSS readback checks across inline styles, stylesheets, and getComputedStyle.
   try {
     var OURS = /\/zp\/(api|assets|p)\/|proxy\.localhost/;
     var say = function (where, v) { if (v && OURS.test(String(v))) add(where, String(v).match(OURS)[0]); };
 
-    // (a) 페이지의 인라인 style 을 모든 읽기 경로로 훑는다.
     var styled = document.querySelectorAll('[style]');
     for (var i = 0; i < styled.length && i < 200; i++) {
       var e = styled[i];
@@ -273,7 +223,6 @@
       }
     }
 
-    // (b) 스타일시트 규칙 — 선언을 안 거치고 텍스트를 통째로 돌려주는 경로.
     var sheets = document.styleSheets;
     for (var si = 0; si < sheets.length && si < 40; si++) {
       var rules = null;
@@ -284,7 +233,6 @@
       }
     }
 
-    // (c) getComputedStyle — **해결된** 값이라 리라이트 결과가 그대로 보인다.
     var probes = document.querySelectorAll('body, body *');
     for (var ci = 0; ci < probes.length && ci < 120; ci++) {
       var cs = null;
@@ -293,8 +241,6 @@
       for (var pi = 0; pi < props.length; pi++) say('getComputedStyle', cs.getPropertyValue(props[pi]));
     }
 
-    // (d) 왕복 — 페이지가 쓴 값을 그대로 돌려주는가. 다른 값이 나오면
-    // 그 차이 자체가 멤브레인의 존재를 알려 준다.
     var rt = document.createElement('div');
     var mark = 'url("https://example.invalid/zp-roundtrip.png")';
     rt.style.backgroundImage = mark;
@@ -304,10 +250,8 @@
     say('css roundtrip', rt.style.backgroundImage);
     say('css roundtrip attr', rt.getAttribute('style'));
   } catch (e) { add('css-identity', 'err:' + e.name); }
-  // ⑪ 훅의 소스 — 가장 값싼 탐지다. 네이티브 자리에 있는 함수의 toString 이
-  // `[native code]` 가 아니면 누가 갈아 끼운 것이다. 목록 없이 인터페이스
-  // 프로토타입을 통째로 훑는다. 2026-09-10 실측: 74개가 소스를 노출했고,
-  // HTMLScriptElement.src 게터는 data-zp-target-url 까지 보여 줬다.
+
+  // Scan prototype methods and accessors on native constructors for non-native toString output.
   try {
     var NATIVE = /\{\s*\[native code\]\s*\}/;
     var seenFn = 0;
@@ -317,9 +261,7 @@
       var src;
       try { src = Function.prototype.toString.call(fn); } catch (e) { return; }
       if (NATIVE.test(src)) return;
-      // ★측정 도구 자신은 뺀다. taskweaver 가 페이지에 주입하는 리스너 브리지로,
-      // **대조군(직접 로드)에도 똑같이 있다**(실측 2026-09-10). 우리 흔적이
-      // 아니므로 세면 매번 1건이 상수로 깔려 0 을 못 본다.
+      // Ignore taskweaver's own injected listener bridge.
       if (where.indexOf('__internal_unstable_') >= 0) return;
       add('hook source', where + ' [' + kind + '] ' + src.replace(/\s+/g, ' ').slice(0, 80));
     };
@@ -331,9 +273,7 @@
       try {
         var iface = window[names[i]];
         if (typeof iface !== 'function') continue;
-        // ★생성자 자신이 네이티브인 것만 본다. 페이지가 만든 대문자 생성자의
-        // 메서드는 당연히 비네이티브라 세면 거짓 양성이 쏟아진다
-        // (naver 실측 2026-09-10: Agent/Flash 등 27건).
+        // Skip page-defined uppercase constructors whose methods are naturally non-native.
         if (!NATIVE.test(Function.prototype.toString.call(iface))) continue;
         proto = iface.prototype;
       } catch (e) { continue; }
@@ -349,15 +289,12 @@
         look(names[i] + '.' + keys[k], 'setter', d.set);
       }
     }
-    // 프록시 트랩이 만들어 주는 인스턴스 메서드는 프로토타입에 없다.
     try {
       var probe = document.createElement('div');
       look('el.style.setProperty', 'bound', probe.style.setProperty);
       look('el.style.getPropertyValue', 'bound', probe.style.getPropertyValue);
       look('el.attributes.getNamedItem', 'bound', probe.attributes.getNamedItem);
     } catch (e) {}
-    // 프로토타입 모양 자체도 본다 — style 을 own 으로 가진 인터페이스 수가
-    // 진짜 브라우저(13)와 다르면 그 차이만으로 프록시가 드러난다.
     var ownStyle = 0;
     var seenProto = [];
     for (var j = 0; j < names.length; j++) {

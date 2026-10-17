@@ -17,7 +17,6 @@ const req = (id, url) => ({ kind: 'request', request_id: id, url });
 
 test('fixedCSP options.challengeCompat adds CF host only to four directives', () => {
   const code = fs.readFileSync('web/zp-core.js', 'utf8');
-  // Evaluate fixedCSP in a vm sandbox to assert the actual emit.
   const vm = require('node:vm');
   const sandbox = {
     globalThis: undefined,
@@ -45,7 +44,6 @@ test('fixedCSP options.challengeCompat adds CF host only to four directives', ()
   assert.ok(on.includes('frame-src \'self\' blob: data: https://challenges.cloudflare.com'));
   assert.ok(on.includes('child-src \'self\' blob: data: https://challenges.cloudflare.com'));
   assert.match(on, /connect-src [^;]*https:\/\/challenges\.cloudflare\.com/);
-  // Untouched directives must NOT gain the host.
   assert.equal(/style-src[^;]*https:\/\/challenges\.cloudflare\.com/.test(on), false);
   assert.equal(/img-src[^;]*https:\/\/challenges\.cloudflare\.com/.test(on), false);
   assert.equal(/worker-src[^;]*https:\/\/challenges\.cloudflare\.com/.test(on), false);
@@ -53,22 +51,16 @@ test('fixedCSP options.challengeCompat adds CF host only to four directives', ()
 
 test('applyScriptPatches behavior: empty patches, splice, malformed envelopes', () => {
   const sw = fs.readFileSync('web/sw.js', 'utf8').split('\r\n').join('\n');
-  // Extract the applier verbatim so behavior is exercised, not just shape.
-  // `\n}` (no trailing newline) tolerates both LF and CRLF line endings.
   const m = sw.match(/function applyScriptPatches\(source, envelopeJson\) \{[\s\S]*?\n\}/);
   assert.ok(m, 'applyScriptPatches definition must be locatable');
   // eslint-disable-next-line no-new-func
   const apply = new Function(`${m[0]}\nreturn applyScriptPatches;`)();
 
-  // Empty source + empty patches → original string passes through.
   assert.equal(apply('', JSON.stringify({ len: 0, patches: [] })), '');
-  // No patches → caller gets the source verbatim (no allocation).
   assert.equal(apply('var x = 1;', JSON.stringify({ len: 10, patches: [] })), 'var x = 1;');
-  // Single splice — replace `location` (chars 8..16) with `__zp_loc`.
   const src = 'var u = location.href;';
   const env = JSON.stringify({ len: src.length, patches: [{ start: 8, end: 16, replacement: '__zp_loc' }] });
   assert.equal(apply(src, env), 'var u = __zp_loc.href;');
-  // Two non-overlapping splices in order.
   const env2 = JSON.stringify({
     len: src.length,
     patches: [
@@ -77,9 +69,7 @@ test('applyScriptPatches behavior: empty patches, splice, malformed envelopes', 
     ],
   });
   assert.equal(apply(src, env2), 'var u = __zp_loc.__zp_href_str;');
-  // Malformed JSON → null (caller falls back).
   assert.equal(apply(src, '{not json'), null);
-  // Out-of-order patches (start < cursor) → null (defensive).
   const bad = JSON.stringify({
     len: src.length,
     patches: [
@@ -88,19 +78,17 @@ test('applyScriptPatches behavior: empty patches, splice, malformed envelopes', 
     ],
   });
   assert.equal(apply(src, bad), null);
-  // end > source.length → null.
   const oob = JSON.stringify({ len: src.length, patches: [{ start: 0, end: 9999, replacement: 'X' }] });
   assert.equal(apply(src, oob), null);
-  // Missing patches array → null.
   assert.equal(apply(src, JSON.stringify({ len: 10 })), null);
 });
 
 test('Referer follows the referrer policy (values pinned to a measured control run)', () => {
   const sw = fs.readFileSync('web/sw.js', 'utf8').split('\r\n').join('\n');
   const start = sw.indexOf('function refererForPolicy(');
-  assert.ok(start > 0, 'refererForPolicy 가 sw.js 에 있어야 한다');
+  assert.ok(start > 0, 'refererForPolicy must exist in sw.js');
   const end = sw.indexOf('async function transportFetch', start);
-  assert.ok(end > start, 'refererForPolicy 뒤에 transportFetch 가 와야 한다');
+  assert.ok(end > start, 'transportFetch must follow refererForPolicy');
   const sandbox = {};
   new Function('exports', sw.slice(start, end) + '\nexports.refererForPolicy = refererForPolicy;')(sandbox);
   const f = sandbox.refererForPolicy;
@@ -108,11 +96,9 @@ test('Referer follows the referrer policy (values pinned to a measured control r
   const doc = 'http://127.0.0.1:18202/page?tag=t';
   const same = 'http://127.0.0.1:18202/same.js';
   const cross = 'http://127.0.0.1:18203/static.js';
-  // 대조군: same-origin 은 전체 URL, cross-origin 은 오리진만.
   assert.equal(f(doc, same, ''), doc);
   assert.equal(f(doc, cross, ''), 'http://127.0.0.1:18202/');
   assert.equal(f(doc, cross, 'strict-origin-when-cross-origin'), 'http://127.0.0.1:18202/');
-  // 대조군: 정책별.
   assert.equal(f(doc, same, 'no-referrer'), '');
   assert.equal(f(doc, cross, 'no-referrer'), '');
   assert.equal(f(doc, same, 'origin'), 'http://127.0.0.1:18202/');
@@ -123,14 +109,13 @@ test('Referer follows the referrer policy (values pinned to a measured control r
   assert.equal(f(doc, cross, 'same-origin'), '');
   assert.equal(f(doc, cross, 'origin-when-cross-origin'), 'http://127.0.0.1:18202/');
   assert.equal(f(doc, same, 'origin-when-cross-origin'), doc);
-  // https → http 는 강등이다. http → https 는 강등이 아니다.
+  // HTTPS to HTTP is a downgrade; HTTP to HTTPS is not.
   assert.equal(f('https://a.example/p?q=1', 'http://b.example/x', ''), '');
   assert.equal(f('https://a.example/p?q=1', 'http://b.example/x', 'strict-origin'), '');
   assert.equal(f('https://a.example/p?q=1', 'http://a.example/x', 'no-referrer-when-downgrade'), '');
   assert.equal(f('http://a.example/p?q=1', 'https://b.example/x', ''), 'http://a.example/');
-  // 전체 URL 이라도 프래그먼트와 자격증명은 절대 싣지 않는다(명세).
+  // Fragments and credentials are always stripped per spec.
   assert.equal(f('https://u:pw@a.example/p?q=1#frag', 'https://a.example/x', ''), 'https://a.example/p?q=1');
-  // 비 HTTP(S) 출처는 Referer 를 만들지 않는다.
   assert.equal(f('data:text/html,x', 'https://a.example/x', 'unsafe-url'), '');
 });
 
@@ -145,32 +130,24 @@ test('cookie jar is keyed by registrable domain, and public-suffix Domain is rej
     + '\nexports.isPublicSuffixDomain = isPublicSuffixDomain;')(sandbox);
   const { registrableDomain, isPublicSuffixDomain } = sandbox;
 
-  // 서브도메인은 하나의 jar 로 모인다 — 이게 로그인 유지의 핵심.
   assert.equal(registrableDomain('nid.naver.com'), 'naver.com');
   assert.equal(registrableDomain('www.naver.com'), 'naver.com');
   assert.equal(registrableDomain('mail.naver.com'), 'naver.com');
-  // 다단계 접미사는 한 단계 더 내려간다.
   assert.equal(registrableDomain('shop.example.co.kr'), 'example.co.kr');
   assert.equal(registrableDomain('example.co.kr'), 'example.co.kr');
-  // 무관한 사이트는 절대 합쳐지지 않는다.
   assert.notEqual(registrableDomain('a.example.com'), registrableDomain('a.example.net'));
-  // IP literal 은 그대로.
   assert.equal(registrableDomain('127.0.0.1'), '127.0.0.1');
 
-  // 공개 접미사를 Domain 으로 쓰는 쿠키는 거부 — 넓힌 키가 구멍이 되지 않게.
   assert.equal(isPublicSuffixDomain('com'), true);
   assert.equal(isPublicSuffixDomain('co.kr'), true);
   assert.equal(isPublicSuffixDomain('naver.com'), false);
   assert.equal(isPublicSuffixDomain('example.co.kr'), false);
-
 });
 
 test('proxied-document CSP is controlled from zp-shared (single golden, JS side)', () => {
   const golden = fs.readFileSync('crates/zp-shared/testdata/csp_proxied.golden', 'utf8').trim();
   const core = fs.readFileSync('web/zp-core.js', 'utf8');
 
-  // zp-core 는 globalThis.ZP 에 붙는 IIFE — 골든과 같은 입력(호스트
-  // proxy.example, https)을 주기 위해 location 을 세운 샌드박스에서 돌린다.
   const sandbox = {
     location: { protocol: 'https:', host: 'proxy.example', href: 'https://proxy.example/zp/' },
     crypto: globalThis.crypto,
@@ -183,7 +160,6 @@ test('proxied-document CSP is controlled from zp-shared (single golden, JS side)
   assert.equal(sandbox.ZP.fixedCSP(), golden,
     'ZP.fixedCSP drifted from crates/zp-shared/testdata/csp_proxied.golden — edit csp.rs, regenerate the golden, and update zp-core together');
 
-  // 표면이 달라도 절대 흔들리면 안 되는 것들.
   for (const invariant of ["default-src 'none'", "object-src 'none'", "base-uri 'none'", "form-action 'self'"]) {
     assert.ok(golden.includes(invariant), 'proxied CSP lost ' + invariant);
   }
@@ -191,12 +167,9 @@ test('proxied-document CSP is controlled from zp-shared (single golden, JS side)
   assert.ok(!/script-src [^;]*\*/.test(golden), 'script-src must never wildcard');
 });
 
-test('classify: 런타임 CSS 가 만든 프록시-오리진 서브리소스는 타깃으로 매핑된다 (ctx 가 있을 때만)', () => {
-  // 정규식 핀이 아니라 실제로 실행한다. `style.textContent = 'url(/img/bg.png)'`
-  // 처럼 브라우저 CSS 엔진이 문서 URL 기준으로 푼 경로는 프록시 오리진의
-  // 평범한 `/img/bg.png` 로 도착하는데, 예전에는 `/zp/` 로 시작할 때만
-  // 받아 줘서 UNKNOWN → Response.error() 로 죽었다 (실측: insertRule /
-  // el.style / @font-face / adoptedStyleSheets / 루트상대 <style> 5종).
+test('classify: proxy-origin subresources from runtime CSS map to the target only when ctx is present', () => {
+  // Browser CSS resolution resolves root-relative url(/img/bg.png) against the document
+  // URL on the proxy origin; classify maps those requests back to the active tab's target.
   const sw = fs.readFileSync('web/sw.js', 'utf8').split('\r\n').join('\n');
   const grab = (name) => {
     const start = sw.indexOf('function ' + name + '(');
@@ -211,8 +184,6 @@ test('classify: 런타임 CSS 가 만든 프록시-오리진 서브리소스는 
     apiPath: (p) => '/zp/api/' + p,
     assetPath: (n) => '/zp/' + n,
   };
-  // 내부 경로 판정은 zp-core 가 단일 소스다 — 스텁을 따로 쓰면 그 순간
-  // **또 하나의 사본**이 된다. 진짜 구현을 뜯어 실행한다.
   const core = fs.readFileSync('web/zp-core.js', 'utf8');
   ZP.isInternalPath = new Function(
     'assetPath', 'controlPath',
@@ -229,14 +200,12 @@ test('classify: 런타임 CSS 가 만든 프록시-오리진 서브리소스는 
   const at = (path) => new URL(ORIGIN + path);
 
   const mapped = classifyWith(ctx)(req, at('/img/bg.png'), 'client-1');
-  assert.equal(mapped.kind, 'VIRTUAL_SUBRESOURCE', '런타임 CSS 서브리소스는 타깃으로 매핑돼야 한다');
+  assert.equal(mapped.kind, 'VIRTUAL_SUBRESOURCE', 'runtime CSS subresource must map to target');
   assert.equal(mapped.sameOriginURL.pathname, '/img/bg.png');
 
-  // ctx 가 없으면 탭을 추측하지 않는다 (A2: multi-tab leak). 여전히 거절이다.
   assert.equal(classifyWith(null)(req, at('/img/bg.png'), '').kind, 'UNKNOWN',
-    'ctx 없이 타깃을 추측하면 다른 탭으로 새는 경로가 열린다');
+    'guessing target without ctx leaks across tabs');
 
-  // 넓힌 분기가 내부 에셋을 삼키면 안 된다 — 삼키는 순간 페이지가 통째로 죽는다.
   for (const p of ['/__zp/zp_page_rt.wasm?v=abc', '/zp/zp-core.js', '/zp/runtime-prelude.js']) {
     assert.equal(classifyWith(ctx)(req, at(p), 'client-1').kind, 'INTERNAL_ASSET', p + ' must stay internal');
   }
@@ -244,7 +213,7 @@ test('classify: 런타임 CSS 가 만든 프록시-오리진 서브리소스는 
   assert.equal(classifyWith(ctx)(req, at('/zp/api/v2/fetch?url=x'), 'client-1').kind, 'RUNTIME_API');
 });
 
-test('v2 fetch envelope codec: [u32le head][raw body] round-trip, 와이어 확장 없음', () => {
+test('v2 fetch envelope codec: [u32le head][raw body] round-trip without wire expansion', () => {
   const code = fs.readFileSync('web/zp-core.js', 'utf8');
   const vm = require('node:vm');
   const sandbox = { URL, TextEncoder, TextDecoder, Set, Map, crypto: { getRandomValues: () => new Uint8Array(12) }, console };
@@ -253,12 +222,11 @@ test('v2 fetch envelope codec: [u32le head][raw body] round-trip, 와이어 확�
   vm.runInContext(code + '\n;this.__zp = self.ZP;', sandbox);
   const ZP = sandbox.__zp;
   const head = { tabId: 't', url: 'https://t.example/x', init: { method: 'POST', body: null } };
-  const body = new Uint8Array([0, 159, 146, 150, 255, 60, 0]); // 비UTF-8 바이너리 포함
+  const body = new Uint8Array([0, 159, 146, 150, 255, 60, 0]);
   const env = ZP.encodeEnvelope(head, body);
   const headLen = new TextEncoder().encode(JSON.stringify(head)).length;
-  assert.equal(env.length, 4 + headLen + body.length, 'base64 팽창이 없어야 한다');
+  assert.equal(env.length, 4 + headLen + body.length, 'envelope must not have base64 expansion');
   const dec = ZP.decodeEnvelope(env.buffer);
-  // vm realm 경계 — deepEqual(strict) 은 prototype 까지 본다. JSON 비교로.
   assert.equal(JSON.stringify(dec.head), JSON.stringify(head));
   assert.deepEqual(Array.from(dec.body), Array.from(body));
   const empty = ZP.decodeEnvelope(ZP.encodeEnvelope(head, null));
@@ -267,11 +235,11 @@ test('v2 fetch envelope codec: [u32le head][raw body] round-trip, 와이어 확�
   assert.throws(() => ZP.decodeEnvelope(ZP.encodeEnvelope(head, null).subarray(0, 2)), /BAD_ENVELOPE/);
 });
 
-test('rewriteCSSText: 절대 cross-origin url() 만 프록시로 돌리고 주석/문자열은 건드리지 않는다', () => {
+test('rewriteCSSText: rewrites only absolute cross-origin url() tokens and leaves comments and strings untouched', () => {
   const rt = preludeSource().split('\r\n').join('\n');
   const grab = (name) => {
     const start = rt.indexOf('  function ' + name + '(');
-    assert.ok(start >= 0, name + ' 을 못 찾았다');
+    assert.ok(start >= 0, name + ' not found');
     const next = rt.indexOf('\n  function ', start + 1);
     return rt.slice(start, next < 0 ? undefined : next);
   };
@@ -280,30 +248,26 @@ test('rewriteCSSText: 절대 cross-origin url() 만 프록시로 돌리고 주�
     grab('cssProxyURL') + '\n' + grab('rewriteCSSText') + '\nreturn rewriteCSSText;'
   )('http://proxy.localhost:18080', (u) => '/zp/api/fetch?url=' + encodeURIComponent(u));
 
-  // 절대 URL 은 프록시 경로로.
   assert.match(rewriteCSSText('#a{background:url(https://cdn.example.com/x.png)}'), /url\("\/zp\/api\/fetch\?url=https%3A%2F%2Fcdn/);
   assert.match(rewriteCSSText("@import 'https://cdn.example.com/a.css';"), /@import '\/zp\/api\/fetch/);
   assert.match(rewriteCSSText('@import url("https://cdn.example.com/a.css");'), /@import url\("\/zp\/api\/fetch/);
 
-  // 상대 URL 은 그대로 — 문서(프록시 공유 경로) 기준으로 풀려 SW 가 매핑한다.
-  // 여기서 손대면 이중 매핑이 된다.
+  // Relative URLs resolve against the document share path and are mapped by the SW.
   assert.equal(rewriteCSSText('#a{background:url(/img/x.png)}'), '#a{background:url(/img/x.png)}');
   assert.equal(rewriteCSSText('#a{background:url("./x.png")}'), '#a{background:url("./x.png")}');
-  // 이미 우리 오리진인 것도 그대로 (재진입 방지).
   const mine = '#a{background:url(http://proxy.localhost:18080/zp/api/fetch?url=x)}';
   assert.equal(rewriteCSSText(mine), mine);
 
-  // ★주석과 문자열은 페이지 내용이다. 정규식으로 긁으면 여기가 조용히 바뀐다.
   const comment = '/* url(https://cdn.example.com/x.png) */#a{color:red}';
   assert.equal(rewriteCSSText(comment), comment);
   const content = '#a::before{content:"url(https://cdn.example.com/x.png)"}';
   assert.equal(rewriteCSSText(content), content);
 });
 
-test('containStyleDeclaration: 프로퍼티 대입을 리라이트하고 메서드 동일성을 지킨다', () => {
+test('containStyleDeclaration: rewrites property assignments and preserves method identity', () => {
   const rt = preludeSource().split('\r\n').join('\n');
   const start = rt.indexOf('  function containStyleDeclaration(');
-  assert.ok(start >= 0, 'containStyleDeclaration 을 못 찾았다');
+  assert.ok(start >= 0, 'containStyleDeclaration not found');
   const next = rt.indexOf('\n  function ', start + 1);
   const src = rt.slice(start, next < 0 ? undefined : next);
   const contain = new Function(
@@ -312,29 +276,25 @@ test('containStyleDeclaration: 프로퍼티 대입을 리라이트하고 메서�
   )(new WeakMap(), new WeakMap(), (v) => String(v).replace('https://cdn.example.com', '/zp/api/fetch'),
     (v) => String(v).replace('/zp/api/fetch', 'https://cdn.example.com'), () => {});
 
-  // CSS 프로퍼티는 이 엔진에서 **인스턴스의 own data property** 다. 프로토타입
-  // 훅으로는 못 잡아서 프록시로 간다 — 그래서 여기 테스트도 평범한 객체다.
+  // CSS properties on CSSStyleDeclaration are own data properties on the instance.
   const decl = { backgroundImage: '', setProperty(p, v) { this[p] = v; }, getPropertyValue(p) { return this[p]; } };
   const p = contain(decl);
   p.backgroundImage = 'url(https://cdn.example.com/x.png)';
-  assert.equal(decl.backgroundImage, 'url(/zp/api/fetch/x.png)', '프로퍼티 대입이 리라이트를 안 탔다');
+  assert.equal(decl.backgroundImage, 'url(/zp/api/fetch/x.png)', 'property assignment bypassed CSS rewriter');
   p.setProperty('mask-image', 'url(https://cdn.example.com/m.png)');
-  assert.equal(decl['mask-image'], 'url(/zp/api/fetch/m.png)', 'setProperty 가 리라이트를 안 탔다');
+  assert.equal(decl['mask-image'], 'url(/zp/api/fetch/m.png)', 'setProperty bypassed CSS rewriter');
 
-  // 같은 선언에는 같은 프록시 — `el.style === el.style` 가 깨지면 안 된다.
-  assert.equal(contain(decl), p, '같은 선언에 다른 프록시를 주면 동일성 비교가 깨진다');
-  // 바인딩된 메서드도 캐시돼야 한다 — 매번 새 함수면 기능 탐지가 깨진다.
-  assert.equal(p.getPropertyValue, p.getPropertyValue, '메서드 동일성이 깨졌다');
-  // 문자열이 아닌 값은 그대로 통과.
+  assert.equal(contain(decl), p, 'returning a distinct proxy for the same declaration breaks identity checks');
+  assert.equal(p.getPropertyValue, p.getPropertyValue, 'method identity is not stable across accesses');
   p.zIndex = 3;
   assert.equal(decl.zIndex, 3);
 });
 
-test('compileNested: new Function 의 파라미터/arguments 가 with 스코프에 가려지지 않는다', () => {
+test('compileNested: new Function parameters and arguments are not shadowed by the with scope', () => {
   const rt = preludeSource().split('\r\n').join('\n');
   const grab = (name) => {
     const start = rt.indexOf('    function ' + name + '(');
-    assert.ok(start >= 0, name + ' 을 못 찾았다');
+    assert.ok(start >= 0, name + ' not found');
     const next = rt.indexOf('\n    function ', start + 1);
     return rt.slice(start, next < 0 ? undefined : next);
   };
@@ -345,85 +305,69 @@ test('compileNested: new Function 의 파라미터/arguments 가 with 스코프�
     new Function(['  const ZP_WITH_HELPERS = [', '  const ZP_WITH_PROLOGUE = ']
       .map(start => rt.slice(rt.indexOf(start), rt.indexOf(';\n', rt.indexOf(start)) + 2)).join('') + 'return ZP_WITH_PROLOGUE;')());
 
-  // `withScope` 의 has 트랩은 모든 이름에 true 다. 파라미터를 with **바깥**에
-  // 선언하면 그 트랩이 파라미터까지 가려서 undefined 가 된다 — naver 메인의
-  // 광고 safeframe(doT 템플릿 `new Function('o,tmpl', …)`)이 이걸로 죽었다.
+  // The withScope `has` trap returns true for all names, so parameters and __zp_args
+  // must be bound inside or applied outside the `with` block to avoid being shadowed.
   const scope = new Proxy({}, { has: () => true, get: () => undefined });
   const call = (compiled, args) => compiled.apply(null, [scope, args]);
 
   const params = compileNested(['o,tmpl'], 'return [typeof o, typeof tmpl].join()', 'function');
-  assert.equal(call(params, [1, {}]), 'number,object', '파라미터가 with 스코프에 가려졌다');
+  assert.equal(call(params, [1, {}]), 'number,object', 'parameters were shadowed by the with scope');
 
-  // `__zp_args` 도 결국 이름이라 with **안에서** 참조하면 같은 트랩에 걸린다.
-  // apply 는 반드시 with 바깥에서 해야 한다.
   const args = compileNested([], 'return arguments.length + ":" + arguments[0]', 'function');
-  assert.equal(call(args, [9]), '1:9', 'arguments 가 비어 있다 — apply 가 with 안에서 돌고 있다');
+  assert.equal(call(args, [9]), '1:9', 'arguments is empty because apply ran inside the with block');
 
-  // 자유 식별자는 여전히 with 를 거쳐야 한다(격리).
   const free = compileNested([], 'return typeof somethingGlobal', 'function');
   assert.equal(call(free, []), 'undefined');
 });
 
-test('필터링된 컬렉션은 진짜 NodeList 처럼 인덱스를 가진다', () => {
+test('filteredCollection exposes contiguous indices like a native NodeList', () => {
   const rt = preludeSource().split('\r\n').join('\n');
 
-  // 실제 의미까지 고정한다 — 소스에서 두 함수를 뜯어 그대로 실행한다.
   const helperStart = rt.indexOf('function isIndexKey(prop)');
   assert.ok(helperStart > 0);
-  // 경계는 다음 함수 선언이다. 예전에는 `sanitizeSerializedHTML` 을 경계로
-  // 썼는데, 그 함수는 호출자가 0이 되어 지웠다 — 죽은 코드를 슬라이스 경계로
-  // 쓰면 정리할 때마다 가드가 같이 깨진다.
   const helper = rt.slice(helperStart, rt.indexOf('\n  function deproxyURL(', helperStart));
-  // 개행이 필수다 — 슬라이스가 `//` 주석 줄에서 끝나면 뒤에 붙인 `return` 이
-  // 통째로 그 주석에 먹혀 `new Function` 이 undefined 를 돌려준다(한 번 밟았다).
+  // Leading newline prevents a trailing line comment in `helper` from swallowing `return`.
   const make = new Function('isZPAttrName', helper + '\n; return filteredCollection;')(n => String(n || '').startsWith('data-zp-'));
 
   const raw = [{ name: 'a' }, { name: 'data-zp-x' }, { name: 'b' }, { name: 'c' }];
   const list = make(raw, item => !isZPName(item));
   function isZPName(item) { return String(item.name).startsWith('data-zp-'); }
 
-  assert.strictEqual(list.length, 3, '필터된 항목은 길이에서 빠진다');
-  assert.strictEqual(list[2].name, 'c', '인덱싱은 필터를 건너뛴 순서를 따른다');
+  assert.strictEqual(list.length, 3, 'filtered items must be excluded from length');
+  assert.strictEqual(list[2].name, 'c', 'indexing must follow the filtered item sequence');
 
-  // ★핵심 회귀: `Array.prototype.map/filter/forEach` 는 인덱스를 읽기 전에
-  // HasProperty 로 hole 을 판정한다. `has` 가 false 면 콜백이 아예 안 불리고
-  // 배열에 구멍이 남아 사이트 코드는 `undefined` 를 집는다 — wikipedia 포털이
-  // `l10n/undefined-<hash>.json` 을 8번 긁던 원인이 정확히 이것이었다.
+  // Array.prototype.map/filter/forEach check HasProperty before reading an index.
   assert.strictEqual(1 in list, true);
   assert.deepStrictEqual(Array.prototype.map.call(list, e => e.name), ['a', 'b', 'c']);
 
-  // 값은 있는데 키가 없으면 그 자기모순 자체가 지문이다.
   assert.deepStrictEqual(Object.keys(list), ['0', '1', '2']);
 
-  // 순회 메서드를 raw 에 그냥 바인딩하면 **필터를 우회한다** —
-  // `document.querySelectorAll('script').forEach(…)` 가 ZP 부트 스크립트를
-  // 그대로 넘겨줬다. 인덱싱만 막고 순회를 안 막으면 소용없다.
   const seen = [];
   list.forEach(e => seen.push(e.name));
-  assert.deepStrictEqual(seen, ['a', 'b', 'c'], 'forEach 도 필터를 지켜야 한다');
+  assert.deepStrictEqual(seen, ['a', 'b', 'c'], 'forEach must respect the filter');
   assert.deepStrictEqual([...list].map(e => e.name), ['a', 'b', 'c']);
 });
 
-test('판정기: 응답을 받았으면 진짜 유출', () => {
+test('classifyTape: response event marks a confirmed leak', () => {
   const v = classifyTape({ network: [req('1', DIRECT), { kind: 'response', request_id: '1', status: 200 }] }, CASE_ID);
   assert.deepEqual([...v.answered], ['x1-case']);
   assert.equal(v.blocked.size + v.unknown.size, 0);
 });
 
-test('판정기: failed 만 있으면 csp-only (차단됨)', () => {
+test('classifyTape: failed event without response marks csp-only (blocked)', () => {
   const v = classifyTape({ network: [req('1', DIRECT), { kind: 'failed', request_id: '1' }] }, CASE_ID);
   assert.deepEqual([...v.blocked], ['x1-case']);
   assert.equal(v.answered.size, 0);
 });
 
-test('판정기: 결말 이벤트가 없으면 csp-only 가 아니라 판정불가', () => {
+test('classifyTape: missing terminal event marks unknown rather than csp-only', () => {
   const v = classifyTape({ network: [req('1', DIRECT)] }, CASE_ID);
   assert.deepEqual([...v.unknown], ['x1-case']);
-  assert.equal(v.blocked.size, 0, '결말을 모르는 것을 "막혔다" 로 세면 유출이 통과한다');
+  assert.equal(v.blocked.size, 0, 'counting an unresolved request as blocked would mask a leak');
   assert.equal(v.answered.size, 0);
 });
 
-test('판정기: 여러 번 시도했으면 하나라도 응답받은 쪽이 이긴다', () => {
+test('classifyTape: any answered attempt takes precedence over blocked attempts', () => {
   const v = classifyTape({
     network: [
       req('1', DIRECT), { kind: 'failed', request_id: '1' },
@@ -431,31 +375,31 @@ test('판정기: 여러 번 시도했으면 하나라도 응답받은 쪽이 이
     ],
   }, CASE_ID);
   assert.deepEqual([...v.answered], ['x1-case']);
-  assert.equal(v.blocked.size, 0, '한 번이라도 타깃과 말했으면 유출이다 — 다른 시도가 막혔다고 지워지지 않는다');
+  assert.equal(v.blocked.size, 0, 'reaching the target once is a leak even if another attempt was blocked');
 });
 
-test('판정기: 응답 뒤에 failed 가 붙어도 유출이다', () => {
+test('classifyTape: response followed by failed still counts as a leak', () => {
   const v = classifyTape({
     network: [req('1', DIRECT), { kind: 'response', request_id: '1', status: 200 }, { kind: 'failed', request_id: '1' }],
   }, CASE_ID);
-  assert.deepEqual([...v.answered], ['x1-case'], '응답을 받은 뒤 스트림이 끊긴 것은 이미 말한 것이다');
+  assert.deepEqual([...v.answered], ['x1-case'], 'stream failure after receiving a response still contacted the target');
 });
 
-test('판정기: 프록시 경유 요청은 직접 요청으로 세지 않는다', () => {
+test('classifyTape: proxy-routed requests are not counted as direct target attempts', () => {
   const v = classifyTape({
     network: [
       { kind: 'request', request_id: '1', url: 'http://proxy.localhost:18080/zp/api/fetch?url=http%3A%2F%2F127.0.0.1%3A18098%2Fimg%2Fx1-case__cross.png' },
       { kind: 'response', request_id: '1', status: 200 },
     ],
   }, CASE_ID);
-  assert.equal(v.attempted.size, 0, '우리가 대신 가져온 것은 유출이 아니다 — 이걸 세던 것이 원래 버그였다');
+  assert.equal(v.attempted.size, 0, 'proxy-routed requests must not be counted as direct leaks');
 });
 
-test('srcset 후보 분해가 Rust 와 같다 (data: 쉼표 포함)', () => {
+test('splitSrcsetCandidates matches the Rust implementation (including data: URLs with commas)', () => {
   const rt = preludeSource().split('\r\n').join('\n');
   const grab = (name) => {
     const start = rt.indexOf('\n  function ' + name + '(');
-    assert.ok(start >= 0, name + ' 을 못 찾았다');
+    assert.ok(start >= 0, name + ' not found');
     const next = rt.indexOf('\n  function ', start + 1);
     return rt.slice(start, next < 0 ? undefined : next);
   };
@@ -463,16 +407,16 @@ test('srcset 후보 분해가 Rust 와 같다 (data: 쉼표 포함)', () => {
   const fixture = JSON.parse(fs.readFileSync('crates/zp-shared/testdata/srcset_cases.json', 'utf8'));
   for (const c of fixture.cases) {
     const got = split(c.input).map(x => [x.lead, x.url, x.tail]);
-    assert.deepEqual(got, c.candidates, c.id + ': 분해가 Rust 픽스처와 다르다');
-    assert.equal(got.map(x => x.join('')).join(''), c.input, c.id + ': 왕복이 입력과 달라졌다');
+    assert.deepEqual(got, c.candidates, c.id + ': candidate split differs from Rust fixture');
+    assert.equal(got.map(x => x.join('')).join(''), c.input, c.id + ': round-trip does not match input');
   }
 });
 
-test('?url= 빌더가 Rust 와 바이트 단위로 같다', () => {
+test('?url= builder matches the Rust implementation byte-for-byte', () => {
   const rt = preludeSource().split('\r\n').join('\n');
   const grab = (name) => {
     const start = rt.indexOf('\n  function ' + name + '(');
-    assert.ok(start >= 0, name + ' 을 못 찾았다');
+    assert.ok(start >= 0, name + ' not found');
     const next = rt.indexOf('\n  function ', start + 1);
     return rt.slice(start, next < 0 ? undefined : next);
   };
@@ -482,11 +426,11 @@ test('?url= 빌더가 Rust 와 바이트 단위로 같다', () => {
       'proxyOrigin', 'ZP', 'boot', 'nativeEncodeURIComponent',
       grab('encodeURLParam') + '\n' + grab('subresourceProxyPath') + '\nreturn subresourceProxyPath;'
     )('http://proxy.example', { apiPath: (n) => '/zp/api/' + n }, c.tab ? { tabId: c.tab } : null, encodeURIComponent);
-    assert.equal(build(c.url), c.want, c.id + ': 페이지 realm 출력이 Rust 와 다르다');
+    assert.equal(build(c.url), c.want, c.id + ': page-realm output differs from Rust fixture');
   }
 });
 
-test('공유 URL 수용/거부: 살아 있는 JS 구현이 공유 픽스처와 일치한다', () => {
+test('shared URL acceptance policy: JS implementation matches the shared fixture', () => {
   const cases = JSON.parse(fs.readFileSync('crates/zp-shared/testdata/shareurl_cases.json', 'utf8'));
 
   const core = fs.readFileSync('web/zp-core.js', 'utf8');
@@ -499,13 +443,8 @@ test('공유 URL 수용/거부: 살아 있는 JS 구현이 공유 픽스처와 �
   new Function('globalThis', 'location', 'crypto', 'URL', 'URLSearchParams', 'TextEncoder', 'TextDecoder',
     core)(sandbox, sandbox.location, sandbox.crypto, URL, URLSearchParams, TextEncoder, TextDecoder);
 
-  // 의도된 차이 하나. 픽스처는 Rust 의 엄격한 파서 기준이라 `https:/x` 를
-  // Malformed 로 거부하는데, WHATWG URL 은 special scheme 의 슬래시 하나를
-  // 허용한다. 실측: `new URL('https:/single-slash')` → `https://single-slash/`,
-  // host=`single-slash` — **명시적 호스트로 풀리고** 프록시 오리진 기준 상대
-  // 해석이 아니다. 즉 오리진 모호성이 없고, 사용자가 주소창에 같은 문자열을
-  // 넣었을 때 브라우저가 하는 것과 동일하다. 격리에 영향이 없으므로 JS 의
-  // 관대한 쪽을 유지하고 여기 이유와 함께 못 박는다.
+  // WHATWG URL accepts a single slash after a special scheme (`https:/single-slash` resolves
+  // to host `single-slash`), whereas the stricter Rust parser rejects it as Malformed.
   const INTENDED = new Map([['https:/single-slash', true]]);
 
   const mismatches = [];
@@ -513,53 +452,44 @@ test('공유 URL 수용/거부: 살아 있는 JS 구현이 공유 픽스처와 �
     let ok = true;
     try { sandbox.ZP.canonicalTargetURL(c.input); } catch { ok = false; }
     const want = INTENDED.has(c.input) ? INTENDED.get(c.input) : c.ok;
-    if (ok !== want) mismatches.push(`${JSON.stringify(c.input)}: 기대 ok=${want}, JS ok=${ok}`);
+    if (ok !== want) mismatches.push(`${JSON.stringify(c.input)}: expected ok=${want}, got JS ok=${ok}`);
   }
-  assert.deepEqual(mismatches, [], '공유 픽스처와 JS 판정이 갈렸다:\n  ' + mismatches.join('\n  '));
+  assert.deepEqual(mismatches, [], 'JS URL classifier diverged from shared fixture:\n  ' + mismatches.join('\n  '));
 });
 
-test('불투명 오리진 프레임에서도 proxyOrigin 이 "null" 이 되지 않는다', () => {
+test('resolveProxyOrigin does not return "null" inside opaque-origin frames', () => {
   const rt = preludeSource().split('\r\n').join('\n');
   const start = rt.indexOf('function resolveProxyOrigin(');
-  assert.ok(start > 0, 'resolveProxyOrigin 이 없다');
+  assert.ok(start > 0, 'resolveProxyOrigin not found');
   const end = rt.indexOf('\n  const toStringMap', start);
-  // the window getters captured at boot (`winGet`) read a fake window's plain properties here
   const fn = new Function('winGet', rt.slice(start, end) + '; return resolveProxyOrigin;')((w, n) => w[n]);
 
   const opaque = new URL('about:srcdoc');
   const real = new URL('http://proxy.localhost:18080/zp/p/tok');
 
-  // 1) 정상 문서는 그대로.
   assert.strictEqual(fn(real, {}, {}), 'http://proxy.localhost:18080');
 
-  // 2) 부팅 설정이 있으면 그걸 쓴다 (부모가 실어 보낸다).
   assert.strictEqual(fn(opaque, { proxyOrigin: 'http://proxy.localhost:18080' }, {}),
     'http://proxy.localhost:18080');
 
-  // 3) 부팅 설정이 없으면 조상 프레임을 타고 올라가 읽는다. 중첩 srcdoc 이라
-  //    한 단계 위도 "null" 일 수 있으므로 **끝까지** 올라가야 한다.
   const top = { location: { origin: 'http://proxy.localhost:18080' } };
   const mid = { location: { origin: 'null' } };
   mid.parent = top; top.parent = top;
   const leaf = { parent: mid, location: { origin: 'null' } };
   assert.strictEqual(fn(opaque, {}, leaf), 'http://proxy.localhost:18080');
 
-  // 4) 아무 데서도 못 얻으면 "null" 을 그대로 돌려주되(무한루프 금지),
-  //    적어도 조상 순회가 발산하지 않아야 한다.
   const lone = { parent: null };
   assert.strictEqual(fn(opaque, {}, lone), 'null');
-
 });
 
-test('프록시 URL 되돌리기는 한 벌이다 — 세 호출자의 표를 실행으로 고정', () => {
+test('deproxyURL: unified table handles all three caller modes', () => {
   const rt = preludeSource().split('\r\n').join('\n');
   const grab = (head) => {
     const start = rt.indexOf(head);
-    assert.ok(start >= 0, head + ' 을 못 찾았다');
+    assert.ok(start >= 0, head + ' not found');
     const next = rt.indexOf('\n  function ', start + 1);
     return rt.slice(start, next < 0 ? undefined : next);
   };
-  // deproxyURL 바로 뒤에 스캔 정규식 헬퍼가 붙어 있어 한 번에 딸려 온다.
   const src = rt.slice(rt.indexOf('  function deproxyURL(raw, opts) {'), rt.indexOf('  function scrubbedClone(node) {'));
 
   const PROXY = 'http://proxy.example';
@@ -575,45 +505,35 @@ test('프록시 URL 되돌리기는 한 벌이다 — 세 호출자의 표를 �
   const T = 'https://t.example/a.png';
   const enc = encodeURIComponent(T);
 
-  // 1) 세 호출자 **모두** 알아야 하는 모양 — 예전에 내비게이션판만 몰랐다.
   for (const opts of [{ fallback: 'any' }, { fallback: 'share' }, { scan: true }]) {
     assert.equal(f(PROXY + '/zp/api/fetch?url=' + enc + '&tab=x', opts), T,
-      JSON.stringify(opts) + ': ?url= 를 못 푼다');
+      JSON.stringify(opts) + ': failed to unwrap ?url=');
     assert.equal(f(PROXY + '/zp/api/script?kind=classic&u=' + enc, opts), T,
-      JSON.stringify(opts) + ': &u= 를 못 푼다');
+      JSON.stringify(opts) + ': failed to unwrap &u=');
     assert.equal(f(PROXY + '/zp/?via=' + enc, opts), T,
-      JSON.stringify(opts) + ': ?via= 를 못 푼다');
-    // 우리 오리진이 아니면 손대지 않는다.
+      JSON.stringify(opts) + ': failed to unwrap ?via=');
     assert.equal(f('https://other.example/x', opts), 'https://other.example/x');
   }
 
-  // 2) 호출자별로 **달라야** 하는 것: 모르는 모양의 처리.
-  //    폼 액션은 문서 타깃으로 떨어져야 하고(프록시를 다이얼하면 죽는다),
-  //    타이밍은 공유 문서 경로일 때만, 직렬화는 없는 값을 지어내지 않는다.
   const unknown = PROXY + '/zp/whatever';
-  assert.equal(f(unknown, { fallback: 'any' }), VIRT, "폼: 모르면 문서 타깃");
-  // share 폴백은 **모든** `/zp/` 내부 경로를 문서 타깃으로 흡수한다 —
-  // `/zp/assets/*`·`/zp/control/*` 가 스택·직렬화에 새는 것보다 가상 URL 이 안전.
-  assert.equal(f(unknown, { fallback: 'share' }), VIRT, '타이밍: /zp/ 내부 경로는 문서 타깃으로 흡수');
-  assert.equal(f(PROXY + '/zp/p/tok', { fallback: 'share' }), VIRT, '타이밍: 공유 경로는 문서 타깃');
-  assert.equal(f(unknown, { scan: true }), unknown, '직렬화: 없는 값을 지어내지 않는다');
+  assert.equal(f(unknown, { fallback: 'any' }), VIRT, 'form mode: unknown proxy URL falls back to document target');
+  assert.equal(f(unknown, { fallback: 'share' }), VIRT, 'timing mode: internal /zp/ path falls back to document target');
+  assert.equal(f(PROXY + '/zp/p/tok', { fallback: 'share' }), VIRT, 'timing mode: share path falls back to document target');
+  assert.equal(f(unknown, { scan: true }), unknown, 'serialization mode: unknown URL is preserved');
 
-  // 3) scan 모드만 한 값 안의 **여럿**을 푼다 (style 의 url(…), srcset 목록).
   const two = 'url("' + PROXY + '/zp/api/fetch?url=' + enc + '"), url(\'' + PROXY + '/zp/api/fetch?url=' + encodeURIComponent('https://t.example/b.png') + '\')';
   assert.equal(f(two, { scan: true }), 'url("' + T + '"), url(\'https://t.example/b.png\')');
-  // scan 이 아니면 값 전체가 하나의 URL 일 때만 푼다 — 중간에 박힌 건 안 건드린다.
-  assert.equal(f(two, { fallback: 'share' }), two, 'scan 없이 값 안을 훑으면 안 된다');
+  assert.equal(f(two, { fallback: 'share' }), two, 'must not scan inside composite strings without scan: true');
 });
 
-test('교차창 프록시의 parent 를 타고 올라가면 top 에 닿는다', () => {
+test('safeCrossWindow: climbing .parent reaches window.top', () => {
   const rt = preludeSource().split('\r\n').join('\n');
   const start = rt.indexOf('    function climbCrossWindow(targetWindow, prop, fallback) {');
-  assert.ok(start >= 0, 'climbCrossWindow 를 못 찾았다');
+  assert.ok(start >= 0, 'climbCrossWindow not found');
   // The same-origin stand-in ends where the window-handle policy begins.
   const end = rt.indexOf('    // ── which windows a page may hold, and in what form');
-  assert.ok(end > start && end > rt.indexOf('    function safeCrossWindow(targetWindow) {'), 'safeCrossWindow 구간을 못 찾았다');
+  assert.ok(end > start && end > rt.indexOf('    function safeCrossWindow(targetWindow) {'), 'safeCrossWindow section not found');
 
-  // 실제 구현을 뜯어 실행한다 — 창 3단을 흉내 내고 그 위에서 CMP 루프를 돈다.
   const src = rt.slice(start, end);
   const make = new Function('root', 'scope', 'postMessageWrapperFor', 'crossWindowProxyCache', 'crossWindowTargets',
     'definePropertiesMasked', 'windowHandleFor', 'get', 'ZP_HIDDEN_RE', 'MEMBER_DANGER', 'winGet',
@@ -626,7 +546,6 @@ test('교차창 프록시의 parent 를 타고 올라가면 top 에 닿는다', 
   mid.top = top; mid.parent = top;
   leaf.top = top; leaf.parent = mid;
 
-  // leaf 실행 컨텍스트: root=leaf, scope=leaf 의 가상 window
   const scope = { name: 'scope(leaf)' };
   // climbCrossWindow asks the handle policy for each step; for same-origin
   // windows the policy's answer IS this stand-in, so late-bind it.
@@ -645,85 +564,68 @@ test('교차창 프록시의 parent 를 타고 올라가면 top 에 닿는다', 
     steps++;
   }
   assert.ok(reached,
-    '손자 프레임에서 parent 를 타고 올라가도 window.top 에 못 닿는다 — CMP 루프가 무한히 돈다');
-  assert.ok(steps <= 3, '사슬이 필요 이상으로 길다: ' + steps);
+    'climbing .parent from a grandchild frame did not reach window.top');
+  assert.ok(steps <= 3, 'parent chain exceeded expected depth: ' + steps);
 
-  // 같은 실제 창에는 **같은 프록시**가 나와야 한다. 이게 아니면 `===` 비교가
-  // 성립하지 않아 위 루프는 영원히 안 끝난다.
-  assert.equal(safeCrossWindow(top), safeCrossWindow(top), '교차창 프록시가 캐시되지 않는다');
-  assert.equal(safeCrossWindow(mid).parent, safeCrossWindow(top), 'mid.parent 가 top 프록시가 아니다');
-  assert.equal(safeCrossWindow(mid).top, safeCrossWindow(top), 'mid.top 이 top 프록시가 아니다');
+  assert.equal(safeCrossWindow(top), safeCrossWindow(top), 'cross-window proxy must be cached per target window');
+  assert.equal(safeCrossWindow(mid).parent, safeCrossWindow(top), 'mid.parent must equal the top proxy');
+  assert.equal(safeCrossWindow(mid).top, safeCrossWindow(top), 'mid.top must equal the top proxy');
 
-  // 끝(자기 자신을 가리키는 창)에서는 제자리에 머문다 — 무한 재귀가 아니라 종료다.
-  assert.equal(safeCrossWindow(top).parent, safeCrossWindow(top), 'top 의 parent 는 자기 자신이어야 한다');
+  assert.equal(safeCrossWindow(top).parent, safeCrossWindow(top), 'top.parent must return itself');
 
-  // 못 읽는 조상(교차 출처로 던지는 경우)에서도 던지지 않고 제자리에 머문다.
   const hostile = { get parent() { throw new Error('cross-origin'); }, get top() { throw new Error('cross-origin'); } };
   const hp = safeCrossWindow(hostile);
-  assert.equal(hp.parent, hp, '읽기가 던지면 제자리에 머물러야 한다');
+  assert.equal(hp.parent, hp, 'throwing .parent getter must fall back to self');
 });
 
-test('필터 컬렉션 표면은 감싼 대상이 가진 것만 노출한다', () => {
+test('filteredCollection exposes only properties present on the underlying collection', () => {
   const rt = preludeSource().split('\r\n').join('\n');
   const start = rt.indexOf('  function isIndexKey(prop) {');
   const end = rt.indexOf('\n  function ', rt.indexOf('  function filteredCollection(raw, predicate) {') + 1);
-  assert.ok(start >= 0 && end > start, 'filteredCollection 구간을 못 찾았다');
+  assert.ok(start >= 0 && end > start, 'filteredCollection section not found');
   const make = new Function('isZPAttrName', 'maskNativeFunction',
     rt.slice(start, end) + '\nreturn filteredCollection;')(() => false, () => {});
 
-  // NodeList 흉내 — 순회 메서드와 item 을 가진 대상.
   const nlRaw = [{ name: 'a' }, { name: 'b' }];
   nlRaw.item = (i) => nlRaw[i] || null;
   const nl = make(nlRaw, () => true);
-  // HTMLCollection 흉내 — @@iterator 는 있고(=Array.prototype.values)
-  // forEach/values/keys/entries 는 **없는** 대상. 실측한 모양 그대로다.
+  // HTMLCollection exposes @@iterator (Array.prototype.values) without forEach/values/keys/entries.
   const bare = { length: 2, 0: { name: 'a' }, 1: { name: 'b' }, item(i) { return this[i] || null; } };
   bare[Symbol.iterator] = Array.prototype.values;
   const hc = make(bare, () => true);
 
-  // ① 있으면 노출, 없으면 undefined — 두 방향 다.
   for (const k of ['forEach', 'values', 'keys', 'entries']) {
-    assert.equal(nl[k], Array.prototype[k], 'NodeList 쪽 ' + k + ' 는 Array.prototype.' + k + ' 여야 한다');
-    assert.equal(typeof hc[k], 'undefined', 'HTMLCollection 쪽에 ' + k + ' 가 있으면 안 된다');
+    assert.equal(nl[k], Array.prototype[k], 'NodeList.' + k + ' must equal Array.prototype.' + k);
+    assert.equal(typeof hc[k], 'undefined', 'HTMLCollection must not expose ' + k);
   }
-  assert.equal(nl[Symbol.iterator], Array.prototype.values, '@@iterator 가 Array.prototype.values 가 아니다');
-  assert.equal(hc[Symbol.iterator], Array.prototype.values, 'raw 에 @@iterator 가 있으면 그대로 줘야 한다');
+  assert.equal(nl[Symbol.iterator], Array.prototype.values, '@@iterator must equal Array.prototype.values');
+  assert.equal(hc[Symbol.iterator], Array.prototype.values, 'underlying @@iterator must be preserved');
 
-  // ② `in` 과 값이 어긋나면 그 자체가 탐지기다.
   for (const k of ['forEach', 'values', 'keys', 'entries']) {
-    assert.equal(typeof hc[k] === 'function', (k in bare), 'HTMLCollection: `in` 과 값이 어긋난다 — ' + k);
-    assert.equal(typeof nl[k] === 'function', (k in nlRaw), 'NodeList: `in` 과 값이 어긋난다 — ' + k);
+    assert.equal(typeof hc[k] === 'function', (k in bare), 'HTMLCollection: `in` operator disagrees with property read for ' + k);
+    assert.equal(typeof nl[k] === 'function', (k in nlRaw), 'NodeList: `in` operator disagrees with property read for ' + k);
   }
 
-  // ③ 메서드 동일성이 접근마다 흔들리면 안 된다. 실제 DOM 은
-  //    `hc.item === hc.item`, `hc.namedItem === hc.namedItem` 이 전부 true 다.
-  assert.equal(nl.item, nl.item, 'item 이 접근마다 새 함수다');
-  assert.equal(hc.item, hc.item, 'item 이 접근마다 새 함수다(bare)');
-  //    우리가 따로 안 다루고 raw 로 넘기는 메서드(`namedItem` 등)도 마찬가지다 —
-  //    폴백에서 매번 새로 bind 하면 그 자리만 동일성이 깨진다.
+  assert.equal(nl.item, nl.item, 'item method must be cached across accesses');
+  assert.equal(hc.item, hc.item, 'item method must be cached across accesses on bare collection');
   const withNamed = { length: 0, item() { return null; }, namedItem() { return null; } };
   withNamed[Symbol.iterator] = Array.prototype.values;
   const wn = make(withNamed, () => true);
-  assert.equal(typeof wn.namedItem, 'function', '폴백 메서드가 사라졌다');
-  assert.equal(wn.namedItem, wn.namedItem, '폴백 메서드가 접근마다 새 함수다');
+  assert.equal(typeof wn.namedItem, 'function', 'fallback method namedItem is missing');
+  assert.equal(wn.namedItem, wn.namedItem, 'fallback method must be cached across accesses');
 
-  // ④ ★그래도 필터는 살아 있어야 한다 — Array.prototype.* 는 this=프록시로
-  //    length/인덱스를 읽으므로 우리 트랩을 지난다. 이게 이 설계의 전제다.
   const mixRaw = [{ name: 'keep1' }, { name: 'drop' }, { name: 'keep2' }];
   mixRaw.item = (i) => mixRaw[i] || null;
   const mixed = make(mixRaw, (x) => x && x.name !== 'drop');
-  assert.equal(mixed.length, 2, '필터가 안 먹는다');
-  assert.deepEqual([...mixed].map((x) => x.name), ['keep1', 'keep2'], '@@iterator 가 필터를 우회한다');
+  assert.equal(mixed.length, 2, 'filter did not exclude hidden items');
+  assert.deepEqual([...mixed].map((x) => x.name), ['keep1', 'keep2'], '@@iterator bypassed the filter');
   const viaForEach = [];
   mixed.forEach((x) => viaForEach.push(x.name));
-  assert.deepEqual(viaForEach, ['keep1', 'keep2'], 'forEach 가 필터를 우회한다');
-  assert.deepEqual([...mixed.values()].map((x) => x.name), ['keep1', 'keep2'], 'values 가 필터를 우회한다');
-  assert.deepEqual(Array.prototype.map.call(mixed, (x) => x.name), ['keep1', 'keep2'], 'map 이 필터를 우회한다');
-  assert.deepEqual(Object.keys(mixed), ['0', '1'], '키가 필터를 안 따른다');
+  assert.deepEqual(viaForEach, ['keep1', 'keep2'], 'forEach bypassed the filter');
+  assert.deepEqual([...mixed.values()].map((x) => x.name), ['keep1', 'keep2'], 'values() bypassed the filter');
+  assert.deepEqual(Array.prototype.map.call(mixed, (x) => x.name), ['keep1', 'keep2'], 'Array.prototype.map bypassed the filter');
+  assert.deepEqual(Object.keys(mixed), ['0', '1'], 'Object.keys did not follow filtered indices');
 
-  // ⑤ live 컬렉션은 순회 중 원본이 자라면 **그걸 본다**(실브라우저 측정과 같게).
-  //    스냅샷 순회는 못 봤다 — Array.prototype.values 는 매 next() 마다 length 를
-  //    읽으므로 우리 length 트랩(원본 길이 변화 시 캐시 재생성)을 다시 탄다.
   const liveRaw = [{ name: 'x' }];
   liveRaw.item = (i) => liveRaw[i] || null;
   const live = make(liveRaw, () => true);
@@ -733,15 +635,15 @@ test('필터 컬렉션 표면은 감싼 대상이 가진 것만 노출한다', (
     if (walked.length === 1) liveRaw.push({ name: 'y' });
     if (walked.length > 4) break;
   }
-  assert.deepEqual(walked, ['x', 'y'], 'live 순회가 원본 변화를 못 본다');
+  assert.deepEqual(walked, ['x', 'y'], 'live iteration did not observe mutations on the underlying collection');
 });
 
-test('필터 컬렉션 순회는 O(N) 이다', () => {
+test('filteredCollection iteration is O(N)', () => {
   const rt = preludeSource().split('\r\n').join('\n');
   const start = rt.indexOf('  function isIndexKey(prop) {');
-  assert.ok(start >= 0, 'isIndexKey 를 못 찾았다');
+  assert.ok(start >= 0, 'isIndexKey not found');
   const end = rt.indexOf('\n  function ', rt.indexOf('  function filteredCollection(raw, predicate) {') + 1);
-  assert.ok(end > start, 'filteredCollection 구간을 못 찾았다');
+  assert.ok(end > start, 'filteredCollection section not found');
   const src = rt.slice(start, end);
   const make = new Function('isZPAttrName',
     src + '\nreturn filteredCollection;')(() => false);
@@ -752,73 +654,64 @@ test('필터 컬렉션 순회는 O(N) 이다', () => {
   let calls = 0;
   const list = make(raw, () => { calls++; return true; });
 
-  // ① for-of — 이게 CNN 을 세운 경로다.
   calls = 0;
   let seen = 0;
   for (const _ of list) seen++;
-  assert.equal(seen, N, '순회가 전부를 안 돌려준다');
-  assert.ok(calls <= N * 2, 'for-of 가 O(N) 이 아니다 — 술어 ' + calls + '회 (N=' + N + ')');
+  assert.equal(seen, N, 'iteration did not visit all elements');
+  assert.ok(calls <= N * 2, 'for-of is not O(N): predicate called ' + calls + ' times (N=' + N + ')');
 
-  // ② forEach / values / entries 도 같은 자리다.
   for (const how of ['forEach', 'values', 'entries']) {
     const l2 = make(raw, () => { calls++; return true; });
     calls = 0;
     if (how === 'forEach') l2.forEach(() => {});
-    else { let c = 0; for (const _ of l2[how]()) c++; assert.equal(c, N, how + ' 가 전부를 안 돈다'); }
-    assert.ok(calls <= N * 2, how + ' 가 O(N) 이 아니다 — 술어 ' + calls + '회');
+    else { let c = 0; for (const _ of l2[how]()) c++; assert.equal(c, N, how + ' did not visit all elements'); }
+    assert.ok(calls <= N * 2, how + ' is not O(N): predicate called ' + calls + ' times');
   }
 
-  // ③ 인덱스 접근 한 번이 전체를 두 번 훑으면 안 된다
-  //    (`Array.prototype.map.call(list, …)` 이 정확히 이 경로다).
   const l3 = make(raw, () => { calls++; return true; });
   calls = 0;
   for (let i = 0; i < N; i++) void l3[i];
-  assert.ok(calls <= N * 2, '인덱스 접근이 O(N) 이 아니다 — 술어 ' + calls + '회');
+  assert.ok(calls <= N * 2, 'index access is not O(N): predicate called ' + calls + ' times');
 
-  // ④ 그래도 **필터는 살아 있어야** 한다 — 숨기는 게 이 Proxy 의 존재 이유다.
   const mixed = [{ name: 'keep1' }, { name: 'drop' }, { name: 'keep2' }];
   const filtered = make(mixed, (x) => x && x.name !== 'drop');
-  assert.equal(filtered.length, 2, '필터가 안 먹는다');
-  assert.deepEqual([...filtered].map((x) => x.name), ['keep1', 'keep2'], '순회가 필터를 우회한다');
-  assert.equal(filtered[1] && filtered[1].name, 'keep2', '인덱스가 필터를 우회한다');
+  assert.equal(filtered.length, 2, 'filter did not exclude hidden items');
+  assert.deepEqual([...filtered].map((x) => x.name), ['keep1', 'keep2'], 'iteration bypassed the filter');
+  assert.equal(filtered[1] && filtered[1].name, 'keep2', 'index access bypassed the filter');
 
-  // ⑤ live 컬렉션에서 항목이 늘면 캐시를 다시 만든다.
   const live = [{ name: 'a' }];
   const lv = make(live, () => true);
   assert.equal(lv.length, 1);
   live.push({ name: 'b' });
-  assert.equal(lv.length, 2, '원본이 자랐는데 캐시가 안 갱신된다');
+  assert.equal(lv.length, 2, 'snapshot cache did not refresh after underlying length grew');
 });
 
-test('문서 인코딩 크기는 서브리소스 폭주에 축출되지 않는다', () => {
+test('document encoded size is not evicted by subresource bursts', () => {
   const sw = fs.readFileSync('web/sw.js', 'utf8').split('\r\n').join('\n');
   const start = sw.indexOf('const docEncodedByUrl = new Map();');
-  assert.ok(start >= 0, 'docEncodedByUrl 을 못 찾았다 — 문서 칸이 없다');
+  assert.ok(start >= 0, 'docEncodedByUrl not found');
   const end = sw.indexOf('function deliverStreamEncoded(');
-  assert.ok(end > start, 'recordEncoded 구간을 못 찾았다');
+  assert.ok(end > start, 'recordEncoded section not found');
   const src = 'const streamEncodedByUrl = new Map();\n' + sw.slice(start, end);
   const { recordEncoded, docEncodedByUrl, streamEncodedByUrl } =
     new Function(src + '\nreturn { recordEncoded, docEncodedByUrl, streamEncodedByUrl };')();
 
   const DOC = 'https://target.example/page';
   recordEncoded(DOC, 14010, true);
-  // 문서 하나 뒤로 서브리소스 200개가 쏟아진다 (MDN 의 텔레메트리 비컨 패턴).
   for (let i = 0; i < 200; i++) recordEncoded('https://target.example/beacon/' + i, 20, false);
 
   assert.equal(docEncodedByUrl.get(DOC), 14010,
-    '서브리소스 200개에 문서 기록이 밀려났다 — 첫 방문마다 "압축 안 됨" 으로 보인다');
-  assert.ok(streamEncodedByUrl.size <= 32, '서브리소스 칸의 상한이 안 먹는다');
-  // 문서 칸도 무한히 자라면 안 된다.
+    '200 subresources evicted the document encoded-size entry');
+  assert.ok(streamEncodedByUrl.size <= 32, 'subresource map exceeded its size cap');
   for (let i = 0; i < 50; i++) recordEncoded('https://target.example/doc/' + i, 1, true);
-  assert.ok(docEncodedByUrl.size <= 8, '문서 칸에 상한이 없다');
-
+  assert.ok(docEncodedByUrl.size <= 8, 'document map exceeded its size cap');
 });
 
 test('trap notebook INDEX stays one line per entry, with a link that resolves', () => {
   const dir = '.ai/trap-notebook/';
   const lines = fs.readFileSync(dir + 'INDEX.md', 'utf8').split(/\r?\n/);
   const headers = lines.filter(l => /^\|\s*Date\s*\|/.test(l));
-  assert.equal(headers.length, 1, '표 헤더는 파일에 하나뿐이어야 한다(정리 전에는 행들이 헤더 위에 쌓여 있었다)');
+  assert.equal(headers.length, 1, 'expected exactly one table header in INDEX.md');
   const headerAt = lines.findIndex(l => /^\|\s*Date\s*\|/.test(l));
   const rows = lines.filter((l, i) => l.startsWith('|') && i > headerAt && !/^\|\s*-+/.test(l));
 
@@ -826,64 +719,55 @@ test('trap notebook INDEX stays one line per entry, with a link that resolves', 
   const details = new Map();
   for (const row of rows) {
     const cells = row.replace(/^\|/, '').replace(/\|\s*$/, '').split('|').map(s => s.trim());
-    assert.equal(cells.length, 4, `4칸(날짜/분류/요약/링크)이어야 한다: ${row.slice(0, 80)}`);
+    assert.equal(cells.length, 4, `expected 4 columns (date/category/summary/link): ${row.slice(0, 80)}`);
     const [date, cat, summary, link] = cells;
-    assert.match(date, /^\d{4}-\d{2}-\d{2}$/, `날짜 형식: ${row.slice(0, 60)}`);
-    assert.ok(cat.length > 0 && cat.length <= 60, `분류 칸: ${row.slice(0, 60)}`);
-    // ★상한을 넘기면 그건 본문이다. 본문은 카테고리 .md 로.
-    assert.ok(summary.length <= 160, `요약이 160자를 넘는다(${summary.length}자) — 본문은 상세 파일로: ${summary.slice(0, 60)}…`);
-    assert.match(link, /^[A-Za-z0-9-]+\.md#\S+$/, `링크 칸이 <파일>.md#<앵커> 여야 한다: ${row.slice(0, 80)}`);
+    assert.match(date, /^\d{4}-\d{2}-\d{2}$/, `invalid date format: ${row.slice(0, 60)}`);
+    assert.ok(cat.length > 0 && cat.length <= 60, `invalid category cell: ${row.slice(0, 60)}`);
+    assert.ok(summary.length <= 160, `summary exceeds 160 chars (${summary.length}): ${summary.slice(0, 60)}…`);
+    assert.match(link, /^[A-Za-z0-9-]+\.md#\S+$/, `link cell must match <file>.md#<anchor>: ${row.slice(0, 80)}`);
     const [file, anchor] = link.split('#');
     if (!details.has(file)) details.set(file, fs.readFileSync(dir + file, 'utf8'));
     const detail = details.get(file);
-    assert.ok(detail, `링크 대상 파일이 없다: ${file}`);
-    assert.ok(detail.includes(anchor), `앵커가 실재하지 않는다: ${link} (절 제목 끝에 {#${anchor}} 를 달아라)`);
+    assert.ok(detail, `linked file does not exist: ${file}`);
+    assert.ok(detail.includes(anchor), `anchor does not exist: ${link} (expected {#${anchor}} on the section heading)`);
     seenDates.push(date);
   }
-  // 최신이 위 — 훑을 때 head 만 봐도 되게.
   const sorted = [...seenDates].sort().reverse();
-  assert.deepEqual(seenDates, sorted, 'INDEX 는 최신 항목이 위에 오도록 정렬되어 있어야 한다');
+  assert.deepEqual(seenDates, sorted, 'INDEX.md entries must be sorted in descending date order');
 });
 
 test('proxy navigation URLs are absolute so a target <base href> cannot retarget them', () => {
   const rt = preludeSource().split('\r\n').join('\n');
-  // ① 헬퍼가 프록시 오리진 기준으로 푼다 — 동작으로 확인한다.
   const start = rt.indexOf('function proxyAbsoluteURL(');
-  assert.ok(start > 0, 'proxyAbsoluteURL 이 있어야 한다');
+  assert.ok(start > 0, 'proxyAbsoluteURL must exist');
   const end = rt.indexOf('\n  }', start) + 4;
   const make = new Function('proxyOrigin', rt.slice(start, end) + '\nreturn proxyAbsoluteURL;');
   const f = make('http://proxy.localhost:18080');
   assert.equal(f('/zp/p/tok#k=1'), 'http://proxy.localhost:18080/zp/p/tok#k=1');
   assert.equal(f('/zp/p/tok?zp_submit=9#k=1'), 'http://proxy.localhost:18080/zp/p/tok?zp_submit=9#k=1');
-  // 이미 절대면 그대로. (프레임 경로가 절대 URL 을 만들어 넘겨도 안전해야 한다.)
   assert.equal(f('http://proxy.localhost:18080/zp/p/tok'), 'http://proxy.localhost:18080/zp/p/tok');
-
 });
 
-test('transportFetch 는 kernelFetch 에 데드라인을 건다', () => {
+test('transportFetch enforces a deadline on kernelFetch', () => {
   const sw = fs.readFileSync('web/sw.js', 'utf8').split('\r\n').join('\n');
   const fn = sw.slice(sw.indexOf('function withTransportDeadline('), sw.indexOf('async function transportFetch('));
   const make = new Function('TRANSPORT_DEADLINE_MS', 'logRefusal', fn + '; return withTransportDeadline;');
   const seen = [];
   const withDeadline = make(20, (code, status, url) => seen.push([code, status, url]));
   return (async () => {
-    // ① 영영 안 끝나는 promise 는 데드라인에 걸려 거절된다.
     let err = null;
     try { await withDeadline(new Promise(() => {}), 'https://t/x', 'GET'); } catch (e) { err = e; }
-    assert.ok(err && err.zpTransportTimeout, '멈춘 요청은 타임아웃으로 거절돼야 한다');
+    assert.ok(err && err.zpTransportTimeout, 'stalled request must reject with zpTransportTimeout');
     assert.deepEqual(seen[0], ['TRANSPORT_DEADLINE', 504, 'https://t/x']);
-    // ② 제때 온 응답은 그대로 통과하고 거절 로그를 남기지 않는다.
     const ok = await withDeadline(Promise.resolve('resp'), 'https://t/y', 'GET');
     assert.equal(ok, 'resp');
     await new Promise((r) => setTimeout(r, 40));
-    assert.equal(seen.length, 1, '성공한 요청의 타이머가 뒤늦게 발화하면 안 된다');
+    assert.equal(seen.length, 1, 'timer for a completed request must not fire later');
   })();
 });
 
-test('SW 는 응답 경로에서 clients.get 을 기다리지 않는다', () => {
+test('SW response path does not await clients.get', () => {
   const sw = fs.readFileSync('web/sw.js', 'utf8').split('\r\n').join('\n');
-  // 동작으로도 고정한다: 절대 resolve 하지 않는 clients.get 을 물려도
-  // 응답은 제때 나와야 한다.
   const src = sw.slice(sw.indexOf('async function reportEncodedSize('), sw.indexOf('function encodedSizeKey('));
   const make = new Function(
     'self', 'pendingStreamReports', 'isNavigationRequest', 'recordEncoded', 'encodedSizeKey', 'Response', 'Headers',
@@ -900,20 +784,19 @@ test('SW 는 응답 경로에서 clients.get 을 기다리지 않는다', () => 
   const event = { clientId: '', resultingClientId: 'reserved-id', request: { url: 'http://proxy.localhost/zp/p/x' } };
   return Promise.race([
     reportEncodedSize(event, resp),
-    new Promise((_, rej) => setTimeout(() => rej(new Error('응답이 clients.get 을 기다리다 멈췄다')), 500)),
+    new Promise((_, rej) => setTimeout(() => rej(new Error('response hung waiting for clients.get')), 500)),
   ]).then((out) => {
-    assert.equal(out.status, 200, '응답은 클라이언트와 무관하게 돌아와야 한다');
-    assert.equal(out.headers.get('X-ZP-Encoded-Size'), null, '내부 헤더는 제거된다');
-    assert.deepEqual(reported, [['https://t/doc', 1234]], 'pull 경로(recordEncoded)는 그대로 남아야 한다');
+    assert.equal(out.status, 200, 'response must resolve even if clients.get never settles');
+    assert.equal(out.headers.get('X-ZP-Encoded-Size'), null, 'internal X-ZP-Encoded-Size header must be stripped');
+    assert.deepEqual(reported, [['https://t/doc', 1234]], 'pull path (recordEncoded) must remain intact');
   });
 });
 
-test('자식 창의 조기 postMessage 래퍼는 부팅 즉시 네이티브로 되돌린다', () => {
+test('early child-window postMessage wrapper restores native postMessage on boot', () => {
   const rt = preludeSource().split('\r\n').join('\n');
-  // 두 함수만 정확히 떼어 낸다 — 뒤 코드를 같이 물면 엉뚱한 참조로 터진다.
   const from = rt.indexOf('  const earlyNativeKey =');
   const restoreAt = rt.indexOf('  function restoreNativePostMessage(w) {', from);
-  assert.ok(from >= 0 && restoreAt > from, '두 함수가 있어야 한다');
+  assert.ok(from >= 0 && restoreAt > from, 'both install and restore functions must exist');
   const endMark = '\n  }\n';
   const to = rt.indexOf(endMark, restoreAt) + endMark.length;
   const body = rt.slice(from, to);
@@ -927,23 +810,21 @@ test('자식 창의 조기 postMessage 래퍼는 부팅 즉시 네이티브로 �
   const fakeWin = {};
   Object.defineProperty(fakeWin, 'postMessage', { value: nativePm, enumerable: true, configurable: true, writable: true });
   api.installEarlyPostMessage(fakeWin);
-  // 이미 자기 멤브레인을 깐 창에는 심지 않는다 — 덮으면 걷어 낼 사람이 없다.
   const booted = { __zp_get() {} };
   Object.defineProperty(booted, 'postMessage', { value: nativePm, enumerable: true, configurable: true, writable: true });
   api.installEarlyPostMessage(booted);
-  assert.equal(booted.postMessage, nativePm, '부팅이 끝난 창에는 조기 래퍼를 심지 않는다');
-  assert.equal(fakeWin.postMessage, wrapper, '부팅 전에는 래퍼가 걸린다');
+  assert.equal(booted.postMessage, nativePm, 'already-booted window must not receive the early wrapper');
+  assert.equal(fakeWin.postMessage, wrapper, 'unbooted window must receive the early wrapper');
   api.restoreNativePostMessage(fakeWin);
-  assert.equal(fakeWin.postMessage, nativePm, '부팅 뒤에는 네이티브가 돌아와야 한다');
+  assert.equal(fakeWin.postMessage, nativePm, 'native postMessage must be restored after boot');
 
-  // 원본을 못 찾으면 손대지 않는다(엉뚱한 창을 망가뜨리지 않는다).
   const untouched = {};
   Object.defineProperty(untouched, 'postMessage', { value: nativePm, enumerable: true, configurable: true, writable: true });
   api.restoreNativePostMessage(untouched);
   assert.equal(untouched.postMessage, nativePm);
 });
 
-test('최상위 문서는 자기 자신을 Referer 로 보내지 않는다', () => {
+test('top-level document does not send its own URL as Referer when browser omits referrer', () => {
   const sw = fs.readFileSync('web/sw.js', 'utf8').split('\r\n').join('\n');
   const from = sw.indexOf('function referrerFromBrowserHeader(req) {');
   assert.ok(from >= 0);
@@ -953,26 +834,19 @@ test('최상위 문서는 자기 자신을 Referer 로 보내지 않는다', () 
   const ORIGIN = 'http://proxy.localhost:18080';
   const routes = new Map([['/zp/p/AAA', { targetUrl: 'https://news.example/article', baseUrl: '' }]]);
   const fn = make(ORIGIN, (u) => routes.get(u.pathname) || null);
-  // 내비게이션은 헤더가 아니라 request.referrer 로 온다. 둘 다 재현한다.
   const req = (ref) => ({ referrer: ref || '', headers: { get: () => null } });
   const reqHeaderOnly = (ref) => ({ referrer: 'about:client', headers: { get: (n) => (n === 'Referer' ? ref : null) } });
 
-  // ① 브라우저가 아무것도 안 줬으면 우리도 없다 — 주소창/북마크/첫 로드.
-  assert.equal(fn(req(null)), '', '브라우저가 안 보냈으면 우리도 보내지 않는다');
-  // ② 프록시 URL 은 그 라우트의 타깃으로 되돌린다.
+  assert.equal(fn(req(null)), '', 'must not synthesize Referer when browser omitted it');
   assert.equal(fn(req(ORIGIN + '/zp/p/AAA')), 'https://news.example/article');
-  // ③ 못 푸는 프록시 경로(우리 랜딩 페이지 등)는 아무것도 보내지 않는다.
-  assert.equal(fn(req(ORIGIN + '/zp/')), '', '라우트가 아니면 프록시 주소를 흘리면 안 된다');
-  // ④ 프록시 밖에서 온 참조는 그대로 쓴다.
+  assert.equal(fn(req(ORIGIN + '/zp/')), '', 'non-route proxy URL must not leak as Referer');
   assert.equal(fn(req('https://other.example/page')), 'https://other.example/page');
-  // ⑤ 'about:client' 는 URL 이 아니라 "기본값" 이라는 뜻이다 — 헤더로 넘어간다.
   assert.equal(fn(reqHeaderOnly(ORIGIN + '/zp/p/AAA')), 'https://news.example/article');
   assert.equal(fn(reqHeaderOnly(null)), '');
 });
 
-test('페이지 fetch 는 meta 로 선언된 참조 정책을 요청 시점에 읽는다', () => {
+test('page fetch reads meta referrer policy at request time', () => {
   const rt = preludeSource().split('\r\n').join('\n');
-  // 동작: 마지막에 선언된 meta 가 이기고, 빈 content 는 무시한다.
   const from = rt.indexOf('  function documentReferrerPolicy() {');
   assert.ok(from >= 0);
   const endMark = '\n  }\n';
@@ -984,53 +858,50 @@ test('페이지 fetch 는 meta 로 선언된 참조 정책을 요청 시점에 �
     getAttribute: { call: (el, n) => (n === 'content' ? el.content : null) },
   };
   const fn = make(Native, { __metas: [] });
-  assert.equal(fn(), '', '선언이 없으면 빈 문자열');
+  assert.equal(fn(), '', 'returns empty string when no meta referrer is present');
 
   const fn2 = new Function('Native', 'document', rt.slice(from, to) + '; return documentReferrerPolicy;')(
     Native, { __metas: metas('origin', '  NO-REFERRER  ') }
   );
-  assert.equal(fn2(), 'no-referrer', '마지막 선언이 이기고 공백/대소문자는 정규화한다');
+  assert.equal(fn2(), 'no-referrer', 'last meta declaration wins and whitespace/case are normalized');
 
   const fn3 = new Function('Native', 'document', rt.slice(from, to) + '; return documentReferrerPolicy;')(
     Native, { __metas: metas('same-origin', '') }
   );
-  assert.equal(fn3(), 'same-origin', '빈 content 는 앞선 선언을 지우지 않는다');
+  assert.equal(fn3(), 'same-origin', 'empty content attribute does not clear an earlier declaration');
 });
 
 test('dataset hides the data-zp namespace without blocking page-owned data', () => {
   const rt = preludeSource().split('\r\n').join('\n');
 
-  // ③ dataset 필터는 동작으로 고정한다.
   const dsStart = rt.indexOf('  function datasetKeyToAttrName(key) {');
   const dsEnd = rt.indexOf('  function installZPAttrNamespace(w) {');
-  assert.ok(dsStart > 0 && dsEnd > dsStart, 'dataset 필터 구간을 못 찾았다');
+  assert.ok(dsStart > 0 && dsEnd > dsStart, 'dataset filter section not found');
   const filteredDataset = new Function('isZPAttrName',
     rt.slice(dsStart, dsEnd) + '\nreturn filteredDataset;')(n => String(n || '').startsWith('data-zp-'));
   const rawDs = { zpTargetUrl: 'https://target.example/', zpInternal: '1', pageOwn: 'keep' };
   const ds = filteredDataset(rawDs);
-  assert.equal(ds.zpTargetUrl, undefined, 'dataset 으로 타깃 URL 이 샌다');
-  assert.equal('zpInternal' in ds, false, 'dataset 의 in 이 우리 키를 인정한다');
-  assert.deepEqual(Object.keys(ds), ['pageOwn'], 'dataset 키 열거가 우리 것을 보여 준다');
-  assert.equal(ds.pageOwn, 'keep', '페이지 자신의 dataset 을 망가뜨렸다');
+  assert.equal(ds.zpTargetUrl, undefined, 'target URL leaked through dataset');
+  assert.equal('zpInternal' in ds, false, '`in` operator on dataset exposed internal zp key');
+  assert.deepEqual(Object.keys(ds), ['pageOwn'], 'Object.keys(dataset) exposed internal zp key');
+  assert.equal(ds.pageOwn, 'keep', 'page-owned dataset entry was corrupted');
   ds.zpInternal = 'forged';
-  assert.equal(rawDs.zpInternal, '1', 'dataset 쓰기가 실제 DOM 에 박힌다');
+  assert.equal(rawDs.zpInternal, '1', 'writing a reserved dataset key overwrote the underlying DOM attribute');
   delete ds.zpTargetUrl;
-  assert.equal(rawDs.zpTargetUrl, 'https://target.example/', 'dataset 삭제가 우리 스태시를 지운다');
+  assert.equal(rawDs.zpTargetUrl, 'https://target.example/', 'deleting via dataset removed the internal stash');
   ds.pageOwn = 'changed';
-  assert.equal(rawDs.pageOwn, 'changed', '페이지 자신의 dataset 쓰기가 막혔다');
-  // 접근마다 같은 객체여야 한다(진짜 DOM 은 el.dataset === el.dataset).
-  assert.equal(filteredDataset(rawDs), ds, 'dataset 프록시가 접근마다 새로 만들어진다');
+  assert.equal(rawDs.pageOwn, 'changed', 'page-owned dataset write was blocked');
+  assert.equal(filteredDataset(rawDs), ds, 'dataset proxy must be cached per DOMStringMap');
 });
 
-test('필터 컬렉션은 이름 기반 접근에서도 필터를 유지한다', () => {
+test('filteredCollection preserves filtering on named property access', () => {
   const rt = preludeSource().split('\r\n').join('\n');
   const start = rt.indexOf('  function isIndexKey(prop) {');
   const end = rt.indexOf('\n  function ', rt.indexOf('  function filteredCollection(raw, predicate) {') + 1);
-  assert.ok(start >= 0 && end > start, 'filteredCollection 구간을 못 찾았다');
+  assert.ok(start >= 0 && end > start, 'filteredCollection section not found');
   const make = new Function('isZPAttrName', 'maskNativeFunction',
     rt.slice(start, end) + '\nreturn filteredCollection;')(n => String(n || '').startsWith('data-zp-'), () => {});
 
-  // NamedNodeMap 흉내 — named getter 가 이름으로 Attr 를 돌려준다.
   const hidden = { name: 'data-zp-target-url', value: 'https://target.example/', ownerElement: {} };
   const shown = { name: 'href', value: '/x', ownerElement: {} };
   const raw = { length: 2, 0: shown, 1: hidden, 'href': shown, 'data-zp-target-url': hidden,
@@ -1038,92 +909,77 @@ test('필터 컬렉션은 이름 기반 접근에서도 필터를 유지한다',
   raw[Symbol.iterator] = Array.prototype.values;
   const nn = make(raw, attr => attr && !String(attr.name).startsWith('data-zp-'));
 
-  assert.equal(nn['data-zp-target-url'], undefined, '이름 접근으로 숨긴 항목이 되돌아 나온다');
-  assert.equal('data-zp-target-url' in nn, false, '`in` 이 숨긴 항목을 인정한다');
-  assert.equal(nn['href'], shown, '보이는 항목까지 이름 접근에서 사라졌다');
-  assert.equal('href' in nn, true, '보이는 항목이 `in` 에서 사라졌다');
-  // 항목이 아닌 폴백(스칼라/함수)은 그대로여야 한다.
+  assert.equal(nn['data-zp-target-url'], undefined, 'hidden item leaked via named property read');
+  assert.equal('data-zp-target-url' in nn, false, '`in` operator exposed hidden named item');
+  assert.equal(nn['href'], shown, 'visible item was hidden on named property read');
+  assert.equal('href' in nn, true, 'visible item was hidden from `in` operator');
   raw.someScalar = 7;
-  assert.equal(nn.someScalar, 7, '항목이 아닌 폴백까지 걸렀다');
-  assert.equal(typeof nn.getNamedItem, 'function', '메서드 폴백이 사라졌다');
-  // 열거/길이는 여전히 필터를 따른다.
+  assert.equal(nn.someScalar, 7, 'non-item scalar property was filtered out');
+  assert.equal(typeof nn.getNamedItem, 'function', 'method fallback was lost');
   assert.equal(nn.length, 1);
   assert.deepEqual(Array.prototype.map.call(nn, a => a.name), ['href']);
 
-  // 진짜 DOM 은 `el.attributes === el.attributes` 다. 접근마다 새 프록시를
-  // 만들면 그 자체가 후킹을 드러낸다(메서드 동일성과 같은 이유).
   const nnmStart = rt.indexOf('  const namedNodeMapCache = newWeakMap();');
-  assert.ok(nnmStart > 0, 'attributes 캐시가 없다');
+  assert.ok(nnmStart > 0, 'attributes cache not found');
   const nnmEnd = rt.indexOf('\n  function ', rt.indexOf('  function filteredNamedNodeMap(', nnmStart) + 1);
   const wrap = new Function('isZPAttrName',
     rt.slice(nnmStart, nnmEnd) + '\n' + rt.slice(start, end) + '\nreturn filteredNamedNodeMap;')(
     n => String(n || '').startsWith('data-zp-'));
-  assert.equal(wrap(raw), wrap(raw), 'el.attributes 가 접근마다 새 객체다');
+  assert.equal(wrap(raw), wrap(raw), 'el.attributes must return a cached proxy instance');
 });
 
-test('http(s) 가 아닌 절대 URL 은 게터가 그대로 돌려준다', () => {
+test('non-HTTP(S) absolute URLs are returned verbatim by attribute getters', () => {
   const rt = preludeSource().split('\r\n').join('\n');
   const from = rt.indexOf('  function nonHTTPAbsoluteURL(raw) {');
-  assert.ok(from > 0, 'nonHTTPAbsoluteURL 이 없다');
+  assert.ok(from > 0, 'nonHTTPAbsoluteURL not found');
   const to = rt.indexOf('\n  }', from) + 4;
   const fn = new Function(rt.slice(from, to) + '\nreturn nonHTTPAbsoluteURL;')();
 
-  // ① 스킴이 있는 비-HTTP 는 그대로(파서 정규화만) 돌려준다.
   for (const v of ['blob:http://proxy.localhost:18080/abc-123', 'data:video/mp4;base64,AAAA',
     'about:blank', 'mailto:a@b.c', 'tel:+1', 'javascript:void 0', 'ws://x/y']) {
     const got = fn(v);
-    assert.ok(got !== null, v + ' 를 게터가 여전히 targetURL 로 보낸다 — 읽으면 던진다');
+    assert.ok(got !== null, v + ' still routes through targetURL and throws on read');
     assert.equal(typeof got, 'string');
   }
   assert.equal(fn('mailto:a@b.c'), 'mailto:a@b.c');
   assert.equal(fn('about:blank'), 'about:blank');
   assert.equal(fn('blob:http://p/1'), 'blob:http://p/1');
 
-  // ② http(s) 와 상대 URL·조각은 **반드시** 기존 경로로 가야 한다 —
-  //    그래야 타깃 기준 해석과 디프록시가 유지된다.
   for (const v of ['https://x/y', 'HTTP://x/y', '//x/y', '/rel', 'rel', '#frag', '', '?q=1']) {
-    assert.equal(fn(v), null, v + ' 가 통과 경로로 새면 리라이트를 건너뛴다');
+    assert.equal(fn(v), null, v + ' matched nonHTTPAbsoluteURL and would bypass rewriting');
   }
-
 });
 
-test('blob:/data: 워커 소스는 MIME 무관하게 srcu 재작성 경로로만 간다', () => {
+test('blob: and data: worker URLs always route through the srcu rewrite bootstrap regardless of MIME', () => {
   const rt = preludeSource().split('\r\n').join('\n');
   const from = rt.indexOf('  function workerBootstrapURL(url, opts) {');
-  assert.ok(from > 0, 'workerBootstrapURL 이 없다');
+  assert.ok(from > 0, 'workerBootstrapURL not found');
   const body = rt.slice(from, rt.indexOf('\n  function ', from + 10));
 
-  // blob:/data: 는 어떤 MIME 든 소스를 워커가 읽어 재작성하는 srcu 경로로만
-  // 나간다 — 생성된 URL 을 그대로 통과시키는 코드(raw passthrough)가 있으면
-  // 미리라이트 코드가 워커로 도는 탈출이다.
   const blobIdx = body.indexOf("parsed.protocol === 'blob:'");
   const dataIdx = body.indexOf("parsed.protocol === 'data:'");
-  assert.ok(blobIdx > 0 && dataIdx > blobIdx, 'blob:/data: 분기가 없다');
+  assert.ok(blobIdx > 0 && dataIdx > blobIdx, 'blob:/data: branch not found');
   const segment = body.slice(blobIdx, body.indexOf('const params', blobIdx));
-  assert.ok(segment.includes('srcWorkerBootstrapURL'), 'blob:/data: 가 srcu 경로로 안 간다');
-  assert.ok(!/return\s+parsed\.href/.test(segment), 'blob:/data: 가 raw URL 을 그대로 돌린다 — 재작성 우회');
+  assert.ok(segment.includes('srcWorkerBootstrapURL'), 'blob:/data: did not route to srcWorkerBootstrapURL');
+  assert.ok(!/return\s+parsed\.href/.test(segment), 'blob:/data: returned raw parsed.href and bypassed rewriting');
 });
 
-test('fetch 는 인라인 스킴을 브라우저에 그대로 넘긴다', () => {
+test('fetch passes inline schemes directly to the browser', () => {
   const rt = preludeSource().split('\r\n').join('\n');
   const from = rt.indexOf('  function inlineSchemeFetchURL(input) {');
-  assert.ok(from > 0, 'inlineSchemeFetchURL 이 없다');
+  assert.ok(from > 0, 'inlineSchemeFetchURL not found');
   const fn = new Function(rt.slice(from, rt.indexOf('\n  }', from) + 4) + '\nreturn inlineSchemeFetchURL;')();
 
   for (const v of ['blob:http://p/1', 'data:text/plain,x', 'BLOB:http://p/2', '  data:x,y  ']) {
-    assert.ok(fn(v), v + ' 를 프록시로 보내고 있다');
+    assert.ok(fn(v), v + ' was routed through the proxy instead of inline fetch');
   }
   for (const v of ['https://x/y', '/rel', 'about:blank', 'mailto:a@b']) {
-    assert.equal(fn(v), null, v + ' 까지 인라인으로 보면 프록시를 건너뛴다');
+    assert.equal(fn(v), null, v + ' was treated as an inline scheme and bypassed the proxy');
   }
-  // Request 객체로 와도 알아봐야 한다.
-  assert.ok(fn({ url: 'blob:http://p/3' }), 'Request 형태의 blob 을 놓친다');
+  assert.ok(fn({ url: 'blob:http://p/3' }), 'Request object with blob: URL was not recognized');
   assert.equal(fn({ url: 'https://x/y' }), null);
-
 });
 
-// containEveryStyleAccessor 를 격리 실행하기 위한 스텁. 규칙이 어디로
-// 흐르는지 보려고 호출을 기록한다.
 const L_STUB = [
   'const log = { contained: [], rewrote: [], masked: [] };',
   'function propertyDescriptor(o, k) { for (let p = o; p; p = Object.getPrototypeOf(p)) { const d = Object.getOwnPropertyDescriptor(p, k); if (d) return d; } return null; }',
@@ -1136,29 +992,16 @@ const L_STUB = [
   '  return true;',
   '}',
 ].join('\n');
-// ── CSS 는 목록이 아니라 규칙으로 감싼다 + 읽기에서 되돌린다 (2026-09-10) ──
-//
-// 두 결함이 같은 함수에 있었다.
-//
-// ① 쓰기 우회: `style` 접근자는 HTMLElement 에만 있는 게 아니다.
-//    SVGElement / MathMLElement / CSSStyleRule / CSSKeyframeRule 이 각자
-//    갖고 있어서 그 네 경로의 url() 이 컨테인먼트를 통째로 우회했다(실측).
-// ② 읽기 누출: 쓰기에서 url() 을 프록시 URL 로 바꿔 놓고 읽기에서
-//    되돌리지 않아, 페이지가 자기 스타일을 다시 읽는 것만으로
-//    프록시 오리진과 /zp/api 경로를 알아낼 수 있었다. 실측 16개 표면.
-//
-// ②가 있으면 ①을 고치는 순간 누출이 늘어난다 — 둘은 같이 가야 한다.
-test('CSS: style 접근자를 가진 모든 인터페이스를 규칙으로 감싼다', () => {
+
+test('CSS: wraps every interface prototype with an own style accessor by rule', () => {
   const rt = preludeSource().split('\r\n').join('\n');
   const from = rt.indexOf('  function containEveryStyleAccessor(w) {');
-  assert.ok(from > 0, 'containEveryStyleAccessor 규칙이 없다 — 목록으로 돌아가면 반드시 또 뚫린다');
+  assert.ok(from > 0, 'containEveryStyleAccessor not found');
   const src = rt.slice(from, rt.indexOf('\n  }', from) + 4);
 
-  // 규칙을 그대로 실행한다. 의존물은 스텁으로 주입해 어디로 흐르는지 본다.
   const mk = () => new Function(L_STUB + src + '\nreturn { containEveryStyleAccessor, log };')();
   const { containEveryStyleAccessor, log } = mk();
 
-  // 가짜 window: 대문자 인터페이스 4개 + 소문자 전역 + 폭탄 게터.
   const styleDesc = (withSetter) => ({
     get() { return this.__decl; },
     set: withSetter ? function (v) { this.__written = v; } : undefined,
@@ -1166,86 +1009,61 @@ test('CSS: style 접근자를 가진 모든 인터페이스를 규칙으로 감�
   });
   function HTMLElementish() {} Object.defineProperty(HTMLElementish.prototype, 'style', styleDesc(true));
   function CSSRuleish() {} Object.defineProperty(CSSRuleish.prototype, 'style', styleDesc(false));
-  // ★이름을 모르는 미래 인터페이스도 잡혀야 한다 — 이게 목록과의 차이다.
   function FutureStyledThing() {} Object.defineProperty(FutureStyledThing.prototype, 'style', styleDesc(true));
   function NoStyle() {}
-  // style 이 접근자가 아니라 **데이터 프로퍼티**인 인터페이스는 건너뛴다.
-  // 감싸면 sd.get 이 없어 읽는 순간 TypeError 가 난다.
   function DataStyle() {}
   DataStyle.prototype.style = 'plain-value';
-  // style 을 **상속만** 하는 서브클래스는 감싸면 안 된다 — own 프로퍼티가
-  // 새로 생겨 진짜 브라우저와 프로토타입 모양이 달라진다(실측 13 vs 157).
   function Subclassish() {}
   Subclassish.prototype = Object.create(HTMLElementish.prototype);
   const w = { HTMLElementish, CSSRuleish, FutureStyledThing, NoStyle, DataStyle, Subclassish, NotAFunction: 42 };
-  // 소문자 전역은 읽지도 말아야 한다(게터 부작용).
   let lowerRead = 0;
   Object.defineProperty(w, 'documentish', { get() { lowerRead++; return {}; }, enumerable: true, configurable: true });
-  // 값을 읽는 순간 던지는 전역이 있어도 전체가 멈추면 안 된다.
   Object.defineProperty(w, 'Boom', { get() { throw new Error('boom'); }, enumerable: true, configurable: true });
 
   const count = containEveryStyleAccessor(w);
-  assert.equal(count, 3, 'style 접근자를 가진 인터페이스 3개를 모두 감싸야 한다 (미래 이름 포함)');
-  assert.equal(lowerRead, 0, '소문자 전역을 읽었다 — 게터 부작용을 건드린다');
-  assert.equal(DataStyle.prototype.style, 'plain-value', '접근자가 아닌 style 을 감쌌다 — 읽는 순간 던진다');
+  assert.equal(count, 3, 'all 3 interfaces with an own style accessor must be wrapped');
+  assert.equal(lowerRead, 0, 'lowercase global was read and could trigger getter side effects');
+  assert.equal(DataStyle.prototype.style, 'plain-value', 'data property style was wrapped as an accessor');
   assert.equal(Object.getOwnPropertyDescriptor(Subclassish.prototype, 'style'), undefined,
-    '상속만 하는 프로토타입에 own style 을 만들었다 — 프로토타입 모양이 브라우저와 달라진다');
+    'installed own style property on a prototype that only inherited style');
 
-  // 읽기는 containStyleDeclaration 을 지난다.
   const el = new HTMLElementish();
   el.__decl = 'DECL';
-  assert.deepEqual(el.style, { contained: 'DECL' }, 'style 읽기가 컨테인먼트를 안 지난다');
-  // 쓰기는 rewriteCSSText 를 지난다.
+  assert.deepEqual(el.style, { contained: 'DECL' }, 'style getter did not pass through containment');
   el.style = 'url(x)';
-  assert.equal(el.__written, 'REWROTE:url(x)', 'style 쓰기가 CSS 리라이트를 안 지난다');
-  // 게터만 있던 인터페이스에 세터를 만들어 주면 안 된다.
+  assert.equal(el.__written, 'REWROTE:url(x)', 'style setter did not pass through CSS rewriter');
   assert.equal(Object.getOwnPropertyDescriptor(CSSRuleish.prototype, 'style').set, undefined,
-    '읽기 전용 style 에 세터가 생겼다');
+    'read-only style accessor gained a setter');
   assert.ok(log.contained.includes('DECL') && log.rewrote.includes('url(x)'));
-  // 설치가 마스킹 헬퍼를 지나야 훅 소스가 페이지에 안 보인다.
-  assert.ok(log.masked.includes('get style'), 'style 접근자를 마스킹 없이 심었다 — 훅 소스가 그대로 보인다');
+  assert.ok(log.masked.includes('get style'), 'style accessor was installed without source masking');
 });
 
-test('CSS: 프로퍼티 이름 목록이 돌아오지 않았다', () => {
+test('CSS: no hardcoded CSS property name list in style declaration proxy', () => {
   const rt = preludeSource().split('\r\n').join('\n');
-  // 이 엔진은 CSS 프로퍼티를 인스턴스의 own data property 로 노출하므로
-  // CSSStyleDeclaration.prototype 에 이름을 걸어 봐야 조용한 no-op 다.
   assert.ok(!rt.includes('CSS_URL_PROPS'),
-    '손으로 고른 CSS 프로퍼티 목록이 돌아왔다 — 프록시가 이름 없이 전부 잡는다');
+    'hardcoded CSS property list returned; proxy must intercept all properties generically');
 });
 
-test('CSS: 우리가 바꿔 쓴 값은 모든 읽기 경로에서 되돌린다', () => {
+test('CSS: rewritten URLs are deproxied across all style read paths', () => {
   const rt = preludeSource().split('\r\n').join('\n');
-  // 되돌리기가 빠지면 페이지가 자기 스타일을 다시 읽는 것만으로 우리 정체를
-  // 읽어 낸다. 실측으로 샜던 자리마다 하나씩 고정한다.
   const must = [
-    ['인라인 style 속성', "if (localKey === 'style') return deproxyURL(raw, { scan: true });"],
-    ['선언 프록시의 문자열 읽기', "if (typeof v === 'string') return deproxyURL(v, { scan: true });"],
+    ['inline style attribute', "if (localKey === 'style') return deproxyURL(raw, { scan: true });"],
+    ['style declaration string read', "if (typeof v === 'string') return deproxyURL(v, { scan: true });"],
     ['getPropertyValue', "function (p) { return deproxyURL(v.call(t, p), { scan: true }); }"],
     ['CSSStyleDeclaration.cssText', "get() { return deproxyURL(dText.get ? dText.get.call(this) : '', { scan: true }); },"],
     ['CSSRule.cssText', 'get() { return deproxyURL(dRuleText.get.call(this), { scan: true }); },'],
     ['getComputedStyle', 'return containStyleDeclaration(nativeGCS.call(w, el, pe));'],
   ];
   for (const [what, needle] of must) {
-    assert.ok(rt.includes(needle), what + ' 읽기 경로의 되돌리기가 사라졌다');
+    assert.ok(rt.includes(needle), what + ' read path is missing deproxyURL');
   }
 });
 
-// 페이지 realm wasm 은 **탐색마다** 실린다 — cold-load 비용의 지배항이다.
-// SW 쪽 산출물(zp_bundle_sw / zp_kernel_sw)은 오리진당 한 번이고 전송·CSS·
-// HTML 변환을 다 지고 있어 여기서 재지 않는다.
-//
-// 넘어가는 계기는 거의 항상 새 전이 의존성이다. 그때는 그 호출을 SW 로
-// 옮기거나 분할 로드할지 다시 판단한다.
-//
-// 2026-10-13: 500 → 540 KB. 새 의존성이 아니라 페이지에서 돌아야 하는 리라이터 자체가 컸다(eval 은 페이지에서
-// 리라이트된다): 런타임 이름을 묶거나 쓰는 스크립트 거부(탈출), with 본문의 헬퍼 바인딩, 계산된 멤버의 인라인 가드
-// (Turnstile VM 의 헬퍼 시간 3.2 s → 1 s). 거부 스캔 하나가 8.7 KB 다(OXC 워커가 방문자마다 새로 단형화된다).
-test('E3 크기 가드: zp_page_bundle_bg.wasm 은 540 KB 이하', (t) => {
+// Page-realm Wasm loads on every navigation, so its size is capped separately from SW bundles.
+test('E3 size guard: zp_page_bundle_bg.wasm is at most 540 KB', (t) => {
   const wasmPath = 'dist/web/__zp/zp_page_bundle_bg.wasm';
   if (!fs.existsSync(wasmPath)) {
-    // 조용히 통과시키지 않는다 — 안 잰 것과 통과한 것은 다르다.
-    t.skip('dist 가 없다: `npm run build` 뒤에 다시 돌린다');
+    t.skip('dist missing: run `npm run build` first');
     return;
   }
   const size = fs.statSync(wasmPath).size;
@@ -1253,29 +1071,14 @@ test('E3 크기 가드: zp_page_bundle_bg.wasm 은 540 KB 이하', (t) => {
     'zp_page_bundle_bg.wasm = ' + size + ' bytes (' + (size / 1024).toFixed(1) + ' KB) > 540 KB');
 });
 
-// ── 훅의 소스는 페이지에 보이면 안 된다 (2026-09-10) ────────────────────
-//
-// `Function.prototype.toString` 은 이미 가려져 있는데, 그 마스킹은
-// `define`/`defineAccessor`/`defineMasked` 를 지날 때만 등록된다. 날
-// `Object.defineProperty` 로 접근자를 심으면 등록이 안 되고, 그러면
-//   Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'style').get.toString()
-// 이 우리 코드를 그대로 돌려준다. 실측(2026-09-10): 그렇게 노출된 함수가
-// 74개였고, HTMLScriptElement.src 게터는 data-zp-target-url 이라는 내부
-// 속성 이름까지 보여 줬다.
-//
-// 뒤늦게 전수 스윕으로 가리는 방법은 창마다 5~7ms 라 프레임 많은 페이지에서
-// 못 쓴다(실측). 그래서 설치 지점을 강제한다 — 이 가드가 그 강제다.
-test('훅은 설치 지점에서 소스를 가린다 (날 defineProperty 접근자 금지)', () => {
+// Function.prototype.toString masking only registers functions installed through
+// define/defineAccessor/defineMasked; raw Object.defineProperty leaks hook source.
+test('hooks mask function source at installation sites (no raw defineProperty accessors)', () => {
   const lines = preludeSource().split('\r\n').join('\n').split('\n');
-  // ★주석을 지우고 본다. `enumerable: true, // …설명…` 다음 줄에 오는
-  // `get()` 은 주석을 남겨 두면 앞 토큰이 `,` 가 아니게 되어 안 잡힌다 —
-  // 실제로 ZPWebSocket.bufferedAmount 가 그렇게 빠져나갔다.
   const strip = (l) => l.replace(/\/\/.*$/, '');
   const offenders = [];
   for (let i = 0; i < lines.length; i++) {
     if (!/Object\.defineProperty\(|Object\.defineProperties\(/.test(lines[i])) continue;
-    // 디스크립터는 여러 줄에 걸친다. 다만 **다음 define 호출 앞에서 끊는다** —
-    // 안 끊으면 앞 자리가 뒤 자리의 get 을 빌려 거짓 양성이 난다.
     const rest = [];
     for (let j = i; j < Math.min(i + 10, lines.length); j++) {
       if (j > i && /Object\.definePropert|defineMasked\(|definePropertiesMasked\(/.test(lines[j])) break;
@@ -1283,32 +1086,28 @@ test('훅은 설치 지점에서 소스를 가린다 (날 defineProperty 접근�
     }
     const win = rest.join(' ');
     if (!/[{,]\s*(get|set)\s*[(:]/.test(win)) continue;
-    // 헬퍼 본체 자신은 예외다 — 마스킹을 **하는** 쪽이다.
     if (win.includes('toStringMap.set(') || win.includes('maskAccessorFn(')) continue;
     offenders.push((i + 1) + ': ' + lines[i].trim().slice(0, 90));
   }
   assert.deepEqual(offenders, [],
-    '접근자를 날 defineProperty/defineProperties 로 심었다 — defineMasked / definePropertiesMasked 를 쓰지 않으면 훅 소스가 페이지에 보인다:\n  ' + offenders.join('\n  '));
+    'accessors installed via raw defineProperty/defineProperties without source masking:\n  ' + offenders.join('\n  '));
 });
 
-test('대체 클래스 프로토타입도 소스를 가린다', () => {
+test('replacement class prototypes mask method sources via assignMasked', () => {
   const rt = preludeSource().split('\r\n').join('\n');
-  // Object.assign 으로 채운 멤버는 define 을 안 지나므로 따로 가려야 한다.
   for (const cls of ['ZPXMLHttpRequest', 'ZPEventSource', 'ZPWebSocket']) {
     assert.ok(rt.includes('assignMasked(' + cls + '.prototype, {'),
-      cls + '.prototype 을 날 Object.assign 으로 채웠다 — send/close 소스가 그대로 보인다');
+      cls + '.prototype populated with raw Object.assign instead of assignMasked');
   }
   assert.ok(!/Object\.assign\([A-Za-z_$][\w$]*\.prototype,/.test(rt),
-    '가리지 않는 Object.assign(...prototype) 이 남아 있다');
+    'unmasked Object.assign(...prototype) call remains');
 });
 
-// 위 두 가드는 "헬퍼를 **부르는가**" 만 본다. 헬퍼가 마스킹을 그만두면 둘 다
-// 통과한다(변이로 확인). 그래서 헬퍼 자체를 뜯어 실행한다.
-test('마스킹 헬퍼 셋은 실제로 소스를 가린다', () => {
+test('source-masking helpers register getters, setters, and methods as native code', () => {
   const rt = preludeSource().split('\r\n').join('\n');
   const from = rt.indexOf('  function defineMasked(obj, key, desc) {');
   const to = rt.indexOf('  function defineOnProto(', from);
-  assert.ok(from > 0 && to > from, '마스킹 헬퍼 구간을 못 찾았다');
+  assert.ok(from > 0 && to > from, 'masking helper section not found');
   const masked = new Map();
   const api = new Function(
     'toStringMap', 'nativeAccessorSource', 'maskNativeFunction', 'maskAccessorFn', 'nameLike',
@@ -1323,57 +1122,42 @@ test('마스킹 헬퍼 셋은 실제로 소스를 가린다', () => {
   const NATIVE = /\{\s*\[native code\]\s*\}/;
   const src = (fn) => masked.get(fn) || 'NOT MASKED: ' + String(fn);
 
-  // ① defineMasked — get/set 둘 다.
   const o1 = {};
   const g = function () { return 1; };
   const st = function (v) { void v; };
   api.defineMasked(o1, 'thing', { get: g, set: st, configurable: true });
-  assert.equal(o1.thing, 1, 'defineMasked 가 접근자를 안 심었다');
-  assert.match(src(g), NATIVE, 'defineMasked 가 게터 소스를 안 가렸다');
-  assert.match(src(st), NATIVE, 'defineMasked 가 세터 소스를 안 가렸다');
+  assert.equal(o1.thing, 1, 'defineMasked did not install the accessor');
+  assert.match(src(g), NATIVE, 'defineMasked did not mask getter source');
+  assert.match(src(st), NATIVE, 'defineMasked did not mask setter source');
 
-  // ② definePropertiesMasked — 여러 개를 한 번에.
   const o2 = {};
   const g2 = function () { return 2; };
   const v2 = function m() {};
   api.definePropertiesMasked(o2, { a: { get: g2, configurable: true }, b: { value: v2, configurable: true } });
   assert.equal(o2.a, 2);
-  assert.match(src(g2), NATIVE, 'definePropertiesMasked 가 게터 소스를 안 가렸다');
-  assert.match(src(v2), NATIVE, 'definePropertiesMasked 가 메서드 소스를 안 가렸다');
+  assert.match(src(g2), NATIVE, 'definePropertiesMasked did not mask getter source');
+  assert.match(src(v2), NATIVE, 'definePropertiesMasked did not mask method source');
 
-  // ③ assignMasked — 대체 클래스 프로토타입.
   const proto = {};
   function ctor() {}
   const send = function send() {};
   api.assignMasked(proto, { constructor: ctor, send });
-  assert.equal(proto.send, send, 'assignMasked 가 멤버를 안 옮겼다');
-  assert.match(src(send), NATIVE, 'assignMasked 가 메서드 소스를 안 가렸다');
-  // constructor 는 이름이 달라 잘못 가리면 오히려 티가 난다 — 건드리지 않는다.
-  assert.equal(masked.has(ctor), false, 'constructor 를 가렸다 — 이름이 어긋나 더 눈에 띈다');
+  assert.equal(proto.send, send, 'assignMasked did not copy method');
+  assert.match(src(send), NATIVE, 'assignMasked did not mask method source');
+  assert.equal(masked.has(ctor), false, 'constructor must not be masked by assignMasked');
 });
 
-// ── 리라이트된 페이지 코드의 소스 (2026-09-10) ─────────────────────────
-//
-// 페이지가 자기 함수를 문자열로 만들면 우리 호출이 그대로 보였다. 실측:
-// naver 8,490개 중 17개, github 8,655개 중 89개가 `__zp_get(globalThis,
-// "window")` 같은 텍스트를 노출했다. 전역 **이름** 노출은 예전에 스크러버로
-// 막았지만 함수 **소스**는 아무도 안 보고 있었다.
-//
-// 되돌리기는 의미를 바꾸면 안 된다. 특히 괄호 — `__zp_get(a||b,"k")` 를
-// `a||b.k` 로 되돌리면 뜻이 달라진다.
-test('리라이트 흔적 되돌리기는 뜻을 바꾸지 않는다', () => {
+test('unrewriteSourceText restores original source semantics', () => {
   const rt = preludeSource().split('\r\n').join('\n');
   const from = rt.indexOf('  function unrewriteSourceText(src) {');
-  assert.ok(from > 0, 'unrewriteSourceText 가 없다 — 페이지가 자기 소스에서 우리를 읽는다');
+  assert.ok(from > 0, 'unrewriteSourceText not found');
   const src = rt.slice(from, rt.indexOf('\n  }', from) + 4);
-  // The 00-head.js constants it matches against.
   const head = ['  const ZP_WITH_HELPERS = [', '  const ZP_WITH_PROLOGUE = ', '  const ZP_EVENT_CALL_HEAD = ']
-    .map(start => { const at = rt.indexOf(start); assert.ok(at > 0, start.trim() + ' 가 없다'); return rt.slice(at, rt.indexOf(';\n', at) + 2); })
+    .map(start => { const at = rt.indexOf(start); assert.ok(at > 0, start.trim() + ' not found'); return rt.slice(at, rt.indexOf(';\n', at) + 2); })
     .join('');
   const unrewrite = new Function(head + src + '\nreturn unrewriteSourceText;')();
   const prologue = new Function(head + 'return ZP_WITH_PROLOGUE;')();
 
-  // 리라이터가 내는 헬퍼를 그대로 정의해 두고, 되돌리기 전후의 **값**을 비교한다.
   const helpers = () => ({
     __zp_get: (b, k) => b[k],
     __zp_set: (b, k, v) => (b[k] = v),
@@ -1390,19 +1174,13 @@ test('리라이트 흔적 되돌리기는 뜻을 바꾸지 않는다', () => {
     ['__zp_assign(o,"k","+=",2)', 'o.k+=2', () => ({ o: { k: 1 } })],
     ['__zp_update(o,"k","++",true)', '++o.k', () => ({ o: { k: 1 } })],
     ['__zp_update(o,"k","++",false)', 'o.k++', () => ({ o: { k: 1 } })],
-    // ★우선순위. 여기가 틀리면 되돌린 코드의 뜻이 달라진다.
     ['__zp_get(a||b,"k")', '(a||b).k', () => ({ a: null, b: { k: 42 } })],
     ['__zp_call(a?b:c,"f",[])', '(a?b:c).f()', () => ({ a: 0, b: null, c: { f: () => 11 } })],
-    // 문자열 리터럴 안의 우리 이름은 페이지 자신의 텍스트일 수 있다 — 건드리지 않는다.
-    // ★따옴표를 섞어 **되돌릴 수 있는 모양**을 문자열 안에 넣는다. 이스케이프를
-    // 쓰면 스캐너가 어차피 포기해서 변별력이 없다(변이로 확인).
     [`'__zp_get(o,"k")'`, `'__zp_get(o,"k")'`, () => ({})],
-    // 되돌릴 수 없는 모양은 그대로 둔다. 망친 소스가 더 큰 티다.
     ['__zp_module("x")', '__zp_module("x")', () => ({})],
     ['__zp_get(o)', '__zp_get(o)', () => ({})],
   ];
-  // ★vm 컨텍스트를 쓴다. new Function 의 파라미터로 넣으면 리라이트된 쪽의
-  // globalThis 가 **진짜 전역**이라 env 를 못 봐서 값이 달라진다.
+  // Use a vm context so `globalThis` inside rewritten expressions resolves against `env`.
   const vm = require('node:vm');
   const run = (code, env) => {
     const ctx = vm.createContext(Object.assign(env, helpers()));
@@ -1411,91 +1189,67 @@ test('리라이트 흔적 되돌리기는 뜻을 바꾸지 않는다', () => {
   };
   for (const [rew, want, mkEnv] of cases) {
     const got = unrewrite(rew);
-    assert.equal(got, want, rew + ' 를 잘못 되돌렸다');
+    assert.equal(got, want, 'unrewriteSourceText produced wrong source for: ' + rew);
     const envA = mkEnv();
     const envB = mkEnv();
-    assert.equal(run(got, envB), run(rew, envA), rew + ' 되돌리기가 값을 바꿨다');
+    assert.equal(run(got, envB), run(rew, envA), 'unrewriteSourceText changed evaluation result for: ' + rew);
   }
 
-  // ★템플릿 리터럴 — 안쪽 `${…}` 는 **코드**다. 통째로 건너뛰면 리라이트가
-  // 그대로 남는다(github 실측: 되돌리기를 넣은 뒤 남은 8건이 전부 여기였다).
-  // 반대로 리터럴 **텍스트**는 페이지 자신의 것이라 건드리면 안 된다.
   const tpl = [
     ['var x=`${__zp_get(globalThis,"window").innerWidth}px`', 'var x=`${window.innerWidth}px`'],
     ['`${__zp_get(o,"k")}-${__zp_get(p,"q")}`', '`${o.k}-${p.q}`'],
-    // 리터럴 텍스트 안의 우리 이름은 그대로 둔다.
     ['`a__zp_get b`', '`a__zp_get b`'],
   ];
   for (const [inp, want] of tpl) {
-    assert.equal(unrewrite(inp), want, '템플릿 리터럴 되돌리기: ' + inp);
+    assert.equal(unrewrite(inp), want, 'template literal unrewrite failed: ' + inp);
   }
 
-  // ★인라인 이벤트 핸들러. 래퍼의 셋째 인자가 원본 속성 본문 그대로라
-  // 여기서는 정확한 복구가 된다. 래퍼가 붙인 `return ` 도 걷어낸다.
   assert.equal(
     unrewrite('function onclick(event) { return __ZP_EXEC_EVENT(this,event,"return tCR(1);") }'),
     'function onclick(event) { return tCR(1); }',
-    '인라인 핸들러 래퍼가 그대로 보인다');
-  // The executor is read off the global object with nothing named (the page answers for names in a handler's scope).
+    'inline event handler wrapper leaked in source text');
   assert.equal(
     unrewrite('function onclick(event) { return (function(){return this})().__ZP_EXEC_EVENT(this,event,"return tCR(1);") }'),
     'function onclick(event) { return tCR(1); }',
-    '이름 없는 핸들러 래퍼가 그대로 보인다');
-  // The helper bindings a `with` body starts with are ours: gone, the body stays.
+    'unnamed event handler wrapper leaked in source text');
   assert.equal(
     unrewrite('function f(o){ with(o){' + prologue + ' g(__zp_get(globalThis,"window")) } }'),
     'function f(o){ with(o){ g(window) } }',
-    'with 본문의 헬퍼 바인딩이 보인다');
-  // Inline guards (zp-rewriter guard_claim) and the temps their function declares at its end.
+    'with-body helper bindings leaked in source text');
   assert.equal(
     unrewrite('function f(a,b,i){return (__zp_t_4=(0,a),__zp_t_5=(0,(__zp_t_1=(0,b),__zp_t_2=(0,i),__zp_fast(__zp_t_1,__zp_t_2)?__zp_t_1[__zp_t_2]:__zp_get(__zp_t_1,__zp_t_2))),__zp_fast(__zp_t_4,__zp_t_5)?__zp_t_4[__zp_t_5]:__zp_get(__zp_t_4,__zp_t_5))\n;var __zp_t_1,__zp_t_2,__zp_t_3,__zp_t_4,__zp_t_5,__zp_t_6;}'),
     'function f(a,b,i){return a[b[i]]}',
-    '가드된 읽기가 보인다');
+    'guarded read helper leaked in source text');
   assert.equal(
     unrewrite('function f(a,i,v){0,(__zp_t_1=(0,a),__zp_t_2=(0,i),__zp_t_3=(0,v+1),__zp_fastset(__zp_t_1,__zp_t_2)?__zp_t_1[__zp_t_2]=__zp_t_3:__zp_set(__zp_t_1,__zp_t_2,__zp_t_3))\n;var __zp_t_1,__zp_t_2,__zp_t_3;}'),
     'function f(a,i,v){0,a[i]=v+1}',
-    '가드된 쓰기가 보인다');
+    'guarded write helper leaked in source text');
   assert.equal(
     unrewrite('function f(o,k){return (__zp_t_1=(0,o),__zp_t_2=(0,k),__zp_fast(__zp_t_1,__zp_t_2)?__zp_t_1[__zp_t_2](1, "x,y"):__zp_call(__zp_t_1,__zp_t_2,[1, "x,y"]))\n;var __zp_t_1,__zp_t_2,__zp_t_3;}'),
     'function f(o,k){return o[k](1, "x,y")}',
-    '가드된 호출이 보인다');
-  // ★루프 캡. for(;;) 와 while(true) 가 둘 다 계수기 붙은 for 로 바뀌므로
-  // 원본을 구분할 수 없다 — for(;;) 로 되돌린다. 뜻은 같고 표식은 사라진다.
+    'guarded call helper leaked in source text');
   const lc = [
     ['for(let __zp_lc_7=0;__zp_lc_7++<10000000;){x()}', 'for(;;){x()}'],
     ['let __zp_lc_3=0;do{x()}while(__zp_lc_3++<10000000);', 'do{x()}while(true);'],
-    // 페이지 자신의 let 선언은 건드리지 않는다.
     ['let a=0;for(let __zp_lc_1=0;__zp_lc_1++<10000000;)y()', 'let a=0;for(;;)y()'],
   ];
   for (const [inp, want] of lc) {
-    assert.equal(unrewrite(inp), want, '루프 캡 되돌리기: ' + inp);
+    assert.equal(unrewrite(inp), want, 'loop cap unrewrite failed: ' + inp);
   }
 
-  // 되돌린 소스는 반드시 파싱돼야 한다.
   const real = 'function f(a){return __zp_call(__zp_get(globalThis,"window"),"open",[a,"_blank"])}';
   const out = unrewrite(real);
   assert.equal(out, 'function f(a){return window.open(a,"_blank")}');
-  assert.doesNotThrow(() => new Function('return ' + out), '되돌린 소스가 파싱되지 않는다');
+  assert.doesNotThrow(() => new Function('return ' + out), 'unrewritten source does not parse');
 
-  // toString 마스킹이 실제로 이걸 지나야 한다.
   assert.ok(rt.includes('out = unrewriteSourceText(text);'),
-    'toString 이 되돌리기를 안 지난다 — 함수가 있어도 아무 데도 안 걸린다');
+    'Function.prototype.toString does not call unrewriteSourceText');
 });
 
-// ── CSS Typed OM 도 같은 규칙을 받는다 (2026-09-10) ────────────────────
-//
-// style/cssText 훅은 Typed OM 에 전혀 닿지 않는다. 실측:
-//   ① 훅이 걸린 경로로 쓰고 attributeStyleMap.get / computedStyleMap().get
-//      으로 읽으면 프록시 URL 이 그대로 보였다.
-//   ② attributeStyleMap.set 으로 쓴 url() 은 재작성을 안 지났다.
-// 읽기 메서드는 전부 StylePropertyMapReadOnly.prototype 에 있고
-// StylePropertyMap 이 상속한다(실측: RO 는 size,get,getAll,has,entries,
-// forEach,keys,values / SM 은 append,clear,delete,set). 그래서 한 곳만
-// 훅하면 인라인 스타일맵과 계산 스타일맵이 함께 덮인다.
-test('CSS Typed OM: 읽기는 되돌리고 쓰기는 재작성한다', () => {
+test('CSS Typed OM: deproxies reads and rewrites writes', () => {
   const rt = preludeSource().split('\r\n').join('\n');
   const from = rt.indexOf('  function installTypedOM(w) {');
-  assert.ok(from > 0, 'installTypedOM 이 없다 — Typed OM 은 style 훅이 안 닿는다');
+  assert.ok(from > 0, 'installTypedOM not found');
   const src = rt.slice(from, rt.indexOf('\n  }', from) + 4);
 
   const install = new Function(
@@ -1506,7 +1260,6 @@ test('CSS Typed OM: 읽기는 되돌리고 쓰기는 재작성한다', () => {
     (o, k, v) => { Object.defineProperty(o, k, { value: v, writable: true, configurable: true }); return true; },
   );
 
-  // 가짜 Typed OM. 실제 모양대로 읽기는 RO 에, 쓰기는 SM 에 둔다.
   function FakeValue(text) { this.text = String(text); }
   FakeValue.prototype.toString = function () { return this.text; };
   const CSSStyleValue = { parse: (prop, text) => new FakeValue(text) };
@@ -1523,120 +1276,92 @@ test('CSS Typed OM: 읽기는 되돌리고 쓰기는 재작성한다', () => {
   RO.prototype[Symbol.iterator] = RO.prototype.entries;
   function SM() {}
   SM.prototype = Object.create(RO.prototype);
-  // ★네이티브 set/append 는 문자열을 **파싱해서** CSSStyleValue 로 저장한다.
-  // 가짜가 문자열을 그대로 담으면 왕복 검사가 실제와 다른 것을 잰다.
   const store = (v) => (v && typeof v === 'object' ? v : new FakeValue(v));
   SM.prototype.set = function (p) { this._d[p] = Array.prototype.slice.call(arguments, 1).map(store); };
   SM.prototype.append = function (p) { this._d[p] = (this._d[p] || []).concat(Array.prototype.slice.call(arguments, 1).map(store)); };
 
-  // 함수가 있어도 설치 시퀀스가 안 부르면 아무 데도 안 걸린다.
   assert.ok(rt.includes('installTypedOM(w);'),
-    'installTypedOM 을 아무도 호출하지 않는다');
+    'installTypedOM is never called');
 
   const hooked = install({ StylePropertyMapReadOnly: RO, StylePropertyMap: SM, CSSStyleValue });
-  assert.ok(hooked >= 6, '훅을 못 걸었다 (걸린 수: ' + hooked + ')');
+  assert.ok(hooked >= 6, 'too few Typed OM hooks installed: ' + hooked);
 
-  // ── 읽기: 저장된 프록시 URL 을 되돌려 준다.
   const map = new SM();
   map._d = { 'background-image': [new FakeValue('url(PROXY/x.png)')], color: [new FakeValue('red')] };
-  assert.equal(String(map.get('background-image')), 'url(TARGET/x.png)', 'get 이 프록시 URL 을 그대로 준다');
-  assert.equal(String(map.getAll('background-image')[0]), 'url(TARGET/x.png)', 'getAll 이 안 되돌린다');
-  // 바뀔 게 없으면 **원래 객체 그대로** 준다 — 쓸데없이 새 객체를 만들지 않는다.
-  assert.equal(map.get('color'), map._d.color[0], '바뀐 게 없는데 새 객체를 만들었다');
+  assert.equal(String(map.get('background-image')), 'url(TARGET/x.png)', 'get() returned proxied URL without deproxying');
+  assert.equal(String(map.getAll('background-image')[0]), 'url(TARGET/x.png)', 'getAll() did not deproxy');
+  assert.equal(map.get('color'), map._d.color[0], 'get() allocated a new object when value was unchanged');
 
   const seen = {};
   for (const [prop, vals] of map.entries()) seen[prop] = String(vals[0]);
-  assert.equal(seen['background-image'], 'url(TARGET/x.png)', 'entries 가 안 되돌린다');
+  assert.equal(seen['background-image'], 'url(TARGET/x.png)', 'entries() did not deproxy');
   const viaValues = [];
   for (const vals of map.values()) viaValues.push(String(vals[0]));
-  assert.ok(viaValues.includes('url(TARGET/x.png)'), 'values 가 안 되돌린다');
+  assert.ok(viaValues.includes('url(TARGET/x.png)'), 'values() did not deproxy');
   const viaForEach = {};
   map.forEach((vals, prop) => { viaForEach[prop] = String(vals[0]); });
-  assert.equal(viaForEach['background-image'], 'url(TARGET/x.png)', 'forEach 가 안 되돌린다');
-  // maplike 는 @@iterator 가 entries 와 같은 함수다 — 훅 뒤에도 같아야 한다.
+  assert.equal(viaForEach['background-image'], 'url(TARGET/x.png)', 'forEach() did not deproxy');
   assert.equal(RO.prototype[Symbol.iterator], RO.prototype.entries,
-    '@@iterator 와 entries 가 갈라졌다 — 동일성이 지문이 된다');
+    '@@iterator and entries must be the same function reference');
 
-  // ── 쓰기: 문자열도 CSSStyleValue 도 재작성을 지난다.
   const w1 = new SM(); w1._d = {};
   w1.set('background-image', 'url(TARGET/y.png)');
-  assert.equal(String(w1._d['background-image'][0]), 'url(PROXY/y.png)', 'set(문자열) 이 재작성을 안 탔다');
+  assert.equal(String(w1._d['background-image'][0]), 'url(PROXY/y.png)', 'set(string) bypassed CSS rewriter');
   const w2 = new SM(); w2._d = {};
   w2.set('background-image', new FakeValue('url(TARGET/z.png)'));
-  assert.equal(String(w2._d['background-image'][0]), 'url(PROXY/z.png)', 'set(CSSStyleValue) 가 재작성을 안 탔다');
+  assert.equal(String(w2._d['background-image'][0]), 'url(PROXY/z.png)', 'set(CSSStyleValue) bypassed CSS rewriter');
   const w3 = new SM(); w3._d = {};
   w3.append('background-image', 'url(TARGET/a.png)');
-  assert.equal(String(w3._d['background-image'][0]), 'url(PROXY/a.png)', 'append 가 재작성을 안 탔다');
+  assert.equal(String(w3._d['background-image'][0]), 'url(PROXY/a.png)', 'append() bypassed CSS rewriter');
 
-  // ── 읽기와 쓰기는 같이 가야 한다. 쓴 값을 읽으면 원래 쓴 것이 나와야 한다.
   const rt2 = new SM(); rt2._d = {};
   rt2.set('background-image', 'url(TARGET/round.png)');
   assert.equal(String(rt2.get('background-image')), 'url(TARGET/round.png)',
-    '왕복이 안 맞는다 — 페이지가 쓴 값과 읽는 값이 다르면 그 차이가 곧 지문이다');
+    'Typed OM write/read round-trip mismatch');
 });
 
-// ── 프로토타입 모양 축(2026-09-14)이 처음 돌자마자 6개를 잡았다 ──────────
-//
-// Document/HTMLStyleElement: own 접근자를 브라우저가 두는 조상이 아니라
-// 서브클래스 프로토타입에 새로 정의해서, 그 own 자체가 대조군엔 없는 모양
-// 지문이었다(같은 날 겪은 own `style` 13→157 회귀와 같은 부류).
-test('baseURI 는 Document.prototype 이 아니라 Node.prototype 에 심는다', () => {
+test('baseURI is installed on Node.prototype rather than Document.prototype', () => {
   const rt = preludeSource().split('\r\n').join('\n');
   assert.ok(rt.includes("defineAccessor(w.Node && w.Node.prototype, 'baseURI', () => baseURL);"),
-    'baseURI 가 Node.prototype 에 없다 — 문서가 아닌 일반 요소에서 baseURI 가 실제 값을 샌다');
+    'baseURI is missing on Node.prototype; non-Document nodes would leak the proxy baseURI');
   assert.ok(!/defineAccessor\(w\.Document && w\.Document\.prototype, 'baseURI'/.test(rt),
-    'baseURI 가 Document.prototype 에 남아 있다 — own 자체가 대조군엔 없는 모양 지문이다');
+    'baseURI remains an own property on Document.prototype');
 });
 
-test('document.origin 가상화는 없다 — 이 속성 자체가 최신 브라우저에 없다', () => {
+test('document.origin is not virtualized because modern browsers do not define it', () => {
   const rt = preludeSource().split('\r\n').join('\n');
-  // 실측(2026-09-14, Chrome 152 headless + Edge/WebView2 153): 둘 다
-  // document.origin 이 own 도 아니고 값도 undefined. 되살리면 그 own 자체가
-  // Document 모양 지문이 된다 — 되살리기 전에 반드시 실브라우저로 재확인할 것.
   assert.ok(!/defineOnProto\(w\.document, docProto, 'origin'/.test(rt),
-    'document.origin 훅이 되살아났다 — 실브라우저에 없는 속성을 own 으로 만들면 그게 지문이다');
+    'document.origin hook reappeared as an own property');
 });
 
-test('HTMLStyleElement 의 innerHTML/innerText/textContent 는 조상 프로토타입에서 <style> 만 가른다', () => {
+test('HTMLStyleElement innerHTML/innerText/textContent hooks live on ancestor prototypes and branch on <style>', () => {
   const rt = preludeSource().split('\r\n').join('\n');
   assert.ok(!/HTMLStyleElement.*\.prototype;[\s\S]{0,80}for \(const prop of \['textContent', 'innerText', 'innerHTML'\]/.test(rt),
-    'innerHTML/innerText/textContent 를 다시 HTMLStyleElement.prototype 에 own 으로 심었다');
+    'innerHTML/innerText/textContent were installed as own properties on HTMLStyleElement.prototype');
   assert.ok(rt.includes("['textContent', w.Node && w.Node.prototype]") && rt.includes("['innerText', w.HTMLElement && w.HTMLElement.prototype]"),
-    'textContent/innerText 를 브라우저가 실제로 두는 조상(Node/HTMLElement)에 심지 않는다');
+    'textContent/innerText hooks are missing from Node.prototype / HTMLElement.prototype');
   assert.ok(/this\.localName === 'style'.*originalStyleText/.test(rt.replace(/\n\s*/g, ' ')),
-    '조상에 심으면서 <style> 인지 가르는 분기가 없다 — 전 요소에 CSS 재작성이 걸린다');
+    'ancestor prototype hooks are missing the <style> tag check');
 });
 
-test('SharedWorker 교체는 네이티브 prototype 을 보존하고 타깃 접두어를 다시 심는다', () => {
+test('SharedWorker replacement preserves native prototype and applies per-target name prefix', () => {
   const rt = preludeSource().split('\r\n').join('\n');
-  // Worker 는 이미 고쳐져 있었다(7340 대) — 형제인 SharedWorker 훅이
-  // installWorkerHooks 안에서 이 fix 를 안 받은 채 뒤늦게 실행되며
-  // installStorageFacades 가 심어 둔, 타깃마다 다른 접두어(sharedWorkerNamePrefix)
-  // 를 조용히 덮어썼다. 프로토타입 모양(own count)과 격리(같은 프록시 오리진
-  // 안에서 서로 다른 타깃이 SharedWorker 를 공유하면 안 된다) 두 가지가
-  // 같은 훅 하나에 걸려 있었다.
   const from = rt.indexOf('  function installWorkerHooks() {');
-  assert.ok(from > 0, 'installWorkerHooks 가 없다');
+  assert.ok(from > 0, 'installWorkerHooks not found');
   const to = rt.indexOf('\n  // D3: virtual SW facade', from);
-  assert.ok(to > from, 'installWorkerHooks 끝을 못 찾았다');
+  assert.ok(to > from, 'end of installWorkerHooks not found');
   const body = rt.slice(from, to);
-  // RealSW 는 __zp_realSW 스태시 우선 — 부모 컨테인먼트가 먼저 심은 래퍼를
-  // 네이티브로 오인해 이중 래핑(부트스트랩 URL 자기재귀)하는 것을 막는다.
   assert.ok(/const RealSW = root\.__zp_realSW \|\| Native\.SharedWorker/.test(body),
-    'SharedWorker 교체가 __zp_realSW 스태시를 안 쓴다 — 자식 realm 에서 이중 래핑으로 죽는다');
+    'SharedWorker replacement does not use __zp_realSW stash');
   assert.ok(/ZPSharedWorker\.prototype = RealSW\.prototype/.test(body),
-    'SharedWorker 교체가 네이티브 prototype 을 안 물려받는다 — onerror/port 등이 대조군에만 남는다');
+    'SharedWorker replacement does not inherit native SharedWorker.prototype');
   assert.ok(/new RealSW\([^;]*prefixedSharedWorkerOptions\(sharedWorkerNamePrefix\(\), opts\)\)/.test(body),
-    'SharedWorker 생성이 타깃 접두어를 안 쓴다 — 서로 다른 타깃이 이름을 공유하면 같은 워커를 잡는다');
-  // The frame-side wrapper (installStorageFacades) must take the same path.
+    'SharedWorker constructor does not apply per-target name prefix');
   assert.ok(/new NativeSW\([^;]*prefixedSharedWorkerOptions\(sharedWorkerPrefix, opts\)\)/.test(rt),
     'frame-side SharedWorker wrapper no longer prefixes names');
 });
 
 test('prefixedSharedWorkerOptions: every WorkerOptions form keeps its name, namespaced', () => {
-  // `new SharedWorker(url, options)` — options is (DOMString or WorkerOptions)
-  // and the name defaults to ''. Both wrappers used to write prefix+'default'
-  // for a missing name and spread a string argument into character indices.
   const rt = preludeSource().split('\r\n').join('\n');
   const start = rt.indexOf('  function prefixedSharedWorkerOptions(prefix, opts) {');
   assert.ok(start > 0, 'prefixedSharedWorkerOptions missing');
@@ -1650,14 +1375,6 @@ test('prefixedSharedWorkerOptions: every WorkerOptions form keeps its name, name
   assert.notDeepEqual(f(P, undefined), f(P, { name: 'default' }), 'no-name and "default" must stay distinct workers');
 });
 
-// ── makeVirtualGateway: 목록이 아니라 규칙이다 (2026-09-14) ────────────────
-//
-// 예전엔 인터페이스별로 손으로 고른 메서드 몇 개만 인스턴스 리터럴에 심었다
-// (프로토타입엔 아예 안 얹힘). 실측: RTCPeerConnection 45개, RTCDataChannel
-// 20개, WebTransport 9개가 대조군에만 있는 프로토타입이 됐다 — 오늘 CSS URL
-// 프로퍼티 손목록에서 이미 겪은 실수를 세 번 더 한 것. 이 테스트는 규칙을
-// 격리 실행해 (1) 이름이 net 프로토타입에서 그대로 베껴지는지, (2) 동기/비동기
-// 분류가 맞는지, (3) EventTarget 세 메서드가 own 으로 안 새는지를 확인한다.
 const GATEWAY_STUB = [
   'function normalizedError(n) { const e = new Error(n); e.name = n; return e; }',
   'function defineMasked(obj, key, desc) { try { Object.defineProperty(obj, key, desc); return true; } catch (e) { return false; } }',
@@ -1673,27 +1390,24 @@ const GATEWAY_STUB = [
   'function makeRejectedWritableStream(err) { return { __rejectedStream: true, err }; }',
 ].join('\n');
 
-test('makeVirtualGateway: 네이티브 prototype 이름을 규칙으로 베끼고 동기/비동기를 가른다', async () => {
+test('makeVirtualGateway: copies native prototype own keys by rule and separates sync vs async methods', async () => {
   const rt = preludeSource().split('\r\n').join('\n');
   const from = rt.indexOf('  function makeVirtualGateway(name, meta) {');
-  assert.ok(from > 0, 'makeVirtualGateway 규칙이 없다 — 손으로 고른 목록으로 돌아가면 반드시 또 뚫린다');
+  assert.ok(from > 0, 'makeVirtualGateway rule not found');
   const src = rt.slice(from, rt.indexOf('\n  }', from) + 4);
   assert.ok(!/proxy\.createOffer = |proxy\.getSenders = /.test(src),
-    '인터페이스별 손목록(proxy.xxx = ...) 이 되살아났다');
+    'hardcoded per-interface method list (proxy.xxx = ...) reappeared');
 
-  // 대표 네이티브 프로토타입 하나로 다섯 갈래(비동기/동기-throw/동기-array/
-  // 동기-object/동기-noop)와 두 종류 접근자(핸들러/일반 settable/get-only)를
-  // 모두 건드린다.
   function FakeNative() {}
   Object.defineProperties(FakeNative.prototype, {
-    createOffer: { value: function () { return this.__marker; }, configurable: true }, // ASYNC_REJECT
-    createDataChannel: { value: function () {}, configurable: true },                  // SYNC_THROW
-    getSenders: { value: function () {}, configurable: true },                         // SYNC_ARRAY
-    getConfiguration: { value: function () {}, configurable: true },                   // SYNC_OBJECT
-    close: { value: function () {}, configurable: true },                              // 나머지: no-op
-    signalingState: { get() { return 'REAL-NATIVE-LEAK'; }, configurable: true },       // get-only 상태
-    binaryType: { get() { return 'REAL'; }, set() {}, configurable: true },             // 일반 settable
-    onicecandidate: { get() { return this.__h; }, set(v) { this.__h = v; }, configurable: true }, // 핸들러
+    createOffer: { value: function () { return this.__marker; }, configurable: true },
+    createDataChannel: { value: function () {}, configurable: true },
+    getSenders: { value: function () {}, configurable: true },
+    getConfiguration: { value: function () {}, configurable: true },
+    close: { value: function () {}, configurable: true },
+    signalingState: { get() { return 'REAL-NATIVE-LEAK'; }, configurable: true },
+    binaryType: { get() { return 'REAL'; }, set() {}, configurable: true },
+    onicecandidate: { get() { return this.__h; }, set(v) { this.__h = v; }, configurable: true },
   });
   const root = { RTCPeerConnection: FakeNative };
   const mk = () => new Function('root', GATEWAY_STUB + src + '\nreturn makeVirtualGateway;')(root);
@@ -1704,38 +1418,32 @@ test('makeVirtualGateway: 네이티브 prototype 이름을 규칙으로 베끼�
   assert.deepEqual(names, [
     'binaryType', 'close', 'createDataChannel', 'createOffer',
     'getConfiguration', 'getSenders', 'onicecandidate', 'signalingState',
-  ], '네이티브 프로토타입의 own 이름을 그대로 못 베꼈다 — 이름=모양 규칙이 깨졌다');
+  ], 'failed to copy native prototype own property names');
 
   const inst = new Ctor();
-  assert.ok(typeof inst.createOffer().then === 'function', '비동기 메서드가 Promise 를 안 돌려준다');
-  await inst.createOffer().catch(() => {}); // 미처리 reject 로 프로세스가 안 죽게.
+  assert.ok(typeof inst.createOffer().then === 'function', 'async method did not return a Promise');
+  await inst.createOffer().catch(() => {});
   let threw = false;
   try { inst.createDataChannel(); } catch (e) { threw = true; }
-  assert.ok(threw, 'ZeroProxy 게이트웨이가 없을 때 동기 메서드는 던져야 한다');
-  assert.deepEqual(inst.getSenders(), [], '동기 배열 메서드가 빈 배열이 아니다');
-  assert.deepEqual(inst.getConfiguration(), {}, '동기 객체 메서드가 빈 객체가 아니다');
-  assert.equal(inst.close(), undefined, 'no-op 메서드가 조용히 지나가지 않는다');
+  assert.ok(threw, 'sync method must throw when gateway is unavailable');
+  assert.deepEqual(inst.getSenders(), [], 'sync array method did not return an empty array');
+  assert.deepEqual(inst.getConfiguration(), {}, 'sync object method did not return an empty object');
+  assert.equal(inst.close(), undefined, 'no-op method did not return undefined');
   assert.equal(inst.signalingState, 'stable',
-    '상태 접근자가 우리 초기값이 아니라 가짜 네이티브 값을 그대로 돌려준다 — 살아있는 참조를 잡고 있다는 뜻');
+    'state accessor returned live native value instead of virtual initial state');
 
   const f = () => {};
   inst.onicecandidate = f;
-  assert.equal(inst.onicecandidate, f, '핸들러 왕복이 안 맞는다');
+  assert.equal(inst.onicecandidate, f, 'event handler getter/setter round-trip failed');
   const inst2 = new Ctor();
-  assert.equal(inst2.onicecandidate, null, '핸들러 상태가 인스턴스 간에 샌다');
+  assert.equal(inst2.onicecandidate, null, 'event handler state leaked across instances');
 
-  assert.equal(inst.binaryType, 'blob', '일반 settable 접근자의 초기값이 표의 기본값이 아니다');
+  assert.equal(inst.binaryType, 'blob', 'settable accessor initial value does not match default');
   inst.binaryType = 'arraybuffer';
-  assert.equal(inst.binaryType, 'arraybuffer', '일반 settable 접근자가 쓴 값을 그대로 반사하지 않는다');
-  assert.equal(inst2.binaryType, 'blob', 'settable 접근자 상태가 인스턴스 간에 샌다');
+  assert.equal(inst.binaryType, 'arraybuffer', 'settable accessor did not reflect assigned value');
+  assert.equal(inst2.binaryType, 'blob', 'settable accessor state leaked across instances');
 });
 
-// ── O3: CSP directive × scheme matrix ──────────────────────────────────
-//
-// 골든을 디렉티브→토큰 집합으로 파싱해, 스킴 소스마다 허용/거부를 명시적으로
-// 핀다. "와일드카드가 없다" 검사로는 못 잡는 회귀 — 예: `script-src` 에
-// `data:` 가 끼어들면 eval-급 인라인 주입 경로가 되고, `connect-src` 에
-// bare `https:` 가 오면 프록시를 안 거친 fetch 가 CSP 를 통과한다.
 function parseCSP(header) {
   const map = new Map();
   for (const seg of header.trim().split(';')) {
@@ -1759,7 +1467,6 @@ test('CSP matrix: proxied golden — every directive x every scheme is explicit'
   const golden = fs.readFileSync('crates/zp-shared/testdata/csp_proxied.golden', 'utf8').trim();
   const m = parseCSP(golden);
 
-  // 스킴 소스는 정확히 이 표에 있는 디렉티브에만 존재한다.
   const allowed = {
     'script-src': new Set(['blob:']),
     'style-src': new Set(['blob:', 'data:']),
@@ -1775,37 +1482,31 @@ test('CSP matrix: proxied golden — every directive x every scheme is explicit'
     if (dir === 'report-uri') continue;
     const schemes = new Set(schemeTokens(m, dir));
     assert.deepEqual(schemes, allowed[dir] || new Set(),
-      dir + ' 의 스킴 소스가 표와 다르다: ' + [...schemes].join(' '));
+      dir + ' scheme sources differ from expected table: ' + [...schemes].join(' '));
   }
-  // 'none' 디렉티브는 토큰이 'none' 하나뿐이어야 한다.
   for (const dir of ['default-src', 'object-src', 'base-uri']) {
-    assert.deepEqual(cspTokens(m, dir), new Set(["'none'"]), dir + ' 가 none 이 아니다');
+    assert.deepEqual(cspTokens(m, dir), new Set(["'none'"]), dir + ' must be none');
   }
-  // 'self' 디렉티브 — 스킴/호스트 외 소스가 붙으면 안 된다.
   for (const dir of ['form-action', 'manifest-src']) {
-    assert.deepEqual(cspTokens(m, dir), new Set(["'self'"]), dir + ' 가 self 가 아니다');
+    assert.deepEqual(cspTokens(m, dir), new Set(["'self'"]), dir + ' must be self');
   }
-  // 'self' 를 가진 디렉티브 전체 집합.
   const selfDirs = ['script-src', 'style-src', 'img-src', 'font-src', 'media-src', 'connect-src',
     'frame-src', 'child-src', 'worker-src', 'form-action', 'manifest-src'];
-  for (const dir of selfDirs) assert.ok(cspTokens(m, dir).has("'self'"), dir + ' 에 self 가 없다');
+  for (const dir of selfDirs) assert.ok(cspTokens(m, dir).has("'self'"), dir + ' is missing self');
 
-  // 키워드는 지정된 디렉티브에만.
   assert.deepEqual([...m.keys()].filter(d => cspTokens(m, d).has("'unsafe-eval'")), ['script-src']);
   assert.deepEqual([...m.keys()].filter(d => cspTokens(m, d).has("'wasm-unsafe-eval'")), ['script-src']);
   assert.deepEqual([...m.keys()].filter(d => cspTokens(m, d).has("'unsafe-inline'")).sort(),
     ['script-src', 'style-src']);
-  // 호스트 소스는 connect-src 의 ws 오리진 하나뿐.
   for (const [dir] of m) {
     const hosts = hostTokens(m, dir).filter(t => dir !== 'report-uri');
-    if (dir === 'connect-src') assert.deepEqual(hosts, ['wss://proxy.example'], 'connect-src 호스트 소스 이탈');
-    else assert.deepEqual(hosts, [], dir + ' 에 호스트 소스: ' + hosts.join(' '));
+    if (dir === 'connect-src') assert.deepEqual(hosts, ['wss://proxy.example'], 'unexpected connect-src host source');
+    else assert.deepEqual(hosts, [], dir + ' has unexpected host sources: ' + hosts.join(' '));
   }
   assert.deepEqual(cspTokens(m, 'report-uri'), new Set(['/zp/api/csp-report']));
-  // 절대 금지: 와일드카드/실행 스킴/bare ws 계열.
   for (const tok of ['*', 'javascript:', 'file:', 'http:', 'https:', 'ws:', 'wss:']) {
     for (const [dir] of m) {
-      assert.ok(!cspTokens(m, dir).has(tok), dir + ' 에 금지 토큰 ' + tok);
+      assert.ok(!cspTokens(m, dir).has(tok), dir + ' contains forbidden token ' + tok);
     }
   }
 });
@@ -1825,57 +1526,41 @@ test('CSP matrix: control golden — stricter than proxied, framing forbids self
   for (const [dir, sources] of m) {
     const schemes = new Set(schemeTokens(m, dir));
     assert.deepEqual(schemes, allowed[dir] || new Set(),
-      dir + ' 의 스킴 소스가 표와 다르다: ' + [...schemes].join(' '));
+      dir + ' scheme sources differ from expected table: ' + [...schemes].join(' '));
   }
-  // 통제 표면은 타깃 문서보다 빡빡하다 — 스크립트에 blob:/data: 가 없다.
   assert.deepEqual([...cspTokens(m, 'script-src')].sort(),
     ["'self'", "'unsafe-eval'", "'unsafe-inline'", "'wasm-unsafe-eval'"].sort());
-  assert.deepEqual(schemeTokens(m, 'connect-src'), [], '통제 connect-src 에 blob:/data: 가 붙으면 안 된다');
+  assert.deepEqual(schemeTokens(m, 'connect-src'), [], 'control connect-src must not allow blob: or data:');
   assert.deepEqual([...hostTokens(m, 'connect-src')], ['wss://proxy.example']);
-  // 프록시가 직접 로드되는 표면이라 frame-ancestors 'none' 이 맞다 (proxied 는 부재).
   assert.deepEqual(cspTokens(m, 'frame-ancestors'), new Set(["'none'"]));
   assert.deepEqual(cspTokens(m, 'base-uri'), new Set(["'self'"]));
-  assert.ok(!m.has('report-uri'), '통제 표면에 report-uri 가 없어야 한다');
+  assert.ok(!m.has('report-uri'), 'control CSP must not include report-uri');
   for (const tok of ['*', 'javascript:', 'http:', 'https:', 'ws:', 'wss:']) {
-    for (const [dir] of m) assert.ok(!cspTokens(m, dir).has(tok), dir + ' 에 금지 토큰 ' + tok);
+    for (const [dir] of m) assert.ok(!cspTokens(m, dir).has(tok), dir + ' contains forbidden token ' + tok);
   }
 });
 
-// ── O3: dist 산출물 서명 ───────────────────────────────────────────────
-//
-// 2026-… 실사고: wasm-bindgen glue 가 `(function(){…self.ZPPageBundleWBG…})()`
-// 래퍼 없이 번들되면 부트 체크가 `ZP_PAGE_BUNDLE_BOOT_FAILED` 를 던진다.
-// glue 파일을 수동 재생성하면 래퍼가 날아간다 — 산출물 자체에 서명을 둔다.
 test('dist signature: zp-page-bundle carries the WBG self-registration', (t) => {
   const p = 'dist/web/zp-page-bundle.js';
-  if (!fs.existsSync(p)) { t.skip('dist 가 없다: `npm run build` 뒤에 다시 돌린다'); return; }
+  if (!fs.existsSync(p)) { t.skip('dist missing: run `npm run build` first'); return; }
   const src = fs.readFileSync(p, 'utf8');
   assert.ok(/ZPPageBundleWBG\s*=/.test(src),
-    'self.ZPPageBundleWBG=wasm_bindgen 등록이 없다 — glue 래퍼가 빠진 번들 (부트 실패)');
-  assert.ok(/ZP_PAGE_BUNDLE_BOOT_FAILED/.test(src), '부트 실패 가드가 없다');
-  assert.ok(/Object\.defineProperty\(globalThis,"?ZPBundle"?/.test(src), 'ZPBundle API 등록이 없다');
+    'missing self.ZPPageBundleWBG=wasm_bindgen registration in bundle wrapper');
+  assert.ok(/ZP_PAGE_BUNDLE_BOOT_FAILED/.test(src), 'missing ZP_PAGE_BUNDLE_BOOT_FAILED boot guard');
+  assert.ok(/Object\.defineProperty\(globalThis,"?ZPBundle"?/.test(src), 'missing ZPBundle API registration');
 });
 
 test('dist signature: sw bundle registers transport and runtime API', (t) => {
   const p = 'dist/web/sw.js';
-  if (!fs.existsSync(p)) { t.skip('dist 가 없다: `npm run build` 뒤에 다시 돌린다'); return; }
+  if (!fs.existsSync(p)) { t.skip('dist missing: run `npm run build` first'); return; }
   const src = fs.readFileSync(p, 'utf8');
   for (const marker of ['transportFetch', 'addEventListener']) {
-    assert.ok(src.includes(marker), 'sw.js 에 ' + marker + ' 가 없다');
+    assert.ok(src.includes(marker), 'sw.js is missing ' + marker);
   }
 });
 
-// ── O3: prelude 금지 패턴 ─────────────────────────────────────────────
-//
-// prelude 자체가 탈출 수단을 들고 있으면 리라이트가 아무리 빡빡해도 소용없다.
-// 동적 코드는 compileNested/Native.FunctionCtor 경유, eval 은 geval/w.eval
-// 같은 명명된 참조로만, innerHTML 은 transformHTML 계열 파서 템플릿의
-// `else` 폴백에서만 허용한다.
-// 주석 속 백틱 언급(`eval()` 이런 식)이 패턴에 걸리지 않도록, 스캔 전에
-// 주석·문자열·정규식 리터럴을 벗긴다 — 줄 번호는 보존한다. 정규식은
-// `/"[^"]*"/` 같은 리터럴이 따옴표를 품을 수 있어 따로 상태를 둔다 —
-// 직전 유의 문자가 표현식을 끝낼 수 없는 문자(괄호/연산자/키워드)면
-// `/` 는 나눗셈이 아니라 정규식 시작이다.
+// Strip comments, string literals, and regex literals while preserving line numbers
+// so forbidden-pattern checks only inspect executable tokens.
 function stripNonCode(src) {
   let out = '', state = 'code', quote = '', lastSig = '', lastWord = '';
   const RE_PREV = /[([{,;:=!&|?+\-*%^~<>]/;
@@ -1905,7 +1590,7 @@ function stripNonCode(src) {
       else if (c === '[') state = 'regexclass';
       else if (c === '/') { state = 'code'; lastSig = 'x'; lastWord = ''; }
       else if (c === '\n') { state = 'code'; out += '\n'; }
-    } else { // regexclass
+    } else {
       if (c === '\\') i++;
       else if (c === ']') state = 'regex';
       else if (c === '\n') { state = 'code'; out += '\n'; }
@@ -1914,19 +1599,18 @@ function stripNonCode(src) {
   return out;
 }
 test('prelude forbidden patterns: no raw eval/Function/string-timer/document.write', () => {
-  // runtime-prelude 는 web/membrane/*.js concat 소스 — preludeSource() 로 읽는다.
   const files = ['web/worker-prelude.js', 'web/sw.js', 'web/zp-core.js'];
   const rules = [
-    { re: /\bnew Function\s*\(/, why: 'new Function 직접 호출 — compileNested/Native.FunctionCtor 경유가 원칙' },
-    { re: /\bset(?:Timeout|Interval)\s*\(\s*['"`]/, why: '문자열 타이머 — 컴파일 경로를 우회한다' },
-    { re: /\bdocument\.write(?:ln)?\s*\(/, why: 'document.write 직접 호출 — appendWrittenHTML 경유가 원칙' },
-    { re: /(^|[^\w$.])eval\s*\(/, why: 'bare eval() — geval/w.eval 같은 명명 참조만 허용' },
-    { re: /\bFunction\.prototype\.constructor\s*\(/, why: 'ctor 직접 호출 — 리라이트 경유 우회' },
+    { re: /\bnew Function\s*\(/, why: 'direct new Function call; route through compileNested or Native.FunctionCtor' },
+    { re: /\bset(?:Timeout|Interval)\s*\(\s*['"`]/, why: 'string timer bypasses compilation path' },
+    { re: /\bdocument\.write(?:ln)?\s*\(/, why: 'direct document.write call; route through appendWrittenHTML' },
+    { re: /(^|[^\w$.])eval\s*\(/, why: 'bare eval() call; use named reference such as geval or w.eval' },
+    { re: /\bFunction\.prototype\.constructor\s*\(/, why: 'direct Function.prototype.constructor call bypasses rewriter' },
   ];
   for (const file of files.concat(['web/membrane/*'])) {
     const src = stripNonCode(file === 'web/membrane/*' ? preludeSource() : fs.readFileSync(file, 'utf8'));
     for (const { re, why } of rules) {
-      assert.ok(!re.test(src), file + ' 금지 패턴: ' + why);
+      assert.ok(!re.test(src), file + ' forbidden pattern: ' + why);
     }
   }
 });
@@ -1936,11 +1620,8 @@ test('prelude forbidden patterns: every raw innerHTML assignment is a Native-set
   const lines = src.split('\n');
   for (let i = 0; i < lines.length; i++) {
     if (!/\w+\.innerHTML\s*=/.test(lines[i])) continue;
-    // 허용 형태는 정확히 `else X.innerHTML = …` — 바로 위 줄의
-    // Native.elementInnerHTML 세터 시도에 대한 폴백이다. 다른 위치의 날
-    // innerHTML 대입은 transformHTML 을 우회하는 주입 경로다.
     assert.ok(/^\s*else\s+\w+\.innerHTML\s*=/.test(lines[i]),
-      'web/runtime-prelude.js:' + (i + 1) + ' — else 폴백이 아닌 날 innerHTML 대입: ' + lines[i].trim());
+      'web/runtime-prelude.js:' + (i + 1) + ': raw innerHTML assignment outside else fallback: ' + lines[i].trim());
   }
 });
 
@@ -1955,41 +1636,30 @@ test('getHTML string scrub restores literal attribute text and drops our stash',
   assert.equal(
     f('<a href="http://p/zp/?via=x" data-zp-target-url="http://t/x" data-zp-lit-href="/x">t</a>'),
     '<a href="/x">t</a>');
-  // Attribute order and escaping survive; unrelated attributes are untouched.
   assert.equal(
     f('<img data-zp-lit-src="i.png?a=1&amp;b=2" alt="k" src="http://p/zp/api/fetch?url=u">'),
     '<img alt="k" src="i.png?a=1&amp;b=2">');
-  // Namespaced stash names are dropped too.
   assert.equal(
     f('<image href="http://p/x" data-zp-lit-xlink:href="/svg.png"></image>'),
     '<image href="http://p/x"></image>');
-  // No stash → only our attributes go; raw-text `<` in a script is left alone.
   assert.equal(
     f('<div data-zp-internal="1" class="c"><script>if (a<b && b>c) x()</script></div>'),
     '<div class="c"><script>if (a<b && b>c) x()</script></div>');
 });
 
-// 리라이터가 내는 런타임 헬퍼는 **모든 실행 realm** 에 있어야 한다.
-// b602610(2026-09-22)은 `__zp_okeys`·`__zp_delete`·`__zp_oget`·`__zp_rget` 등을
-// 페이지 멤브레인에만 정의했고, 워커에서는 `Object.keys(o)`·`delete o[k]`·
-// `o?.[k]` 같은 흔한 코드가 전부 ReferenceError 였다(2026-09-29 실측 11개 중 10개).
-// 리라이터 소스의 문자열 리터럴에서 호출 형태(`__zp_x(`)와 통째 이름
-// (`"__zp_odelete"`)을 모아, 페이지(define)와 워커(expose) 양쪽 정의를 강제한다.
 test('every helper the rewriter emits is defined in page and worker realms', () => {
   const rs = fs.readFileSync('crates/zp-rewriter/src/lib.rs', 'utf8');
   const names = new Set();
   for (const lit of rs.match(/"(?:[^"\\\n]|\\.)*"/g) || []) {
     for (const m of lit.matchAll(/__zp_([A-Za-z0-9_]+)\(/g)) names.add('__zp_' + m[1]);
     const whole = /^"(__zp_[A-Za-z0-9_]+)"$/.exec(lit);
-    // `__zp_`, `__zp_lc_`, `__zp_lc_1` 은 임시 변수 이름(접두/순번)이고
-    // `__zp_oc` 는 OCHAIN 연속 화살표의 매개변수다 — 헬퍼가 아니다.
+    // `__zp_`, `__zp_lc_`, `__zp_lc_1` are temporary variable prefixes/counters
+    // and `__zp_oc` is the optional-chaining continuation parameter, not a runtime helper.
     if (whole && !/(_|_\d+)$/.test(whole[1]) && whole[1] !== '__zp_oc') names.add(whole[1]);
   }
   assert.ok(names.size >= 20, `helper scan found too few names: ${[...names]}`);
   const page = fs.readdirSync('web/membrane').map(f => fs.readFileSync(`web/membrane/${f}`, 'utf8')).join('\n');
   const worker = fs.readFileSync('web/worker-prelude.js', 'utf8');
-  // 자식 창(같은 오리진 srcless iframe)은 20-containment.js 의 명시 목록으로만
-  // 헬퍼를 받는다 — 거기 빠지면 부모가 써 넣은 스크립트가 같은 식으로 죽는다.
   const child = fs.readFileSync('web/membrane/20-containment.js', 'utf8');
   const missing = [];
   for (const n of [...names].sort()) {
@@ -2000,31 +1670,24 @@ test('every helper the rewriter emits is defined in page and worker realms', () 
   assert.deepEqual(missing, [], `rewriter emits helpers a realm does not define: ${missing.join(', ')}`);
 });
 
-// ── The helpers rewritten code names: one list in three places (2026-10-13) ──
-//
-// Every `with` the runtime wraps code in, and every page `with` body the rewriter emits, starts by binding the
-// helpers as block constants: inside `with(o)` a free name is looked up in `o` first, on every evaluation — 15 M times
-// through a Proxy trap in one Turnstile VM (5 s), and through whatever a page makes of `o` in its own `with`
-// (`with({__zp_get: f}) location` handed `f` the real global object). The rewriter refuses a page binding or write
-// of these names. A helper missing from a list is a name left to the with object again.
+// Every `with(o)` body starts by binding runtime helpers as block constants so free-name
+// lookups in `o` cannot intercept or shadow helper calls.
 test('the runtime helper list is the same in the rewriter, the page prelude and the worker prelude', () => {
   const rs = fs.readFileSync('crates/zp-rewriter/src/lib.rs', 'utf8');
   const rsList = /pub const RUNTIME_HELPERS: &\[&str\] = &\[([^\]]*)\];/.exec(rs);
-  assert.ok(rsList, 'RUNTIME_HELPERS 가 없다');
+  assert.ok(rsList, 'RUNTIME_HELPERS not found');
   const rust = [...rsList[1].matchAll(/"([^"]+)"/g)].map(m => m[1]);
   const listIn = (file) => {
     const text = fs.readFileSync('web/' + file, 'utf8');
     const m = /const ZP_WITH_HELPERS = \[([^\]]*)\];/.exec(text);
-    assert.ok(m, file + ' 에 ZP_WITH_HELPERS 가 없다');
+    assert.ok(m, file + ' is missing ZP_WITH_HELPERS');
     return [...m[1].matchAll(/'([^']+)'/g)].map(x => x[1]);
   };
   assert.deepEqual(listIn('membrane/00-head.js'), rust, 'page prelude list differs from RUNTIME_HELPERS');
   assert.deepEqual(listIn('worker-prelude.js'), rust, 'worker prelude list differs from RUNTIME_HELPERS');
-  // Every helper the rewriter emits as a call is on the list (comments aside).
   const code = rs.split('\n').filter(l => !/^\s*\/\//.test(l)).join('\n').split('#[cfg(test)]')[0];
   const emitted = new Set([...code.matchAll(/(__zp_[A-Za-z_]+)[(.]/g)].map(m => m[1]));
   for (const name of emitted) assert.ok(rust.includes(name), name + ' is emitted but not in RUNTIME_HELPERS');
-  // Every `with` the runtime builds code into binds them.
   const rt = preludeSource();
   const worker = fs.readFileSync('web/worker-prelude.js', 'utf8');
   for (const [where, text] of [['page prelude', rt], ['worker prelude', worker]]) {
@@ -2034,9 +1697,8 @@ test('the runtime helper list is the same in the rewriter, the page prelude and 
   }
 });
 
-// The membrane's tables are sealed (newMap / newSet / newWeakMap / newWeakSet): a page that wraps `Map.prototype.get`
-// must not watch what the membrane keeps there, and its wrapper must not loop the free-name lookup (e2e `a page that wraps
-// Map, Set, WeakMap and WeakSet methods…`). A bare `new Map()` added later would quietly undo that for its table.
+// Membrane tables use sealed prototypes (newMap/newSet/newWeakMap/newWeakSet) so page
+// patches to Map.prototype.get etc. cannot observe internal state or re-enter free-name lookup.
 test('every table of the membrane, the worker prelude and the shared core is built by a sealing factory', () => {
   const files = [
     ...require('node:fs').readdirSync('web/membrane').filter(f => f.endsWith('.js')).map(f => 'web/membrane/' + f),
@@ -2048,7 +1710,6 @@ test('every table of the membrane, the worker prelude and the shared core is bui
     lines.forEach((line, i) => {
       const code = line.replace(/\/\/.*$/, '');
       if (!/\bnew (Map|Set|WeakMap|WeakSet)\(/.test(code)) return;
-      // the factories themselves: `const newMap = entries => { const m = sealedSetProto(new Map(), SEALED_MAP);`
       if (/sealedSetProto\(new (Map|Set|WeakMap|WeakSet)\(\), SEALED_/.test(code)) return;
       offenders.push(f + ':' + (i + 1) + ': ' + line.trim().slice(0, 90));
     });
@@ -2086,7 +1747,6 @@ test('the sealed tables are what they claim: methods that survive a patched buil
     assert.equal(m.has(key), false); assert.equal(ws.has(key), false);
     assert.deepEqual([...m], [['a', 1]], 'iteration');
     assert.deepEqual(seen, [], 'a patched built-in saw the membrane\'s tables: ' + seen.join(','));
-    // and the control: a plain Map does reach the patched method
     new Map().set(1, 2);
     assert.ok(seen.length > 0, 'the patch does not take, so this test proves nothing');
   } finally {

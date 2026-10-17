@@ -1,12 +1,5 @@
-// D5 end to end: a proxied page opens a data channel to a native peer through
-// the target's own signaling, and the peer must see only the TURN relay —
-// never the page's own address.
-//
-// Until 2026-09-30 D5 was a pion signaling bridge whose target side was never
-// negotiated; page code still received the native connection's own SDP and
-// candidates, so with D5 enabled the peer connected to the user directly
-// (host↔host). The embedded TURN server also refused every credential it
-// minted. WebRTC now runs relay-only through that TURN server.
+// End-to-end WebRTC relay test: a proxied page opens a data channel to a native peer through
+// the target's signaling server, verifying that the peer observes only the embedded TURN relay address.
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const childProcess = require('node:child_process');
@@ -29,8 +22,7 @@ const freeUDP = host => new Promise((resolve, reject) => {
   s.once('error', reject);
   s.bind(0, host, () => { const { port } = s.address(); s.close(() => resolve(port)); });
 });
-// Chrome's WebRTC skips the loopback adapter, so a TURN server there is
-// unreachable — the relay needs a routable interface.
+// Chrome's WebRTC skips the loopback adapter, so the TURN server must bind a routable IPv4 interface.
 function routableIPv4() {
   for (const addrs of Object.values(os.networkInterfaces())) {
     for (const a of addrs || []) if (a.family === 'IPv4' && !a.internal && !a.address.startsWith('169.254.')) return a.address;
@@ -194,7 +186,7 @@ test('D5: proxied WebRTC runs relay-only through the embedded TURN server', { ti
       assert.equal(rA.dc, 'open', `${mode}: data channel never opened: ${JSON.stringify(rA)}`);
       assert.equal(rA.echo, 'echo:hi', `${mode}: no echo: ${JSON.stringify(rA)}`);
       if (mode === 'proxied') {
-        // Relay only: no candidate — and so no packet — from the page's own address.
+        // Relay only: no candidate or packet may originate from the page's own address.
         assert.ok(rA.candTypes.length > 0 && rA.candTypes.every(c => c === 'relay'), `proxied page gathered non-relay candidates: ${rA.candTypes}`);
         assert.match(String(rB), /remote=relay$/, `the peer connected to something other than the relay: ${rB}`);
       }

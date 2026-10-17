@@ -10,11 +10,8 @@
     const name = typeof key === 'symbol' ? '' : String(key);
     return 'function ' + kind + ' ' + name + '() { [native code] }';
   }
-  // A function masked as `function key() { [native code] }` is called `key` — the minifier leaves "", "n", "value", and a
-  // `bind` says "bound key". An accessor is `get key` / `set key`. (A symbol key keeps its name.)
-  // A query the membrane makes for itself runs the browser's own method, never `node.querySelectorAll`: that is the page's to
-  // wrap, and a wrapper saw every selector the membrane scans with ("iframe,frame", "script", "style", the URL attributes) — a canary
-  // for DOM scans recorded them; a page that returns an empty list from it hides frames and scripts from the membrane's sweep.
+  // Run internal DOM queries through captured native methods so page wrappers on
+  // querySelectorAll cannot observe or filter membrane scans.
   function qsaOf(node, selector) {
     const t = node && node.nodeType;
     const f = t === 9 ? Native.querySelectorAll : t === 11 ? Native.fragmentQuerySelectorAll : t === 1 ? Native.elementQuerySelectorAll : null;
@@ -33,8 +30,7 @@
     toStringMap.set(fn, nativeAccessorSource(kind, key));
     if (typeof key === 'string') nameLike(fn, kind + ' ' + key);
   }
-  // The native function `ours` stands in for reports its length too (a hand-written wrapper has the arity it was written with:
-  // `fetch.length` read 2, `addEventListener.length` 3, `history.pushState.length` 3).
+  // Preserve the replaced native function's arity on the membrane wrapper.
   function lengthLike(ours, native) {
     if (typeof ours !== 'function' || typeof native !== 'function' || ours.length === native.length) return;
     try { Object.defineProperty(ours, 'length', { value: native.length, configurable: true }); } catch {}
@@ -42,48 +38,19 @@
   function maskMethods(obj, keys) {
     for (const key of keys) maskNativeFunction(obj && obj[key], key);
   }
-  // Web IDL members are enumerable; ours were not, so every property the
-  // membrane touched flipped a bit the page can read. Measured on
-  // Navigator.prototype: 76 members enumerable, and exactly the 6 we replaced
-  // were not — `Object.keys(Navigator.prototype).includes('userAgent')` and
-  // `for (k in navigator)` both disagreed with every real browser.
-  //
-  // A blanket `enumerable: true` would be wrong in the other direction: our own
-  // `__zp_*` helpers must stay invisible, and for-in is NOT covered by the
-  // getOwnPropertyNames/keys/ownKeys scrubbing. So inherit the flag from
-  // whatever we are replacing — native members keep their enumerability,
-  // membrane-only additions stay hidden. `configurable` stays false either way:
-  // that is the E1 lock that stops a page deleting our accessor to reach the
-  // native one, and it is the one axis we knowingly trade for the jail.
-  //
-  // ── 2026-08-18 결정 (닫힘). 이 자리를 "지문이니까" 로 다시 열지 말 것 ──
-  // 실측: 후킹한 DOM 멤버 116곳이 `configurable:false` 이고 진짜 브라우저는
-  // 전부 `true` 다. 프로토타입을 한 번 훑어 세기만 해도 멤브레인이 드러난다.
-  // 그럼에도 이 값을 유지한다. 세 가지 선택지를 다 재 봤다:
-  //  (a) `true` 로 푼다 — **측정해 보니 얻는 게 0 이다**. Cloudflare 판정은
-  //      그대로였다(2026-08-16, stackoverflow 2회). 대신 페이지가 훅을 걷어낼
-  //      여지가 생긴다. 비용만 있고 이득이 없다.
-  //  (b) 디스크립터를 위장한다(`getOwnPropertyDescriptor` 가 true 로 보고) —
-  //      **우리 코드가 먼저 깨진다.** `propertyLocked()` 는 바로 이 비트로
-  //      "이미 설치됨" 을 판정한다(신원/WeakSet 은 멤브레인이 창을 감싸며 매번
-  //      새 래퍼를 주기 때문에 못 쓴다). 위장하면 재설치로 들어가 던진다.
-  //      게다가 `delete` 는 여전히 false 를 돌려주므로 **디스크립터와 실제
-  //      동작이 모순**되어, 수동적인 인구조사 신호를 능동적 탐침 신호로 바꿀
-  //      뿐이다.
-  //  (c) 유지한다 ← 선택. 지문은 남지만 감옥이 감옥으로 남는다.
-  // 되열려면 (a) 의 측정을 다시 해서 "이번엔 판정이 바뀐다" 를 먼저 보일 것.
+  // Inherit enumerability from the replaced property so WebIDL members stay
+  // enumerable while membrane-internal helpers stay hidden. Set configurable:
+  // false so page scripts cannot delete membrane hooks to uncover native
+  // accessors, and so propertyLocked() can reliably detect installed hooks.
   function nativeEnumerability(obj, key) {
     try {
       const d = Object.getOwnPropertyDescriptor(obj, key);
       return !!(d && d.enumerable);
     } catch { return false; }
   }
-  // A replacement made here and put into another realm's object — a contained child frame's window or prototype — is a function of
-  // THIS realm: its [[Prototype]] is our Function.prototype, so the frame's `fetch instanceof Function` reads false, and a probe of
-  // the frame's clean realm (make an iframe, ask which of its functions are its own) finds the membrane's: some hundred of them
-  // were "foreign" where natively every one is the frame's. It takes the prototype of the native it replaces — the frame's own
-  // Function.prototype. A function that is ALSO ours (the page window's own property, shared with the frame) stays as it is.
-  // While a frame is being contained its Function.prototype is known; otherwise the replaced native's is the realm's.
+  // Re-parent cross-realm wrapper functions to the target realm's
+  // Function.prototype (or parent interface constructor) so `instanceof Function`
+  // and prototype chain checks match native behavior.
   let realmInstallFP = null;
   function sameRealmAs(value, replaced, key) {
     try {
@@ -91,8 +58,8 @@
       const own = Object.getOwnPropertyDescriptor(root, key);
       if (own && own.value === value) return;
       let wanted = Object.getPrototypeOf(replaced);
-      // an interface constructor's [[Prototype]] is its parent interface's (XMLHttpRequest → XMLHttpRequestEventTarget): the
-      // replaced native's own answers — unless that is already ours, then the frame's Function.prototype stands
+      // Interface constructors inherit from their parent interface constructor;
+      // fall back to realmInstallFP when replacing a constructor already wrapped.
       if ((!wanted || wanted === Function.prototype) && realmInstallFP) wanted = realmInstallFP;
       if (!wanted || wanted === Function.prototype) return;
       Object.setPrototypeOf(value, wanted);
@@ -101,18 +68,13 @@
   function define(obj, key, value) {
     try {
       const prev = typeof value === 'function' ? Object.getOwnPropertyDescriptor(obj, key) : null;
-      // what the property was before: its own native, or the one it inherits and is about to shadow (navigator.sendBeacon)
+      // Capture the existing own or inherited function to copy its length and prototype.
       let inherited = null;
       if (typeof value === 'function' && !prev) { try { inherited = Reflect.get(obj, key); } catch {} }
       Object.defineProperty(obj, key, { value, enumerable: nativeEnumerability(obj, key), configurable: false, writable: true });
       if (prev && typeof prev.value === 'function') { lengthLike(value, prev.value); sameRealmAs(value, prev.value, key); }
       else if (typeof inherited === 'function' && inherited !== value) { lengthLike(value, inherited); sameRealmAs(value, inherited, key); }
-      // A native method's `.name` equals its property key. Ours came out of the
-      // minifier as "" or a one-letter token, so `setTimeout.name`,
-      // `window.addEventListener.name` and `navigator.serviceWorker.register
-      // .name` all read "" where a browser reports the method name (measured
-      // 2026-08-03). maskNativeFunction already fixes `.toString()`, which is
-      // why this stayed invisible — the two are separate surfaces.
+      // Preserve the property key as `.name` in case minification renamed the wrapper function.
       if (typeof value === 'function' && value.name !== key) {
         try { Object.defineProperty(value, 'name', { value: key, configurable: true }); } catch {}
       }
@@ -120,11 +82,8 @@
       return true;
     } catch { return false; }
   }
-  // `enumSrc` names the object to copy enumerability FROM when `obj` itself has
-  // nothing to inherit — the replaced classes (XHR/WebSocket/EventSource) build
-  // a fresh prototype, so their only reference for the native flag is the
-  // native prototype we are standing in for. `configurable: false` means the
-  // flag cannot be corrected after the fact, so it has to be right here.
+  // Copy enumerability from `enumSrc` when defining accessors on a freshly
+  // constructed replacement prototype.
   function defineAccessor(obj, key, get, set, enumSrc) {
     try {
       Object.defineProperty(obj, key, { get, set, enumerable: nativeEnumerability(enumSrc || obj, key), configurable: false });
@@ -133,17 +92,8 @@
       return true;
     } catch { return false; }
   }
-  // ★훅의 **소스**를 가린다. `define`/`defineAccessor` 는 이미 가리는데, 날
-  // `Object.defineProperty` 로 접근자를 심은 자리가 31곳 남아 있었다.
-  // 실측(2026-09-10): 그 자리들 때문에 74개 함수의 소스가 페이지에 그대로
-  // 보였다 — `HTMLScriptElement.src` 게터는 `data-zp-target-url` 이라는
-  // 내부 속성 이름까지 노출했다.
-  //
-  // 전수 스윕으로 뒤늦게 가리는 방법도 재 봤지만 창마다 5~7ms 라 프레임이
-  // 많은 페이지에서 100ms 를 넘는다. 설치 지점에서 가리는 것이 맞다.
-  //
-  // defineAccessor 와 달리 디스크립터를 **그대로** 넘긴다 — configurable 이나
-  // enumerable 을 일부러 다르게 둔 자리가 있어서 의미를 바꾸면 안 된다.
+  // Install a property descriptor while registering any function value, getter,
+  // or setter in Function.prototype.toString masking.
   function defineMasked(obj, key, desc) {
     try { Object.defineProperty(obj, key, desc); } catch { return false; }
     if (typeof desc.value === 'function' && typeof key === 'string') nameLike(desc.value, key);
@@ -151,7 +101,7 @@
     if (typeof desc.set === 'function') maskAccessorFn(desc.set, 'set', key);
     return true;
   }
-  // 복수형도 같은 규칙이다 — 한 번에 여러 접근자를 심는 자리가 다섯 곳 있다.
+  // Multi-property variant of defineMasked.
   function definePropertiesMasked(obj, descs) {
     try { Object.defineProperties(obj, descs); } catch { return false; }
     for (const key of Object.getOwnPropertyNames(descs)) {
@@ -163,9 +113,8 @@
     }
     return true;
   }
-  // 대체 클래스는 프로토타입을 Object.assign 으로 채운다. 그 멤버들도 전부
-  // 네이티브인 척해야 한다 — `WebSocket.prototype.send` 의 소스가 그대로
-  // 보이면 우리 구현이 통째로 읽힌다(실측).
+  // Copy properties onto a replacement prototype and mask all methods and
+  // accessors as native code.
   function assignMasked(proto, members) {
     Object.assign(proto, members);
     for (const key of Object.getOwnPropertyNames(members)) {
@@ -178,32 +127,14 @@
     }
     return proto;
   }
-  // Web IDL puts interface members on the PROTOTYPE; a native singleton like
-  // `navigator` / `history` / `performance` has zero own property names. When
-  // we defined an accessor on both the prototype and the instance "to be
-  // safe", the instance copy was pure fingerprint:
-  // `Object.getOwnPropertyNames(navigator)` came back with our 6 names where
-  // every real browser returns []. Define on the prototype, then verify the
-  // instance actually reads through it, and only fall back to shadowing the
-  // instance if something else is in the way. Normal case: no own props.
+  // WebIDL interface members live on the prototype rather than the singleton
+  // instance. Define the accessor on the prototype first and fall back to the
+  // instance only if an own property shadows it.
   function defineOnProto(instance, proto, key, get, set) {
     if (proto && defineAccessor(proto, key, get, set)) {
-      // ★확인은 **게터를 부르지 않고** 한다(2026-08-24).
-      //
-      // 예전에는 `instance[key] === get.call(instance)` 로 값을 비교했다.
-      // 그런데 게터가 **객체를 돌려주면** 두 호출이 서로 다른 객체라 이 비교는
-      // 영원히 false 다 — `userAgentData` 가 정확히 그랬고, 그래서 매번
-      // 폴백으로 빠져 **그 속성만 navigator 인스턴스에 정의**됐다. 실측:
-      //   Object.getOwnPropertyNames(navigator).includes('userAgentData')
-      //     직접 로드 false / 프록시 true   ← 한 줄짜리 탐지기
-      // (같은 블록의 userAgent·platform 등은 문자열을 돌려주니 멀쩡했다.
-      //  즉 "대부분 맞으니 맞겠지" 가 통하지 않는 자리였다.)
-      //
-      // 게터를 부르는 것 자체도 부작용이었다 — 설치 시점에 게터가 참조하는
-      // 모듈 변수가 아직 초기화 전이면 TDZ 가 나고, `catch` 가 그걸 삼켰다.
-      //
-      // 우리가 확인하려는 것은 "프로토타입에 우리 접근자가 놓였고, 인스턴스에
-      // 그걸 가리는 own 속성이 없다" 뿐이다. 둘 다 서술자로 알 수 있다.
+      // Verify prototype installation via property descriptors rather than
+      // invoking the getter, avoiding allocation comparison mismatches and
+      // temporal dead zones during boot.
       try {
         const own = instance && Object.getOwnPropertyDescriptor(instance, key);
         const onProto = Object.getOwnPropertyDescriptor(proto, key);
@@ -212,50 +143,34 @@
     }
     return defineAccessor(instance, key, get, set);
   }
-  // A getter hook in the native's own place and shape: named `get key`, no `prototype`, the native's setter and flags.
-  // For a native the hook replaces where it lives (navigator identity on Navigator.prototype) — there `configurable` can be
-  // the native's: deleting the hook removes the property, it does not uncover a native behind it. (defineAccessor pins
-  // `configurable: false`, which is right where a hook shadows a native further up the chain.)
+  // Replace a native prototype accessor in place while preserving its native
+  // setter, enumerability, and configurability.
   function replaceNativeAccessor(proto, key, getImpl) {
     const d = proto && Object.getOwnPropertyDescriptor(proto, key);
     if (!d || typeof d.get !== 'function') return false;
     const get = Object.getOwnPropertyDescriptor({ get [key]() { return getImpl.call(this); } }, key).get;
     return defineMasked(proto, key, { get, set: d.set, enumerable: d.enumerable, configurable: d.configurable });
   }
-  // Same idea for methods (navigator.sendBeacon, history.pushState/replaceState).
+  // Define a method on the prototype first, falling back to the instance if shadowed.
   function defineMethodOnProto(instance, proto, key, value) {
     if (proto && define(proto, key, value)) {
       try { if (!instance || instance[key] === value) return true; } catch {}
     }
     return define(instance, key, value);
   }
-  // ★리라이트된 **페이지 코드**가 자기 소스를 문자열로 만들면 우리 호출이
-  // 그대로 보인다. 실측(2026-09-10): naver 8,490개 중 17개, github 8,655개
-  // 중 89개가 `__zp_get(globalThis,"window")` 같은 텍스트를 노출했다.
-  // 전역 **이름** 노출은 예전에 스크러버로 막았지만(LOG.md) 함수 **소스**는
-  // 아무도 안 보고 있었다.
-  //
-  // 그래서 우리 호출을 되돌려서 돌려준다. 목적은 완벽한 원본 복구가 아니라
-  // `__zp_` 라는 표식을 없애는 것이고, **되돌릴 수 없는 모양은 손대지 않는다**
-  // — 망친 소스가 더 큰 티다.
-  //
-  // 감옥은 유지된다: 되돌린 소스를 페이지가 다시 컴파일해도
-  // (`new Function(String(fn))`) 그 경로는 compileNested 의 `with(scope)` 를
-  // 지나므로 자유 식별자가 스코프 프록시로 해석된다. 리라이트가 아니라
-  // 스코프가 컨테인먼트를 지고 있다.
+  // Strip __zp_* and __ZP_EXEC_EVENT call wrappers from Function.prototype.toString
+  // output on rewritten page functions. Re-compilation via new Function still
+  // routes through compileNested and with(scope).
   function unrewriteSourceText(src) {
-    // 빠른 탈출 — 대부분의 호출은 우리와 무관하다. 아래 정의를 만들기 전에 끊는다.
     if (typeof src !== 'string') return src;
     if (src.indexOf('__zp_') < 0 && src.indexOf('__ZP_EXEC_EVENT') < 0) return src;
     const ZP_SRC_IDENT = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
     const ZP_SRC_SIMPLE = /^(this|[A-Za-z_$][A-Za-z0-9_$]*)(\.[A-Za-z_$][A-Za-z0-9_$]*)*$/;
-    // ★리라이터가 **합성해 넣은** 기본형만 생략한다. 자유 식별자를 감쌀 때
-    // 쓰는 이름은 globalThis 하나다(리라이터 소스 확인). window/self 를 여기
-    // 넣으면 페이지가 직접 쓴 `window.open(x)` 이 `open(x)` 으로 줄어
-    // **원본과 다른 텍스트**가 된다 — 되돌리기의 목적에 어긋난다.
+    // Elide only synthesized `globalThis` receivers; preserve explicit `window.`
+    // or `self.` member accesses written by the author.
     const ZP_SRC_GLOBALS = newSet(['globalThis']);
 
-    // 균형 잡힌 인자 목록을 자른다. 문자열 안의 괄호는 세지 않는다.
+    // Split a balanced argument list while ignoring delimiters inside string literals.
     function zpSrcSplitArgs(s, i) {
       const args = [];
       let depth = 0, start = i + 1, j = i;
@@ -283,13 +198,12 @@
       return null;
     }
 
-    // `(__zp_t_1=(o),__zp_t_2=(k),__zp_fast(…)?__zp_t_1[__zp_t_2]:__zp_get(…))` → `o[k]`; with a third temp
-    // (`=(v)`) a write → `o[k]=v`; with `[__zp_t_2](args)` in the native arm a call → `o[k](args)`. [text, next index].
+    // Unrewrite inline-guarded member reads, writes, and calls back to bracket syntax.
     function zpSrcGuard(s, i) {
       const sp = zpSrcSplitArgs(s, i);
       if (!sp) return null;
       const parts = sp[0], next = sp[1] + 1;
-      // `=(0,x)`: the comma keeps a function or class there from taking the temp's name.
+      // `(0,x)` prevents function or class expressions from adopting the temporary variable name.
       const temp = /^\s*__zp_t_\d+=\(0,([\s\S]*)\)\s*$/;
       const o = temp.exec(parts[0] || ''), k = temp.exec(parts[1] || '');
       if (!o || !k) return null;
@@ -305,7 +219,6 @@
       return args ? [member + '(' + unrewriteSource(args[0].join(',')).trim() + ')', next] : null;
     }
 
-    // "abc" / 'abc' 리터럴이면 그 값을, 아니면 null.
     function zpSrcLiteral(a) {
       const t = a.trim();
       if (t.length < 2) return null;
@@ -316,8 +229,7 @@
       return body;
     }
 
-    // 단순한 기본형이 아니면 괄호로 감싼다. 안 감싸면
-    // `__zp_get(a||b,"k")` 가 `a||b.k` 가 되어 뜻이 바뀐다.
+    // Wrap non-simple base expressions in parentheses to preserve operator precedence.
     function zpSrcBaseText(src) {
       const t = unrewriteSource(src).trim();
       if (ZP_SRC_SIMPLE.test(t)) return t;
@@ -341,7 +253,7 @@
       let i = 0;
       while (i < s.length) {
         const c = s[i];
-        // 보통 문자열은 통째로 넘긴다 — 안의 `__zp_` 는 페이지 자신의 텍스트일 수 있다.
+        // Preserve string literals verbatim.
         if (c === '"' || c === "'") {
           const q = c;
           let j = i + 1;
@@ -354,10 +266,7 @@
           i = Math.min(j + 1, s.length);
           continue;
         }
-        // ★템플릿 리터럴은 통째로 넘기면 안 된다. `${…}` 안은 **코드**라
-        // 리라이트가 그대로 들어 있다 — github 실측에서 남은 8건이 전부 여기였다
-        // (`` `${__zp_get(globalThis,"window").innerWidth}px` ``). 리터럴 텍스트는
-        // 건드리지 않고 치환식 안쪽만 재귀로 되돌린다.
+        // Recursively unrewrite expressions inside template literal `${...}` substitutions.
         if (c === '`') {
           let j = i + 1;
           let buf = '`';
@@ -378,9 +287,9 @@
           i = j;
           continue;
         }
-        // The helper bindings a `with` body starts with (zp-rewriter with_helper_prefix): nothing of the page's.
+        // Strip the synthesized `with` block helper prologue.
         if (c === 'c' && s.startsWith(ZP_WITH_PROLOGUE, i)) { i += ZP_WITH_PROLOGUE.length; continue; }
-        // An inline-guarded member (zp-rewriter guard_claim), and the temps its function declares at its end.
+        // Strip inline member guards and trailing temporary variable declarations.
         if (c === '(' && s.startsWith('(__zp_t_', i)) {
           const g = zpSrcGuard(s, i);
           if (g) { out += g[0]; i = g[1]; continue; }
@@ -389,11 +298,7 @@
           const tail = /^\n;var __zp_t_\d+(?:,__zp_t_\d+)*;/.exec(s.slice(i, i + 8192));
           if (tail) { i += tail[0].length; continue; }
         }
-        // ★인라인 이벤트 핸들러(`<a onclick="…">`)는 래퍼로 감싸 두는데, 그
-        // 래퍼의 세 번째 인자가 **원본 속성 본문 그대로**다(리라이트는 호출
-        // 시점에 한다). 그래서 여기서는 정확한 복구가 된다. 래퍼가 붙인
-        // `return ` 도 같이 걷어낸다 — 브라우저가 보여 주는 본문에는 없다.
-        // (The executor is reached through ZP_EVENT_CALL_HEAD; the bare name is the older form.)
+        // Recover original inline event handler source from the third argument of __ZP_EXEC_EVENT.
         const evHead = c === '(' && s.startsWith(ZP_EVENT_CALL_HEAD, i) ? ZP_EVENT_CALL_HEAD.length : 0;
         if (c !== '_' && !evHead) { out += c; i++; continue; }
         const prev = i > 0 ? s[i - 1] : '';
@@ -412,10 +317,7 @@
             continue;
           }
         }
-        // ★루프 캡. `for(;;)` 와 `while(true)` 는 **둘 다** 계수기 붙은 for 로
-        // 바뀌므로 어느 쪽이 원본이었는지 알 수 없다. `for(;;)` 로 되돌린다 —
-        // 뜻은 같고, 표식은 사라진다. do-while 은 계수기 선언이 `do` 앞에
-        // 붙고 test 가 계수기 검사로 바뀌므로 그 둘을 각각 되돌린다.
+        // Restore loop-cap instrumentation (`__zp_lc_*`) to `for(;;)` or `while(true)`.
         const lcFor = /^__zp_lc_(\d+)=0;__zp_lc_\1\+\+<10000000;\)/.exec(s.slice(i));
         if (lcFor && /for\(let $/.test(out)) {
           out = out.replace(/for\(let $/, 'for(;;)');
@@ -471,10 +373,7 @@
     if (!proto || toStringMaskedPrototypes.has(proto)) return;
     const orig = w === root ? origToString : proto.toString;
     if (typeof orig !== 'function') return;
-    // Putting a page function's text back is a character scan with regexes (µs for a few lines, ms for a big function), and a
-    // challenge asks for the text of the same functions over and over (is it still a function of the page? does it say
-    // native code?): natively that is ~90 ns. A function's text never changes, so each answer is kept — by the function,
-    // then by the text (closures made from one source share it).
+    // Cache unrewritten source strings by function reference and source text.
     const unrewrittenByFn = newWeakMap();
     const unrewrittenByText = newMap();
     let unrewrittenChars = 0;
@@ -486,7 +385,6 @@
         const kept = unrewrittenByFn.get(this);
         if (kept !== undefined) return kept;
       }
-      // 우리가 가린 훅이 아니면 페이지 자신의 코드다 — 리라이트 흔적을 되돌린다.
       const text = nativeApply(orig, this, []);
       if (typeof text !== 'string' || (text.indexOf('__zp_') < 0 && text.indexOf('__ZP_EXEC_EVENT') < 0)) return text;
       let out = unrewrittenByText.get(text);
@@ -508,14 +406,8 @@
       toStringMaskedPrototypes.add(proto);
     } catch {}
   }
-  // Move replaced-class state from instance data properties onto PROTOTYPE
-  // accessors, the shape every native counterpart has. Writing `this.readyState
-  // = …` in a constructor then routes through the setter instead of creating an
-  // own property, so no call site changes. Two things break without this:
-  //   * `'readyState' in WebSocket.prototype` is false, and any library that
-  //     wraps `WebSocket.prototype.send` / patches an accessor silently no-ops;
-  //   * the prototype name count differs from a real browser (measured
-  //     2026-08-03: WebSocket 12 vs 17, EventSource 8 vs 11), a free proxy tell.
+  // Expose replacement class state as prototype accessors backed by `_zp*`
+  // instance slots to match native WebIDL prototype shapes.
   function mirrorNativeProto(proto, names, nativeProto) {
     if (!proto) return;
     for (const name of names) {
@@ -526,37 +418,15 @@
         nativeProto);
     }
   }
-  // Native XHR / WebSocket / EventSource INHERIT addEventListener,
-  // removeEventListener and dispatchEvent from EventTarget — they are not own
-  // properties of the class prototype. Defining them directly on each class
-  // prototype pushed every one of ours 3 names past the native count (measured
-  // 2026-08-03: XHR 28 vs 27, WebSocket 20 vs 17, EventSource 14 vs 11). Hang
-  // them off a single shared intermediate prototype and splice that into each
-  // class's chain instead: same lookup, same behaviour, and the own-property
-  // count now matches a real browser.
-  //
-  // `class X extends EventTarget` would be the exact native shape, but native
-  // dispatchEvent needs a branded EventTarget instance — that means
-  // Reflect.construct inside three constructors, a refactor with real breakage
-  // risk. This gets the observable shape right without touching event delivery.
-  // Give each replaced class the two brands a real Web IDL interface carries:
-  //   * `Ctor.name` — the build minifier renamed our constructors, so
-  //     `XMLHttpRequest.name` read "c" (WebSocket "f", EventSource "o",
-  //     Worker "t") where every browser reports the interface name. A one-token
-  //     equality check catches that; `String(ctor)` was already masked, which
-  //     made the mismatch easy to miss.
-  //   * `Symbol.toStringTag` — without it `Object.prototype.toString.call(xhr)`
-  //     returned "[object Object]" instead of "[object XMLHttpRequest]". That
-  //     is a fingerprint AND a functional break: type-dispatch helpers in the
-  //     wild switch on exactly this string.
+  // Set constructor `.name`, `Symbol.toStringTag`, and static interface
+  // constants to match native WebIDL class shapes.
   function brandLikeNative(ctor, proto, name) {
     try { if (ctor) Object.defineProperty(ctor, 'name', { value: name, configurable: true }); } catch {}
     try { if (proto) Object.defineProperty(proto, Symbol.toStringTag, { value: name, configurable: true }); } catch {}
     adoptNativeShape(ctor, proto, name);
   }
-  // The class this replaces — still the window's own while the replacement is being built — lends its shape: the constructor's
-  // length, the constants and static members the replacement lacks (`EventSource.CLOSED`, `RTCPeerConnection.generateCertificate`:
-  // a page that compares `readyState === EventSource.CLOSED` got `undefined`), and the length of each method it has.
+  // Copy constructor arity, static constants, and method lengths from the
+  // replaced native class.
   function adoptNativeShape(ctor, proto, name) {
     try {
       const d = Object.getOwnPropertyDescriptor(root, name);
@@ -590,22 +460,17 @@
       }
     } catch {}
   }
-  // D7: 타깃 오리진마다 SharedWorker 이름을 이 접두어로 스코프한다 — 없으면
-  // 프록시 오리진 하나를 공유하는 서로 다른 타깃 두 개가 **같은** SharedWorker
-  // 인스턴스를 붙잡는다(SharedWorker 는 realm 안에서 origin+name+url 로
-  // dedup). installStorageFacades 의 계산과 별개 함수지만 같은 FNV-1a 를
-  // virtualURL.origin 에 돌리므로 항상 같은 문자열이 나온다.
+  // Scope SharedWorker names by the FNV-1a hash of virtualURL.origin so
+  // distinct target origins sharing the physical proxy origin do not attach to
+  // the same SharedWorker instance.
   function sharedWorkerNamePrefix() {
     const key = virtualURL.origin;
     let h = 0x811c9dc5;
     for (let i = 0; i < key.length; i++) { h ^= key.charCodeAt(i); h = Math.imul(h, 16777619); }
     return 'zp:w:' + ('00000000' + (h >>> 0).toString(16)).slice(-8) + ':';
   }
-  // `new SharedWorker(url, options)` — options is `(DOMString or WorkerOptions)`
-  // and the name defaults to ''. Both wrappers used to write `prefix+'default'`
-  // for a missing name (so `new SharedWorker(u)` and `{name:'default'}` hit
-  // the SAME worker, and the worker saw self.name 'default' where Chrome shows
-  // ''), and spread a string argument into character indices, losing it.
+  // Normalize the string or dictionary second argument of
+  // `new SharedWorker(url, options)` and prepend the target-origin prefix.
   function prefixedSharedWorkerOptions(prefix, opts) {
     if (typeof opts === 'string') return { name: prefix + opts };
     const o = opts && typeof opts === 'object' ? Object.assign({}, opts) : {};
@@ -615,9 +480,9 @@
   let sharedEventTargetProto = null;
   function eventTargetProto() {
     if (sharedEventTargetProto) return sharedEventTargetProto;
-    // Rooted at EventTarget.prototype so `xhr instanceof EventTarget` is true,
-    // as it is natively (it was false). Our own methods below shadow the native
-    // ones, so nothing reaches the branded native implementations.
+    // Inherit from EventTarget.prototype so `instanceof EventTarget` holds
+    // while shadowing addEventListener, removeEventListener, and dispatchEvent
+    // on a shared intermediate prototype.
     let base = Object.prototype;
     try { if (typeof EventTarget === 'function' && EventTarget.prototype) base = EventTarget.prototype; } catch {}
     const p = Object.create(base);

@@ -51,9 +51,8 @@ test('the Chrome brand list follows Chromium\'s rule: it reproduces what real Ch
   assert.ok(header(154).includes('"Not A(Brand";v="99"'));
 });
 
-// ERRATA 81: the persona's high-entropy values — one object for getHighEntropyValues (page and workers) and the SW's
-// Sec-CH-UA-* hints. The full version was `<major>.0.0.0` (that exists only in the reduced UA string) and the members came
-// back in insertion order; Chrome resolves the build and the members alphabetically (measured).
+// High-entropy client hints shared between getHighEntropyValues and SW Sec-CH-UA-* headers.
+// Chrome resolves the full build version and returns requested keys in alphabetical order.
 test('the persona\'s high-entropy values: the build as the full version, the brands of sec-ch-ua, alphabetical members', () => {
   const ZP = loadCore();
   const major = /Chrome\/(\d+)\./.exec(ZP.TARGET_USER_AGENT)[1];

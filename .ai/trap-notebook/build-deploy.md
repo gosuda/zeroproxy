@@ -1,104 +1,99 @@
 # Build & Deploy Regressions
 
-역사적 범주별 요약이며 현재 승인 사양이 아니다. 측정·통과 기록은 당시 결과이며 새 실행은 없었다. 과거 제안 테스트·구현 공백은 미검증 이력이지 현재 TODO가 아니다.
+Historical category summaries, not current approved specifications. Recorded measurements and passing results reflect the state at the time of entry without new runtime execution. Past proposed tests and implementation gaps are unverified history, not active TODOs.
 
 <a id="2026-09-26--build-mjs-top-level-await-tdz"></a>
-## 2026-09-26 — build.mjs top-level await 의 TDZ
+## 2026-09-26: TDZ in `build.mjs` top-level `await`
 
-- 원인: `readMembraneSource()`가 참조하는 `const membraneDir` 을 파일 하단 헬퍼 구역에 선언 — `await buildWeb()`(line ~48)가 `const` 초기화 전에 실행돼 `Cannot access before initialization`.
-- 규칙: build.mjs 에서 top-level `await` (라인 ~48의 빌드 실행) **보다 아래에** `const/let` 을 두면 항상 TDZ. 빌드에 필요한 경로 상수는 `webSrc` 옆 파일 상단으로.
-- 검출: `node scripts/build.mjs --web-only` 가 즉시 ReferenceError.
+- Cause: `const membraneDir` (referenced by `readMembraneSource()`) was declared in the helper section at the bottom of the file, so `await buildWeb()` (around line 48) ran before `const` initialization and threw `Cannot access before initialization`.
+- Rule: Placing `const` or `let` below a top-level `await` in `build.mjs` triggers a TDZ error. Declare build path constants at the top of the file next to `webSrc`.
+- Detection: `node scripts/build.mjs --web-only` immediately fails with a `ReferenceError`.
 
-<a id="2026-05-30--wasm-opt--oz-가-feature-flags-없으면-validation-실패"></a>
-## 2026-05-30 — `wasm-opt` feature flags 누락
+<a id="2026-05-30-wasm-opt-oz-feature-flags-without-validation-failure"></a>
+## 2026-05-30: Missing `wasm-opt` feature flags
 
-- 원인: rustc 1.82+의 wasm 기본 기능을 보수적인 binaryen이 거부해 `-Oz` validation 실패, 출력 없이 최적화만 skip.
-- 수정: [scripts/build.mjs](../../scripts/build.mjs) `buildRustBundle`에 `--enable-bulk-memory`, `--enable-bulk-memory-opt`, `--enable-nontrapping-float-to-int`, `--enable-sign-ext`, `--enable-mutable-globals`, `--enable-multivalue`, `--enable-reference-types` 명시. rustc 기본값 변경 시 flags 재검토.
-- 당시 두 wasm 모두 통과; 크기·wrapper hot path 개선, Rust LTO 내부 경로 변화는 미미. `npm i -D binaryen` 설치 권장; 미설치는 `tryRunOptional`로 빌드 유지.
+- Cause: Binaryen rejected default WASM features emitted by `rustc` 1.82+, causing `-Oz` validation to fail and skipping optimization.
+- Fix: Explicitly pass `--enable-bulk-memory`, `--enable-bulk-memory-opt`, `--enable-nontrapping-float-to-int`, `--enable-sign-ext`, `--enable-mutable-globals`, `--enable-multivalue`, and `--enable-reference-types` in `buildRustBundle` in [scripts/build.mjs](../../scripts/build.mjs). Revisit these flags when `rustc` defaults change.
+- Status at the time: Both WASM bundles passed; size and wrapper hot paths improved, while internal Rust LTO paths showed minimal change. Installing `npm i -D binaryen` is recommended; `tryRunOptional` keeps the build working when binaryen is absent.
 
-<a id="2026-05-29--upstream-connection-pool-누락"></a>
-## 2026-05-29 — Upstream pool 누락
+<a id="2026-05-29-upstream-connection-pool-missing"></a>
+## 2026-05-29: Missing upstream connection pool
 
-- 원인: [cmd/zeroproxy-server/relay.go](../../cmd/zeroproxy-server/relay.go) `bridgeRelayWS`의 수동 HTTP write/read가 WS마다 TCP/TLS/SOCKS5 연결을 새로 생성.
-- 수정: `poolForDial(dial)`로 direct/Tor별 `http.Transport` 캐시, `RoundTrip` 사용. 설정은 `MaxIdleConnsPerHost=16`, `MaxIdleConns=200`, `IdleConnTimeout=90s`, `ForceAttemptHTTP2=true`, `DisableCompression=true`(SW가 encoding 처리).
-- 당시 서버측만 pool, client→server는 1 WS=1 HTTP. dial counter 재사용 테스트는 당시 제안·미검증; client multiplex는 별개였다.
+- Cause: Manual HTTP read/write in `bridgeRelayWS` in [cmd/zeroproxy-server/relay.go](../../cmd/zeroproxy-server/relay.go) opened a new TCP/TLS/SOCKS5 connection for every WebSocket request.
+- Fix: Cache `http.Transport` instances per direct/Tor dialer via `poolForDial(dial)` and use `RoundTrip`. Configuration sets `MaxIdleConnsPerHost=16`, `MaxIdleConns=200`, `IdleConnTimeout=90s`, `ForceAttemptHTTP2=true`, and `DisableCompression=true` (the Service Worker handles encoding).
+- Status at the time: Pooling applied only on the server side; client-to-server transport still used one WebSocket per HTTP request. A dial-counter reuse test was proposed at the time but unverified; client multiplexing was tracked separately.
 
-<a id="2026-05-29--서버--web-인자-함정"></a>
-## 2026-05-29 — 서버 `-web` 오지정
+<a id="2026-05-29-server-web-arg-trap"></a>
+## 2026-05-29: Misconfigured server `-web` flag
 
-- 원인: `-web web`은 소스를 가리켜 `dist/web/__zp/`의 wasm-bindgen 산출물을 못 찾음. `os.Open` 실패→503→SW controller 부재.
-- 규칙: `-web dist/web` 또는 절대 경로 사용; Windows/한글 경로 혼동에는 `-web "$(realpath dist/web)"`.
-- 시작 시 `__zp/zp_bundle_sw.js` 확인 assertion은 당시 제안·미검증.
+- Cause: Passing `-web web` points to the source tree instead of the `wasm-bindgen` output under `dist/web/__zp/`. Failed `os.Open` calls result in 503 responses and a missing Service Worker controller.
+- Rule: Pass `-web dist/web` or an absolute path; use `-web "$(realpath dist/web)"` to avoid Windows or non-ASCII path resolution issues.
+- Status at the time: Asserting the presence of `__zp/zp_bundle_sw.js` at startup was proposed but unverified.
 
-<a id="2026-05-29--windows-좀비-zeroproxy-serverexe"></a>
-## 2026-05-29 — Windows 좀비 서버
+<a id="2026-05-29-windows-zombie-zeroproxy-serverexe"></a>
+## 2026-05-29: Zombie server processes on Windows
 
-- 원인: bash `pkill`이 nohup 자식 등을 남겨 새 서버 bind 실패.
-- 회피: `tasklist | grep zeroproxy-server` 확인 후 `taskkill //F //IM zeroproxy-server.exe`; 명시적 `//PID <pid>` 종료가 가장 안전.
-- 상태: 환경 함정으로 기록, 자동 회귀 가드 없음.
+- Cause: Bash `pkill` left detached `nohup` child processes running, causing port bind failures on the next server start.
+- Workaround: Check running processes with `tasklist | grep zeroproxy-server`, then run `taskkill //F //IM zeroproxy-server.exe`; terminating by explicit `//PID <pid>` is safest.
+- Status: Recorded as an environment trap with no automated regression guard.
 
-<a id="2026-05-29--두-개의-zeroproxy-serverexe-가-같은-포트-listen"></a>
-## 2026-05-29 — 같은 포트 이중 listen
+<a id="2026-05-29-two-zeroproxy-serverexe-same-port-listen"></a>
+## 2026-05-29: Dual listeners on the same port
 
-- 원인: Windows에서 옛 `127.0.0.1:18080` 서버와 새 `0.0.0.0:18080` 서버가 함께 bind되어 응답 혼재.
-- 회피: 재시작 전 `taskkill //F //IM zeroproxy-server.exe`, 구체적 IP `127.0.0.1:18080` 사용.
-- 증거: 당시 `netstat`에 두 LISTENING 항목, curl 응답 불일치.
+- Cause: On Windows, an older server bound to `127.0.0.1:18080` and a new server bound to `0.0.0.0:18080` listened concurrently and served mixed responses.
+- Workaround: Run `taskkill //F //IM zeroproxy-server.exe` before restarting and bind to the explicit IP `127.0.0.1:18080`.
+- Evidence: `netstat` showed two `LISTENING` entries at the time, with inconsistent `curl` responses.
 
-<a id="2026-08-20--닫음-taskweaver-start-가-파이프-호출자에게-안-끝나던-문제-0161"></a>
-## 2026-08-20 — taskweaver `start` 파이프 종료 수정
+<a id="2026-08-20-closed-taskweaver-start-call-0161"></a>
+## 2026-08-20: `taskweaver start` pipe hang fix
 
-- 원인: Windows `CreateProcessW(bInheritHandles=TRUE)`가 부모의 상속 가능 핸들을 데몬에 복제해 stdout 파이프 EOF를 막음(rust-lang/rust#38227).
-- 수정: 0.16.1 (`c99f09e`)에서 spawn 직전 CLI std 핸들 3개의 `HANDLE_FLAG_INHERIT` 해제. CLI 종료·stderr·WebView2 자식 원인은 배제, graceful stop은 정상이었다.
-- 당시 `start | cat`, `OUT=$(start …)` 정상 종료, 매트릭스 전체·static-policy 통과, 테이프 유실 없음. 리다이렉션 백그라운드+`list` 우회는 폐기; `.ai/dogfood/wtm/*.sh`에는 잔존. 핸드오프에서는 관측과 가설을 구분했다.
+- Cause: Windows `CreateProcessW(bInheritHandles=TRUE)` duplicated inheritable parent handles into the daemon process, preventing stdout pipe EOF (`rust-lang/rust#38227`).
+- Fix: Version 0.16.1 (`c99f09e`) clears `HANDLE_FLAG_INHERIT` on the three CLI standard handles immediately before spawning. CLI exit, stderr, and WebView2 child processes were ruled out as causes; graceful stop worked normally.
+- Status at the time: `start | cat` and `OUT=$(start ...)` exited cleanly, the full matrix and `static-policy` passed, and no tape data was lost. Background redirection with `list` workarounds was retired, though remnants stayed in `.ai/dogfood/wtm/*.sh`. Handoff notes separated observations from hypotheses.
 
-<a id="2026-08-21--keep-in-sync-는-부탁이지-강제가-아니다"></a>
-## 2026-08-21 — 오류 코드 목록 불일치
+<a id="2026-08-21-keep-in-sync-is-a-request-not-enforcement"></a>
+## 2026-08-21: Error code list drift across languages
 
-- 원인: `crates/zp-shared/src/errors.rs`의 “keep in sync” 주석과 달리 JS/Rust/Go 및 별도 테스트 배열이 분기. Rust `SUBMISSION_EXPIRED` 누락, `main.go:233`의 `RTC_GATEWAY_UNAVAILABLE`을 `sanitizeCode`가 `POLICY_BLOCKED`로 강등해 SW 통제 여부별 페이지 차이 발생.
-- 수정: `testdata/error_codes.json`을 단일 소스로 세 언어 대조, Rust는 순서도 검사. 동기화 부탁 대신 fixture로 강제.
-- 가드 도입 때 `TARGET_HTTP_FAILED`도 전 목록에서 빠져 `safeError`가 네트워크/TLS 실패를 정책 차단으로 바꾸던 문제 발견; `sw.js` 주석만으로는 방지되지 않았다.
+- Cause: Despite the "keep in sync" comment in `crates/zp-shared/src/errors.rs`, error code lists in JS, Rust, Go, and separate test arrays diverged. Rust missed `SUBMISSION_EXPIRED`, and `sanitizeCode` downgraded `RTC_GATEWAY_UNAVAILABLE` (`main.go:233`) to `POLICY_BLOCKED`, causing different error pages depending on Service Worker control.
+- Fix: Compare all three languages against `testdata/error_codes.json` as the single source of truth, including ordering checks in Rust. Enforce synchronization with a shared fixture rather than comments.
+- Discovery: Adding the guard revealed that `TARGET_HTTP_FAILED` was also missing from every list, causing `safeError` to report network and TLS failures as policy blocks; the comment in `sw.js` did not prevent drift.
 
-## <a id="execjs-문맥"></a>`taskweaver wait` 인자 누락 (2026-08-26)
+## <a id="execjs-context"></a>Missing `taskweaver wait` arguments (2026-08-26)
 
-- 원인: 필수 `--id` 없는 `wait`가 즉시 오류 종료하고 stderr 폐기로 숨겨짐. CNN 프레임 차이는 실제 대기 없는 러너 관측이므로 광고 회귀나 exec-js 문맥 규칙의 증거가 아니다; CNN 자체 해결을 뜻하지 않는다.
-- 규칙: 호출에 `-i zp`, elapsed·종료 코드 확인, stderr 보존. SW 삭제 직후 제출도 controller 부재로 무효였으므로 `navigate → clear-site-data → navigate → 대기`.
-- 후속 정정: 0.17 `wait-navigation`은 같은 URL 재탐색도 센티널 소멸로 감지. **클릭 전에** 실행해 센티널 설치를 기다려야 하며, 클릭 후에는 `SENTINEL_PLANT_FAILED`. 0.17.0의 `--to`는 URL이 맞아도 실패해 사용 금지로 기록.
-- 당시 문서 교체 실측은 3~5초. 종전 20~30초 추정은 잘못된 러너 결과로 폐기; exec-js A/B 역시 독립 검증되지 않았다.
+- Cause: Calling `wait` without the required `--id` flag exited immediately with an error that was hidden by discarding stderr. Observed CNN frame differences came from runner invocations that never waited, so they were neither evidence of ad regressions nor proof of `exec-js` context rules, and did not indicate that CNN itself was fixed.
+- Rule: Pass `-i zp`, check elapsed time and exit codes, and preserve stderr. Submitting immediately after Service Worker removal also failed without a controller; run `navigate`, `clear-site-data`, `navigate`, and wait in sequence.
+- Follow-up correction: Version 0.17 `wait-navigation` detects same-URL re-navigation via sentinel destruction. Start it **before clicking** so the sentinel is planted; starting it after clicking fails with `SENTINEL_PLANT_FAILED`. The `--to` flag in 0.17.0 failed even on matching URLs and was marked do-not-use.
+- Status at the time: Measured document replacement took 3 to 5 seconds. Earlier 20 to 30 second estimates were discarded as invalid runner artifacts, and `exec-js` A/B results remained unverified.
 
-## <a id="빌드-clean-이-유일본을-지운다"></a>build clean이 유일 산출물 삭제 (2026-09-04)
+## <a id="build-clean-deletes-sole-copy"></a>`build clean` deletes sole build artifacts (2026-09-04)
 
-- 원인: 프로필 `PIPE_TAIL_USER`→`hsng9` 변경으로 툴체인 소실. `npm run build`가 `dist/`를 먼저 지운 뒤 Go 단계에서 실패해 `dist/zeroproxy-server.exe`와 브라우저 검증 수단까지 잃음.
-- 규칙: clean 전에 `go`, `wasm-bindgen`, `cargo`, `node` 확인. 당시 taskweaver는 `~/.cargo/bin`에 복사, Go는 사용자 설치; `wasm-bindgen-cli --version 0.2.122 --locked`는 Cargo.lock 버전과 반드시 일치.
-- 별도 함정: 설치 후에도 셸 PATH는 낡을 수 있음. 파일시스템·`[Environment]::GetEnvironmentVariable("Path","Machine")` 확인 또는 `/c/Program Files/Go/bin` 추가. 백그라운드 빌드는 기존 파일 존재로 완료 판단하면 이후 clean에 지워지므로 **작업 완료 알림**을 기다린다.
-- 변종 (2026-09-10): 툴체인이 다 있어도 **실행 중인 서버가 exe 를 잠그면** 같은 사고가 난다. clean 이 `dist/web/*` 를 먼저 지우고 `dist/zeroproxy-server.exe` unlink 에서 `EPERM` 으로 죽어, dist 가 반만 남는다. 빌드 전에 `Get-Process zeroproxy-server | Stop-Process`.
-- 별도 함정: `npm run build 2>&1 | tail` 은 **tail 의 종료 코드**를 돌려주므로 실패한 빌드가 `exit 0` 으로 보인다. `set -o pipefail` 을 쓰거나 파이프 없이 실행한다. 이번에 실제로 실패를 성공으로 한 번 보고했다.
-- **재발 (2026-10-02):** 다른 터미널의 `rustup upgrade stable` 이 도는 동안 `cargo` 가 사라졌고(`the 'cargo.exe' binary … is not applicable`) `npm run build` 는 `dist` 를 지운 뒤 죽었다 — 서버·웹·WASM 이 한꺼번에 없어졌다. `target/` 의 컴파일된 WASM 은 Rust 소스가 안 바뀌어 유효했으므로, 아무것도 안 하는 `cargo.exe`(Go 로 5줄)를 PATH 앞에 두고 한 번 빌드해 복구했다 — **소스 신선도를 먼저 확인한 경우에만**. 툴체인이 돌아온 뒤 정식 빌드로 다시 만들었다. 규칙: 빌드 전에 `cargo --version` 이 응답하는지 본다.
-## <a id="worktree-junction-node-modules"></a>옛 커밋을 빌드하려고 만든 worktree 의 node_modules junction 을 `worktree remove --force` 하면 저장소의 node_modules 가 비워진다 (2026-10-02)
+- Cause: Switching user profiles from `PIPE_TAIL_USER` to `hsng9` lost toolchain paths. `npm run build` deleted `dist/` first and then failed at the Go step, wiping `dist/zeroproxy-server.exe` and breaking browser verification.
+- Rule: Verify `go`, `wasm-bindgen`, `cargo`, and `node` before running a clean build. At the time, `taskweaver` was copied to `~/.cargo/bin` and Go was installed per user; `wasm-bindgen-cli --version 0.2.122 --locked` must match the `Cargo.lock` version.
+- Related trap: Shell `PATH` values can remain stale after installation. Check the filesystem and `[Environment]::GetEnvironmentVariable("Path","Machine")`, or add `/c/Program Files/Go/bin`. Do not judge background builds complete by checking pre-existing output files that a subsequent clean step will delete; wait for task completion notifications.
+- Variant (2026-09-10): When a running server locks the executable, clean deletes `dist/web/*` first and aborts with `EPERM` when unlinking `dist/zeroproxy-server.exe`, leaving a partial `dist/`. Run `Get-Process zeroproxy-server | Stop-Process` before building.
+- Related trap: `npm run build 2>&1 | tail` returns the exit code of `tail`, making a failed build appear as `exit 0`. Enable `set -o pipefail` or run without piping.
+- Recurrence (2026-10-02): A concurrent `rustup upgrade stable` in another terminal temporarily removed `cargo` (`the 'cargo.exe' binary ... is not applicable`), causing `npm run build` to abort after wiping `dist`. Because the compiled WASM in `target/` remained valid with unchanged Rust sources, the build was recovered by verifying source freshness and placing a no-op `cargo.exe` stub at the front of `PATH`, then rebuilding normally once the toolchain upgrade finished. Always verify `cargo --version` before building.
 
-- **증상:** 이 변경 전 빌드와 비교하려고 `git worktree add <tmp> <sha>` 후 `node_modules` 를 저장소 것으로 **junction** 해 `scripts/build.mjs`(esbuild ESM import 라 `NODE_PATH` 가 안 먹는다)를 돌렸다. 정리하며 `git worktree remove --force` 를 했더니 junction 을 따라가 **저장소의 `node_modules` 내용이 지워졌다**(빈 디렉터리만 남음). 링크를 먼저 끊으려던 `cmd /c rmdir` 는 따옴표 때문에 조용히 실패했는데, 확인 없이 강제 삭제를 했다.
-- **복구:** `npm ci`(락파일 그대로 — 추적 파일은 잃지 않았다). 새 npm 이 `esbuild`·`puppeteer` 의 postinstall 을 막는다는 경고를 내지만 esbuild 는 플랫폼 패키지로, puppeteer 는 캐시된 Chrome 으로 그대로 돌았다(`test:js` 126, wasm 13, e2e 196/196 재확인).
-- **규칙:** 옛 빌드가 필요하면 `node_modules` 를 **링크하지 말고** 임시 디렉터리에서 `git archive <sha> | tar -x` 후 `npm ci`(또는 복사)로 따로 둔다. 어쩔 수 없이 junction 을 쓰면 `ls` 로 링크가 **사라진 것을 확인한 뒤**에야 worktree 를 지운다. `--force` 는 링크를 따라간다고 가정한다.
-## <a id="죽은-브라우저가-전항목-통과"></a>브라우저가 죽은 채로 13분을 돌렸고 rendercheck 는 4/4 OK 라고 했다 (2026-09-10)
+## <a id="worktree-junction-node-modules"></a>Running `worktree remove --force` on a worktree with a `node_modules` junction wipes the main repository `node_modules` (2026-10-02)
 
-taskweaver 데몬이 사라진 줄 모르고(`taskweaver list` → `count: 0`) 빌드 →
-측정 → rendercheck 배치를 13분 돌렸다. 결과:
+- Symptom: To compare against an older commit, `git worktree add <tmp> <sha>` was created with `node_modules` linked to the main repository via a directory junction before running `scripts/build.mjs`. During cleanup, `git worktree remove --force` followed the junction and deleted the contents of the main repository `node_modules`. Force removal was run without verifying that `cmd /c rmdir` had unlinked the junction after a quoting error caused `rmdir` to fail.
+- Recovery: Restored dependencies with `npm ci` and re-verified `test:js` (126), WASM (13), and E2E (196/196).
+- Rule: When building an older commit, do not link `node_modules`; extract the tree into a temporary directory with `git archive <sha> | tar -x` and run `npm ci` (or copy `node_modules`). If a junction is used, verify with `ls` that the link is removed before deleting the worktree.
+
+## <a id="dead-browser-passes-all-checks"></a>`rendercheck` reported 4/4 OK after running for 13 minutes with a dead browser (2026-09-10)
+
+Running the build, measurement, and `rendercheck` batch while the `taskweaver` daemon was stopped (`taskweaver list` returned `count: 0`) produced:
 
 ```
 https://www.naver.com/ | title=? | raw=? csp=? err=?
     height ? / ? = ?%   els ? / ?   aboveFold ? / ?   styleEntities ?  => OK
 ```
 
-**네 사이트 전부 `=> OK`.** 판정 로직이 `?` 값을 전부 건너뛰게 되어 있어서
-어떤 플래그도 발화하지 않았고, 마지막에 `[ -z "$FLAG" ] && FLAG=" OK"` 가
-붙었다. 즉 **아무것도 못 잰 것이 전부 통과로 읽혔다.**
+All four sites printed `=> OK`. The verdict logic skipped every `?` value and appended `[ -z "$FLAG" ] && FLAG=" OK"` at the end, treating unmeasured runs as passing.
 
-이 저장소에서 같은 부류를 이미 두 번 적어 뒀는데(빈 탐지기 결과를 성공으로 읽음,
-`dump-recording` 이 안 armed 인데 빈 테이프를 조용한 페이지로 읽음) 오라클
-쪽에는 안 걸려 있었다.
+### Fix
 
-### 고침
-
-판정 맨 앞에 "쟀는가" 를 둔다. 측정값 중 하나라도 비었으면 `NO_MEASUREMENT`.
+Check that all measurement values exist before evaluating thresholds. Mark the run as `NO_MEASUREMENT` if any metric is empty or `?`.
 
 ```sh
 for V in "$PH" "$CH" "$PE" "$CE" "$PA" "$CA"; do
@@ -106,28 +101,24 @@ for V in "$PH" "$CH" "$PE" "$CE" "$PA" "$CA"; do
 done
 ```
 
-양성 대조로 확인했다: 데몬을 내리고 돌리면 `=> NO_MEASUREMENT`, 올리고 돌리면
-`=> OK`.
+Verified that the script returns `=> NO_MEASUREMENT` when the daemon is stopped and `=> OK` when the daemon is running.
 
-### 규칙
+### Rules
 
-- 긴 배치를 걸기 전에 `taskweaver list` 로 `id: "zp"` 와 `renderer_ok` 를
-  **먼저** 확인한다. 데몬은 조용히 사라진다.
-- 측정 기반 판정기에는 반드시 **"안 쟀음" 상태**를 둔다. `OK` 와 `모름` 을
-  같은 값으로 접으면 그 도구는 고장난 순간부터 영원히 통과를 보고한다.
+- Check `taskweaver list` for `id: "zp"` and `renderer_ok` before running batch measurements.
+- Separate the unmeasured state (`NO_MEASUREMENT`) from `OK` in measurement evaluators so tool failures never report false passes.
 
-## <a id="e2e-런처-대기"></a>CI 에서 WT 워커 e2e 가 한 번 105초 걸려 실패했다 — 같은 커밋 재실행은 통과 (2026-10-01)
+## <a id="e2e-launcher-wait"></a>WebTransport worker E2E timed out once after 105s in CI and passed on rerun of the same commit (2026-10-01)
 
-- **증상:** `wt-gateway.test.js` 의 worker 변형만 `(no result)`. 내비게이션 대기 45초 + 결과 대기 60초가 둘 다 소진됐고, 게이트웨이 로그에는 그 세션이 없었다. 같은 job 의 page 변형과 나머지 190개는 통과. 다음 커밋은 통과했다.
-- **가설(확정 아님):** 런처는 서비스 워커 런타임이 준비될 때까지 Open 을 비활성으로 두고 제출 핸들러도 "Runtime is still loading" 으로 즉시 반환한다. 테스트가 새 브라우저 컨텍스트에서 그걸 기다리지 않고 바로 눌렀다 — 느린 러너에서는 클릭이 무시돼 내비게이션도, 게이트웨이 세션도 없다. 증상과 맞지만 **로컬에서는 재현하지 못했다**(코어 16개를 모두 점유한 상태에서 옛 테스트를 두 번 돌려도 통과).
-- **조치:** 런처 흐름을 `test/e2e/launcher.js` 한 곳으로 모았다 — Open 이 활성화될 때까지 기다리고(못 기다리면 런처 문구와 함께 실패), 내비게이션 여부를 돌려준다. WT 테스트는 실패 시 페이지 URL·본문·`pageerror`·콘솔·실패한 요청·워커 생성 여부를 메시지에 싣는다. 다음에 같은 실패가 나면 어느 단계에서 멈췄는지 읽힌다.
-- **규칙:** "결과 없음" 한 줄로 끝나는 e2e 단언은 만들지 않는다 — 어느 단계에서 멈췄는지(로드/워커 생성/게이트웨이)가 메시지에 있어야 한다. CI 한 번 빨개졌다고 같은 커밋 재실행(`gh run rerun --failed`)을 건너뛰지 말 것 — 회귀와 플레이크를 가르는 가장 싼 실험이다.
+- Symptom: Only the worker variant in `wt-gateway.test.js` failed with `(no result)`. Both the 45s navigation wait and the 60s result wait expired, and gateway logs showed no session. The page variant and the other 190 tests in the same job passed, and rerunning the commit passed.
+- Hypothesis (unconfirmed): The launcher disables the Open button until the Service Worker runtime is ready, and its submit handler returns early with `"Runtime is still loading"`. Clicking without waiting for button activation in a fresh browser context on a slow runner can skip navigation and gateway session startup (not reproduced locally).
+- Action: Consolidated the launcher flow into `test/e2e/launcher.js` to wait until the Open button is enabled and return whether navigation occurred. On failure, WebTransport tests now log the page URL, body, `pageerror`, console output, failed requests, and worker creation state.
+- Rule: Include the exact stage that stalled (page load, worker creation, or gateway) in E2E assertion failure messages. On a single CI failure, rerun the same commit (`gh run rerun --failed`) first to check for flake before debugging.
 
-## <a id="e2e-goto-대기"></a>새 페이지를 여는 e2e 헬퍼에서 `page.goto` 가 간헐적으로 안 끝났다 — 페이지는 이미 complete 였다 (2026-10-02)
+## <a id="e2e-goto-wait"></a>`page.goto` intermittently hung in the E2E new-page helper even though the page was already complete (2026-10-02)
 
-- **증상:** 프레임을 많이 만드는 새 e2e 서브테스트가 실행의 약 절반에서 `fresh.goto(프록시)` 에 멈춰 E1 블록 시한(420 초)까지 갔다. 같은 코드가 다른 실행에서는 30 초에 통과했다. 로그에는 단언 실패도 프로토콜 오류도 없고 "시간 초과" 한 줄뿐이었다.
-- **측정:** 멈춘 동안 스크래치 사본에 `--remote-debugging-port` 를 열어 붙어 봤다. 새 페이지는 `readyState: complete`, `ZeroProxy` 셸, SW 제어 중이었다 — `goto` 만 안 끝났다. 요청 로그에는 `/zp/` 요청만 있고 그 응답 이벤트가 없었다. 서버는 `curl` 에 즉시 답했다(서버 문제가 아니다).
-- **원인(추정):** SW 가 응답하는 셸 내비게이션에서 puppeteer 의 lifecycle 대기가 어긋난다. 정확한 지점은 가려내지 못했다.
-- **조치:** 런처 헬퍼(`test/e2e/launcher.js`)가 `goto` 를 기다리지 않고 런처 버튼이 켜지길(= 런타임 준비) 기다린다. 새 테스트의 페이지 헬퍼는 그 헬퍼를 쓴다. 고친 뒤 같은 테스트가 스크래치 6회 연속, 전체 e2e 두 번 통과했다.
-- **규칙:** e2e 헬퍼는 `goto` 의 완료가 아니라 **페이지가 말하는 준비 상태**를 기다린다. 오래 멈추는데 오류가 없으면 서버·브라우저 어느 쪽인지부터 가른다 — 서버에 `curl`, 브라우저에 디버깅 포트.
-
+- Symptom: Multi-frame E2E subtests intermittently hung inside `fresh.goto(proxy)` until hitting the 420s timeout.
+- Measurement: Inspecting the hung browser via `--remote-debugging-port` showed the new page at `readyState: complete` with the `ZeroProxy` shell and active Service Worker control, while only `goto` failed to resolve. Request logs showed the `/zp/` request without a matching response event, while the server answered `curl` immediately.
+- Cause (inferred): Puppeteer lifecycle waiting can miss completion on shell navigations answered by the Service Worker.
+- Action: Updated the launcher helper (`test/e2e/launcher.js`) to wait for launcher button activation (runtime readiness) instead of waiting for `goto` resolution. Verified 6 consecutive scratch runs and 2 consecutive full E2E runs passing.
+- Rule: Wait for observable page readiness in E2E helpers rather than `goto` promise completion. When a silent hang occurs, check the server (`curl`) and browser (`--remote-debugging-port`) states separately first.

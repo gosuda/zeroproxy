@@ -1,32 +1,19 @@
-// 내비게이션 축 매트릭스 — 페이지가 **문서째** 타깃으로 나갈 수 있는 경로를
-// 전수 나열한다.
-//
-// 왜 별도 매트릭스인가: 구멍 매트릭스는 판정축이 "바이트가 타깃에 도착했는가"
-// 라서 **서브리소스 전용**이다. 최상위 내비게이션은 페이지가 떠나 버리므로 같은
-// 표로 못 잰다. 축이 없으면 칸도 없고, 칸이 없으면 영영 안 나온다 — 2026-08-20
-// 에 `<meta http-equiv=refresh>` 가 정확히 그렇게 숨어 있었다(진짜 탈출이었다).
-//
-// 판정: 로드 후 **브라우저가 어디에 있는가**.
-//   프록시 오리진 밖 = 탈출 (그 뒤 모든 요청이 맨몸이다)
-//   프록시 오리진 안 = ok  (타깃 바이트는 우리를 거쳐 온다)
+// Navigation matrix fixture server testing top-level and child-frame document navigation vectors.
 import http from 'node:http';
 
 const ORIGIN = 18087, LAND = 18086;
 let hits = { [ORIGIN]: [], [LAND]: [] };
 const landURL = id => `http://127.0.0.1:${LAND}/landed/${id}`;
 
-// code 는 문서 안에서 실행되는 스크립트. L 은 착지 URL.
 const CASES = [];
 const C = (id, html) => CASES.push({ id, html });
 
-// ── 마크업이 스스로 내비게이션하는 것 ──────────────────────────────────
+// Markup-driven top-level navigations.
 C('n1-meta-refresh', id => `<meta http-equiv="refresh" content="0;url=${landURL(id)}">`);
 C('n2-meta-refresh-quoted', id => `<meta http-equiv="REFRESH" content="0; URL='${landURL(id)}'">`);
-// `<base>` 는 그 문서의 **모든 상대 URL 해석 기준**을 바꾼다. 살아남으면
-// 상대 링크 한 번에 타깃 오리진으로 나간다.
 C('n3-base-href', id => `<base href="http://127.0.0.1:${LAND}/"><a id="go" href="landed/${id}">go</a><script>document.getElementById('go').click()</script>`);
 
-// ── 스크립트가 내비게이션하는 것 ───────────────────────────────────────
+// Script-driven top-level navigations.
 C('n4-location-href', id => `<script>location.href=${JSON.stringify(landURL(id))}</script>`);
 C('n5-location-replace', id => `<script>location.replace(${JSON.stringify(landURL(id))})</script>`);
 C('n6-location-assign', id => `<script>location.assign(${JSON.stringify(landURL(id))})</script>`);
@@ -35,13 +22,7 @@ C('n8-anchor-click', id => `<a id="go" href="${landURL(id)}">go</a><script>docum
 C('n9-form-submit', id => `<form id="f" method="GET" action="${landURL(id)}"></form><script>document.getElementById('f').submit()</script>`);
 C('n10-window-open', id => `<script>window.open(${JSON.stringify(landURL(id))},'_self')</script>`);
 
-// ── 프레임 내비게이션 축 ────────────────────────────────────────────────
-// 최상위 축과 판정이 다르다: **자식 프레임**이 프록시 밖으로 나가는가.
-// 프레임은 페이지가 안 떠나므로 최상위 표에서는 절대 안 잡힌다 — 또 하나의
-// "축이 없어서 칸도 없던" 자리다.
-//
-// `_top`/`_parent`/`_blank` 타겟은 자식이 **부모나 새 창**을 끌고 나가는
-// 경로다. 자식만 보면 놓치므로 테이프의 직접 요청도 함께 본다.
+// Child-frame and target-attribute navigation cases.
 const FRAME_CASES = [];
 const F = (id, html) => FRAME_CASES.push({ id, html });
 
@@ -54,7 +35,6 @@ F('f6-anchor-target-top', id => `<a id="go" target="_top" href="${landURL(id)}">
 F('f7-form-target-top', id => `<form id="f" target="_top" method="GET" action="${landURL(id)}"></form><script>document.getElementById('f').submit()</script>`);
 F('f8-window-open-blank', id => `<script>window.open(${JSON.stringify(landURL(id))},'_blank')</script>`);
 F('f9-base-target', id => `<base target="_blank"><a id="go" href="${landURL(id)}">go</a><script>document.getElementById('go').click()</script>`);
-// 프레임 안의 meta refresh — 최상위에서 막혔다고 프레임에서도 막혔다는 보장은 없다.
 F('f10-frame-meta-refresh', id => `<iframe id="t" srcdoc='<meta http-equiv="refresh" content="0;url=${landURL(id)}">'></iframe>`);
 
 function framePage(c) {
@@ -81,9 +61,7 @@ function mk(port) {
       ]));
     }
     hits[port].push(u);
-    // ★`Refresh:` 는 비표준이지만 크롬이 지원하는 **헤더판 meta refresh** 다.
-    // 마크업이 아니라 응답 헤더로 오므로 htmltx 가 보지 못한다 — SW 의 헤더
-    // 정책이 걷어내야 하는 자리다.
+    // HTTP `Refresh` response header (must be stripped by the service worker header policy).
     if (u.startsWith('/nav/n11-refresh-header')) {
       res.writeHead(200, {
         'content-type': 'text/html; charset=utf-8',
@@ -92,20 +70,10 @@ function mk(port) {
       });
       return res.end('<!doctype html><meta charset="utf-8"><title>nav-n11</title><p>header refresh</p>');
     }
-    // 서버가 타깃 오리진으로 3xx 를 준다. 트랜스포트가 따라가되 결과는 여전히
-    // 프록시 오리진이어야 한다.
-    // 6홉 체인. 마지막 홉의 Location 은 **절대 URL** 이라, 프록시가 상한에서
-    // 손을 떼고 그 3xx 를 넘기면 브라우저가 착지 오리진으로 나간다.
+    // 60-hop redirect chain ending in an external `Location` URL: verifies that
+    // exceeding the redirect limit does not forward a raw 3xx `Location` to the browser.
     if (u.startsWith('/nav/n13-redirect-limit')) {
       const hop = Number(u.split('?hop=')[1] || '0');
-      // 홉 수는 **양쪽 모두** 포기할 만큼 크게 둔다. 이 칸의 목적은 상한 값
-      // 비교가 아니라 "상한에서 손을 뗄 때 마지막 3xx 를 브라우저에 넘기지
-      // 않는가" 이기 때문이다(넘기면 절대 Location 을 따라가 탈출한다).
-      //
-      // 실측(2026-08-21): 25홉 체인을 **크롬은 끝까지 따라갔다** — 흔히 알려진
-      // 상한 20 보다 관대하다. 우리는 20 에서 멈추므로 21~26홉 구간은 크롬이
-      // 되고 프록시가 안 되는 구간이다. 실사이트에서 그렇게 긴 체인은 없다고
-      // 보고 받아들인 차이이고, 여기 적어 둔다(다음 세션이 다시 재지 않도록).
       const next = hop >= 60
         ? landURL('n13-redirect-limit')
         : '/nav/n13-redirect-limit?hop=' + (hop + 1);
@@ -136,12 +104,8 @@ function mk(port) {
     res.end('ok');
   }).listen(port, '127.0.0.1', () => console.log('nav fixture listening', port));
 }
-// 헤더/리다이렉트 케이스는 CASES 에 마크업이 없으므로 따로 등록한다.
 CASES.push({ id: 'n11-refresh-header', html: () => '' });
 CASES.push({ id: 'n12-server-redirect', html: () => '' });
-// ★리다이렉트 상한을 넘겼을 때 마지막 3xx 를 브라우저에 넘기면, 그 Location 이
-// 절대 URL 인 순간 **문서째 프록시 밖으로 나간다**(2026-08-21 실측 — 진짜 탈출).
-// n12 는 한 홉짜리라 이걸 못 잡는다. 상한(5)을 넘기는 체인이 필요하다.
 CASES.push({ id: 'n13-redirect-limit', html: () => '' });
 mk(ORIGIN);
 mk(LAND);

@@ -1,9 +1,8 @@
 // The first flight the SW's captured spec produces, read back off the wire format.
 //
-// Real Chrome 154's ClientHello (captured 2026-10-07 from Chrome 154.0.8037.98 against a local TCP listener, three
-// connections) has these 17 extensions besides its two GREASE ones — and WebView2/Edge's has all but `trust_anchors`
-// (0xca34, TLS Trust Expressions). We had matched WebView2's, with a Chrome user-agent on top: Cloudflare saw "Chrome
-// without trust_anchors" and answered with its full managed challenge instead of the light one (Stack Overflow).
+// Chrome 154's ClientHello includes 17 non-GREASE extensions, including
+// `trust_anchors` (0xca34, TLS Trust Expressions), plus a GREASE extension at
+// each end.
 use std::sync::Arc;
 
 use rustls::pki_types::ServerName;

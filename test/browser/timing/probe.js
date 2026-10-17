@@ -1,10 +1,5 @@
-// 타이밍 축 프로브 — Resource Timing 의 "모양" 을 요약한다.
-//
-// 이름은 이미 디프록시했지만 **타이밍 필드는 손대지 않았다**. 프록시는 모든
-// 서브리소스를 한 오리진으로 모으므로, 브라우저가 타깃 호스트로 DNS/연결을
-// 하는 일이 없다 — 그 부재는 이름보다 지우기 어려운 신호다.
-//
-// 판정하지 않고 **요약만** 낸다. 판정은 대조군과의 차이로 러너가 한다.
+// Aggregate Resource Timing entries by origin.
+// Routing all subresources through a single proxy origin zeroes out target-host DNS and connection timings.
 (function () {
   var out = { entries: 0, byOrigin: {}, nav: null, clock: {} };
   try {
@@ -38,7 +33,7 @@
       workerStart: Math.round(n.workerStart || 0),
       deliveryType: n.deliveryType === undefined ? '(undef)' : (n.deliveryType || '(empty)'),
     };
-    // 시계 일관성 — 프록시가 timeOrigin 을 가상화하면 여기서 어긋난다.
+    // Measure clock skew between performance.timeOrigin + performance.now() and Date.now().
     out.clock = {
       skewMs: Math.round(performance.timeOrigin + performance.now() - Date.now()),
       originVsNavStart: performance.timing

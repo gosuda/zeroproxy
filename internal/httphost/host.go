@@ -1,8 +1,8 @@
-// Package httphost — ZeroProxy HTTP 호스트: 정적 에셋 서빙, /zp/* 라우팅,
-// WS byte-pipe 브리지(ws-pipe → yamux → SOCKS5), 동기 XHR 허브, CSP report.
-// cmd/zeroproxy-server 의 핸들러를 패키지화한 것 (REFACTOR.md §3.4) —
-// 임베더는 NewHandler(Config) 로 http.Handler 를 얻어 자체 리스너/mux 에
-// 마운트한다. WT/RTC 게이트웨어 리스너 조립은 호출자 책임이다.
+// Package httphost implements the ZeroProxy HTTP host: static asset serving,
+// /zp/* routing, the WebSocket byte-pipe bridge (ws-pipe over yamux to SOCKS5),
+// the synchronous XHR hub, and CSP violation reporting.
+// Callers mount NewHandler(Config) on their own HTTP listener or mux and
+// manage optional WebTransport and TURN gateway listeners separately.
 package httphost
 
 import (
@@ -16,6 +16,7 @@ import (
 	"mime"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -24,55 +25,186 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/gosuda/zeroproxy/internal/headers"
+	"github.com/gosuda/zeroproxy/internal/netguard"
 	"github.com/gosuda/zeroproxy/internal/rtcgw"
 	"github.com/gosuda/zeroproxy/internal/wtproxy"
 	"github.com/gosuda/zeroproxy/internal/yamuxconn"
 )
 
-// Config — NewHandler 입력. main.go 의 CLI 플래그와 1:1 대응한다.
+// TransportMode selects how the relay bridges outbound streams.
+type TransportMode uint8
+
+const (
+	// TransportAuto infers the transport mode from Config.SocksAddr: "internal"
+	// dials directly (permitting private targets unless DisallowPrivateTargets
+	// is set), "direct" dials directly (blocking private targets unless
+	// AllowPrivateTargets is set), and a host:port address dials an upstream
+	// SOCKS5 proxy.
+	TransportAuto TransportMode = iota
+	// TransportSOCKS5 bridges yamux streams to an upstream SOCKS5 proxy at
+	// Config.SocksAddr (such as a Tor client listener).
+	TransportSOCKS5
+	// TransportDirect terminates the inner SOCKS5 handshake in-process and
+	// dials resolved target addresses directly over TCP. Non-public target IPs
+	// are rejected unless Config.AllowPrivateTargets is true.
+	TransportDirect
+)
+
+// Config holds the parameters for NewServer and NewHandler.
 type Config struct {
-	WebDir        string // built static web asset directory (dist/web)
-	SocksAddr     string // Tor SOCKS5 addr, or "internal" for direct dial
-	WtGatewayURL  string // public WT gateway URL the page reads; empty hides it
+	WebDir string // built static web asset directory (dist/web)
+	// Transport selects the outbound relay mode. When left at TransportAuto,
+	// the mode is inferred from SocksAddr.
+	Transport    TransportMode
+	SocksAddr    string // upstream SOCKS5 host:port, "internal", or "direct"
+	WtGatewayURL string // public WT gateway URL the page reads; empty hides it
 	// WtGatewayCertHashes pins a self-signed dev gateway certificate
-	// (base64url SHA-256) — browsers reach it only through such a pin. Nil
-	// for an operator certificate the browser validates normally.
+	// (base64url SHA-256). Nil for an operator certificate that the browser
+	// validates normally.
 	WtGatewayCertHashes []string
-	// RtcTURN is D5: the page's RTCPeerConnection runs relay-only through
-	// it. Nil leaves the RTC_GATEWAY_UNAVAILABLE stub.
+	// RtcTURN is the embedded TURN server for relay-only WebRTC.
 	RtcTURN *rtcgw.TURNServer
+	// AllowPrivateTargets permits loopback and RFC 1918 private target IPs when
+	// dialing directly (TransportDirect). Link-local and unspecified addresses
+	// remain blocked regardless of this setting.
+	AllowPrivateTargets bool
+	// DisallowPrivateTargets rejects private, loopback, and non-public target
+	// IPs even when SocksAddr is set to the legacy "internal" mode.
+	DisallowPrivateTargets bool
+	// TrustProxyHeaders trusts X-Forwarded-Proto from non-loopback peers.
+	TrustProxyHeaders bool
 }
 
-// NewHandler builds the ZeroProxy HTTP handler: static assets, /zp/*
-// routes, ws-pipe bridge, sync-fetch hub, CSP report — wrapped in the
-// security-headers middleware. Embedders mount the returned handler under
-// their own listener/mux.
-func NewHandler(cfg Config) http.Handler {
-	s := &server{
-		webDir:        cfg.WebDir,
-		socksAddr:     cfg.SocksAddr,
-		wtGatewayURL:  cfg.WtGatewayURL,
-		wtCertHashes:  cfg.WtGatewayCertHashes,
-		rtcTURN:       cfg.RtcTURN,
-		syncHub:       newSyncFetchHub(),
+// Server implements the ZeroProxy HTTP host and manages active relay sessions
+// and the synchronous XHR hub. Callers should invoke Close on shutdown to
+// terminate open yamux sessions and unblock parked sync-fetch requests.
+type Server struct {
+	webDir                 string
+	transport              TransportMode
+	socksAddr              string
+	wtGatewayURL           string
+	wtCertHashes           []string
+	rtcTURN                *rtcgw.TURNServer
+	allowPrivateTargets    bool
+	disallowPrivateTargets bool
+	trustProxyHeaders      bool
+	syncHub                *syncFetchHub
+	handler                http.Handler
+
+	mu        sync.Mutex
+	sessions  map[*yamuxconn.Session]struct{}
+	closed    chan struct{}
+	closeOnce sync.Once
+}
+
+type server = Server
+
+// NewServer validates cfg and constructs a Server ready to serve HTTP requests.
+func NewServer(cfg Config) (*Server, error) {
+	if err := validateConfig(cfg); err != nil {
+		return nil, err
+	}
+	return newUncheckedServer(cfg), nil
+}
+
+func validateConfig(cfg Config) error {
+	socks := strings.TrimSpace(cfg.SocksAddr)
+	switch cfg.Transport {
+	case TransportAuto:
+		if socks != "" && !strings.EqualFold(socks, internalSOCKSMode) && !strings.EqualFold(socks, directSOCKSMode) {
+			if _, _, err := net.SplitHostPort(socks); err != nil {
+				return fmt.Errorf("httphost: invalid SocksAddr %q: %w", cfg.SocksAddr, err)
+			}
+		}
+	case TransportSOCKS5:
+		if socks == "" || strings.EqualFold(socks, internalSOCKSMode) || strings.EqualFold(socks, directSOCKSMode) {
+			return fmt.Errorf("httphost: TransportSOCKS5 requires a host:port SocksAddr, got %q", cfg.SocksAddr)
+		}
+		if _, _, err := net.SplitHostPort(socks); err != nil {
+			return fmt.Errorf("httphost: invalid SocksAddr %q: %w", cfg.SocksAddr, err)
+		}
+	case TransportDirect:
+		if socks != "" && !strings.EqualFold(socks, internalSOCKSMode) && !strings.EqualFold(socks, directSOCKSMode) {
+			return fmt.Errorf("httphost: TransportDirect cannot be combined with upstream SocksAddr %q", cfg.SocksAddr)
+		}
+	default:
+		return fmt.Errorf("httphost: unknown TransportMode %d", cfg.Transport)
+	}
+	return nil
+}
+
+func newUncheckedServer(cfg Config) *Server {
+	s := &Server{
+		webDir:                 cfg.WebDir,
+		transport:              cfg.Transport,
+		socksAddr:              cfg.SocksAddr,
+		wtGatewayURL:           cfg.WtGatewayURL,
+		wtCertHashes:           cfg.WtGatewayCertHashes,
+		rtcTURN:                cfg.RtcTURN,
+		allowPrivateTargets:    cfg.AllowPrivateTargets,
+		disallowPrivateTargets: cfg.DisallowPrivateTargets,
+		trustProxyHeaders:      cfg.TrustProxyHeaders,
+		syncHub:                newSyncFetchHub(),
+		sessions:               make(map[*yamuxconn.Session]struct{}),
+		closed:                 make(chan struct{}),
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.handle)
-	return securityHeaders(mux)
+	s.handler = s.securityHeaders(mux)
+	return s
 }
 
-type server struct {
-	webDir        string
-	socksAddr     string
-	wtGatewayURL  string // D4 — public URL the browser uses to reach the WT gateway; empty disables client-side virtual WebTransport
-	wtCertHashes  []string // D4 — dev-cert pins for the gateway connection
-	rtcTURN       *rtcgw.TURNServer // D5 embedded TURN (optional) — issues short-term cred tuples via serveConfig
-	// 동기 XHR 중계 허브. Go 는 요청을 park 만 하고 실제 전송은 SW 가 한다
-	// (syncfetch.go 의 주석 참고) — 새 egress 경로가 아니다.
-	syncHub *syncFetchHub
+// NewHandler builds the ZeroProxy HTTP handler: static assets, /zp/*
+// routes, ws-pipe bridge, sync-fetch hub, and CSP report wrapped in the
+// security-headers middleware. The returned http.Handler is a *Server and
+// also implements io.Closer.
+func NewHandler(cfg Config) http.Handler {
+	return newUncheckedServer(cfg)
 }
 
-const internalSOCKSMode = "internal"
+// ServeHTTP dispatches requests through the security-headers middleware and
+// host route mux.
+func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if s.handler != nil {
+		s.handler.ServeHTTP(w, r)
+		return
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", s.handle)
+	s.securityHeaders(mux).ServeHTTP(w, r)
+}
+
+// Close shuts down the synchronous XHR hub and closes all active yamux relay
+// sessions. Safe for concurrent and repeated calls.
+func (s *Server) Close() error {
+	if s == nil {
+		return nil
+	}
+	s.closeOnce.Do(func() {
+		if s.closed != nil {
+			close(s.closed)
+		}
+	})
+	if s.syncHub != nil {
+		s.syncHub.close()
+	}
+	s.mu.Lock()
+	sessions := make([]*yamuxconn.Session, 0, len(s.sessions))
+	for sess := range s.sessions {
+		sessions = append(sessions, sess)
+	}
+	s.sessions = nil
+	s.mu.Unlock()
+	for _, sess := range sessions {
+		_ = sess.Close()
+	}
+	return nil
+}
+
+const (
+	internalSOCKSMode = "internal"
+	directSOCKSMode   = "direct"
+)
 
 const (
 	controlPrefix = "/zp/"
@@ -91,12 +223,10 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 	case path == controlPrefix+"sw.js":
 		s.serveWeb(w, r, "sw.js")
 	case path == controlPrefix+"ws-pipe":
-		// Step 14 + yamux: 1 WS = N yamux streams, each = 1 TCP+SOCKS5
-		// byte-pipe to the upstream dialer. The Rust WASM kernel speaks
-		// yamux (client) + SOCKS5 + TLS + HTTP/1.1 on top, so the relay
-		// only sees yamux framing + ciphertext. `handlePipe` calls
-		// `yamuxconn.Server()` on the WS and dispatches each accepted
-		// stream through `bridgeTargetStream`.
+		// Multiplexes yamux streams over a single WebSocket, bridging each
+		// stream to a TCP+SOCKS5 connection to the upstream dialer. The Rust
+		// WASM kernel runs yamux (client), SOCKS5, TLS, and HTTP on top, so
+		// the relay observes only yamux framing and TLS ciphertext.
 		s.handlePipe(w, r)
 	case strings.HasPrefix(path, controlPrefix+"p/"):
 		s.serveWeb(w, r, "index.html")
@@ -107,29 +237,26 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 	case path == controlPrefix+"worker-bootstrap.js":
 		s.workerBootstrap(w, r)
 	case path == controlPrefix+"api/sync-fetch":
-		// 동기 XHR 중계. SW 가 동기 XHR 을 가로채지 못하므로(실측), 페이지는
-		// 이 same-origin 엔드포인트로 던지고 Go 가 SW 에 일을 넘긴다.
-		// Go 는 타깃으로 직접 나가지 않는다 — syncfetch.go 주석 참고.
+		// Synchronous XHR relay: because Service Workers cannot intercept
+		// synchronous XHR, pages send requests to this same-origin endpoint
+		// and Go delegates fulfillment to the Service Worker.
 		s.handleSyncFetch(w, r)
 	case path == controlPrefix+"api/sync-fetch/poll":
 		s.handleSyncFetchPoll(w, r)
 	case path == controlPrefix+"api/sync-fetch/result":
 		s.handleSyncFetchResult(w, r)
 	case path == controlPrefix+"api/csp-report":
-		// 프록시 문서 CSP 의 report-uri 수신처. 우리가 리라이트를 놓친 자리를
-		// 이름으로 알려 주는 유일한 통로다 — 막힌 요청은 SW 까지 오지 못하므로
-		// __zp_refusals() 에는 남지 않는다. cspreport.go 주석 참고.
+		// Receives CSP report-uri payloads for requests blocked before reaching
+		// the Service Worker.
 		s.handleCSPReport(w, r)
 	case path == controlPrefix+"api/config":
-		// D4/D5 client config — the public WT gateway URL and its dev-cert
-		// pin, and fresh TURN credentials. The SW re-reads it per
-		// navigation (ensureRuntimeConfig) and threads it into the boot
-		// JSON the page realm reads.
+		// Client runtime configuration: public WebTransport gateway URL, dev-cert
+		// pin, and fresh TURN credentials. The Service Worker reads this per
+		// navigation and passes it into the page realm boot JSON.
 		s.serveConfig(w, r)
 	case path == controlPrefix+"api/rtc/signal":
-		// The pion signaling bridge that served this was removed
-		// (2026-09-30) — WebRTC is relay-only through the embedded TURN
-		// server and needs no signaling of ours.
+		// WebRTC runs relay-only through the embedded TURN server without
+		// custom signaling; this route returns 501 RTC_GATEWAY_UNAVAILABLE.
 		rtcgw.Handler().ServeHTTP(w, r)
 	case strings.HasPrefix(r.URL.Path, "/__zp/__zp/"):
 		// Defensive: in case build pipeline emits a double-prefixed path.
@@ -143,16 +270,11 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 		// fetches them from /__zp/<name>; serve from that nested path.
 		s.serveFile(w, r, filepath.Join(s.webDir, "__zp", filepath.Base(r.URL.Path)), mime.TypeByExtension(filepath.Ext(r.URL.Path)))
 	case strings.HasPrefix(r.URL.Path, "/__zp/wt"):
-		// D4 fallback: the real WebTransport gateway listens on a
-		// SEPARATE UDP port (configured via `-wt-addr`) — it speaks
-		// HTTP/3, not HTTP/1.1, so any /__zp/wt arrival on this TCP
-		// listener means the page-side virtual class accidentally
-		// routed here. Reply 501 with the stable WT_UNSUPPORTED code so
-		// the page can detect "gateway not available over HTTP/1.1
-		// fallback" and surface a friendlier message.
+		// The WebTransport gateway listens on a separate UDP port (-wt-addr)
+		// speaking HTTP/3. Any /__zp/wt request arriving on this TCP listener
+		// receives 501 WT_UNSUPPORTED.
 		wtproxy.Handler().ServeHTTP(w, r)
 	case strings.HasPrefix(r.URL.Path, "/__zp/rtc/"):
-		// D5: WebRTC signaling endpoint (placeholder until pion SFU lands).
 		rtcgw.Handler().ServeHTTP(w, r)
 	case strings.HasPrefix(path, "/p/"):
 		redirectLegacy(w, r, controlPrefix+"p/"+strings.TrimPrefix(path, "/p/"))
@@ -224,33 +346,10 @@ func (s *server) serveFile(w http.ResponseWriter, r *http.Request, path, content
 	if contentType != "" {
 		w.Header().Set("Content-Type", contentType)
 	}
-	// 2026-08-14 — 정적 에셋을 `no-store` 에서 `no-cache` 로.
-	//
-	// 측정: 페이지 1회 로드에 우리 에셋만 **1,042 KB** 가 매번 다시 내려갔다
-	// (page bundle wasm 377KB + prelude 117KB + …). SW 시작 시엔 3,945 KB.
-	// 프록시를 상시로 쓰기엔 성립하지 않는 비용이다.
-	//
-	// 원인은 캐시 지원이 없어서가 아니었다. `http.ServeContent` 는 이미
-	// Last-Modified 를 붙이고 조건부 요청에 304 를 준다(실측 확인). 그런데
-	// `no-store` 는 브라우저가 응답을 **저장하는 것 자체**를 막으므로
-	// If-Modified-Since 가 영영 나가지 않는다. `no-cache` 는 저장은 하되
-	// **매번 재검증**을 강제한다 — 신선도 보장은 `no-store` 와 동일하고,
-	// 바뀌지 않았으면 본문 대신 304 만 오간다.
-	//
-	// `sw.js` 와 런처 문서는 그대로 `no-store` 로 둔다. 오늘 아침 확인한
-	// 업데이트 전파 경로(sw.js 재검사 → skipWaiting → clients.claim)의
-	// 방아쇠라, 그 경로는 건드리지 않는다.
-	//
-	// **주의**: `no-cache` 는 디스크 캐시에 본문이 남는 것을 허용한다. 로컬
-	// 포렌식에 흔적을 남기지 않는 것이 요구사항이라면 이 결정을 되돌려야
-	// 한다 — 코드/플랜/트랩노트 어디에도 그런 의도는 적혀 있지 않아
-	// 기본값으로 판단했다. 남는 것은 우리 자신의 에셋뿐이고(타깃 콘텐츠가
-	// 아니다), 방문한 사이트는 드러나지 않는다.
-	//
-	// `?v=<build id>` 가 붙어 오면 `immutable` 로 준다. build id 는 소스+wasm
-	// 바이트 해시라 빌드가 바뀌면 URL 이 바뀐다 — 낡은 사본이 재사용될 수
-	// 없으므로 1년 캐시가 안전하고, 재검증 왕복까지 사라진다.
-	// 쿼리가 없으면(개발 중 dist 를 안 거치거나 직접 열었을 때) `no-cache`.
+	// Keep sw.js and index.html uncached (no-store) so Service Worker updates
+	// propagate immediately. Static assets versioned with ?v=<build id> are
+	// content-hashed and cached as immutable for 1 year; unversioned assets use
+	// no-cache to allow disk caching with If-Modified-Since (304) revalidation.
 	switch name := st.Name(); {
 	case name == "sw.js" || name == "index.html":
 		w.Header().Set("Cache-Control", "no-store")
@@ -269,19 +368,27 @@ func (s *server) workerBootstrap(w http.ResponseWriter, r *http.Request) {
 	_, _ = io.WriteString(w, body)
 }
 
-// serveConfig emits the minimal client-facing runtime config the SW
-// reads per navigation. D4 = wtGateway (+ its dev-cert pin); D5 = rtcICEServers.
-// SW only ever does ONE fetch on boot.
+// serveConfig emits the client-facing runtime config read by the Service Worker
+// on boot (wtGateway, wtGatewayCertHashes, and rtcICEServers).
 //
-// `rtcICEServers` is a fresh time-limited cred tuple from the
-// embedded TURN server (when -rtc-turn-addr is set). Each call to
-// serveConfig issues a new cred set so re-registration of the SW
-// (which re-fetches /zp/api/config) rotates credentials. Without
-// embedded TURN the field is `[]` so page realm's RTCPC falls back
-// to host candidates only.
+// `rtcICEServers` contains a fresh time-limited credential tuple from the
+// embedded TURN server when -rtc-turn-addr is configured. Without embedded
+// TURN, the field is `[]`.
 func (s *server) serveConfig(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.isAllowedOrigin(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
+	if r.Method == http.MethodHead {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
 	iceServers := []rtcgw.ICEServerCred{}
 	if s.rtcTURN != nil {
 		if cred, err := s.rtcTURN.IssueICEServerCreds(""); err == nil {
@@ -292,8 +399,6 @@ func (s *server) serveConfig(w http.ResponseWriter, r *http.Request) {
 	if hashes == nil {
 		hashes = []string{}
 	}
-	// encoding/json, not a format string: the hand-escaped `%s` quoted `"`
-	// but not `\`, so a URL with a backslash produced invalid JSON.
 	_ = json.NewEncoder(w).Encode(struct {
 		WtGateway           string                `json:"wtGateway"`
 		WtGatewayCertHashes []string              `json:"wtGatewayCertHashes"`
@@ -305,7 +410,7 @@ func (s *server) safeError(w http.ResponseWriter, r *http.Request, code string, 
 	escapedCode := html.EscapeString(sanitizeCode(code))
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("Content-Security-Policy", zeroCSP(r))
+	w.Header().Set("Content-Security-Policy", s.zeroCSP(r))
 	w.WriteHeader(status)
 	_, _ = fmt.Fprintf(w, `<!doctype html><meta charset="utf-8"><title>ZeroProxy %s</title><main><h1>ZeroProxy</h1><p>%s</p><button onclick="history.back()">Back</button><button onclick="location.reload()">Retry</button></main>`, escapedCode, escapedCode)
 }
@@ -313,14 +418,6 @@ func (s *server) safeError(w http.ResponseWriter, r *http.Request, code string, 
 func sanitizeCode(code string) string {
 	code = strings.TrimSpace(code)
 	switch code {
-	// 2026-08-21 — 목록이 12개였다. 그래서 **이 서버가 스스로 내는**
-	// RTC_GATEWAY_UNAVAILABLE(위 rtcgw 분기)이 여기서 POLICY_BLOCKED 로
-	// 강등돼 나갔다. 한 파일 안에서 자기모순이었다. SW 가 통제 중이면
-	// 같은 URL 이 올바른 페이지를 내주고, 아니면 "정책 차단" 이 나온다 —
-	// 어느 쪽이 보일지가 SW 상태에 달려 있었다.
-	//
-	// 단일 소스는 crates/zp-shared/testdata/error_codes.json 이고,
-	// 이 목록이 그것과 같은지는 errors_test.go 가 대조한다.
 	case "BAD_HMAC", "INVALID_SHARE_LINK", "MALFORMED_ROUTE", "SW_NOT_READY",
 		"TARGET_PROTOCOL_BLOCKED", "TLS_CERTIFICATE_INVALID", "TLS_HANDSHAKE_FAILED",
 		"TARGET_CONNECT_FAILED", "TARGET_HTTP_FAILED", "MALFORMED_HTML", "REALM_INJECTION_FAILURE",
@@ -332,12 +429,35 @@ func sanitizeCode(code string) string {
 	return "POLICY_BLOCKED"
 }
 
+func (s *server) isAllowedOrigin(r *http.Request) bool {
+	if origin := strings.TrimSpace(r.Header.Get("Origin")); origin != "" {
+		u, err := url.Parse(origin)
+		if err != nil || u.Host == "" || !strings.EqualFold(u.Host, r.Host) {
+			return false
+		}
+	}
+	if sfs := strings.TrimSpace(r.Header.Get("Sec-Fetch-Site")); sfs != "" {
+		if sfs != "same-origin" && sfs != "none" {
+			return false
+		}
+	}
+	return true
+}
+
 func (s *server) handlePipe(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	c, err := pipeUpgrader.Upgrade(w, r, nil)
+	if !s.isAllowedOrigin(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	upgrader := websocket.Upgrader{
+		EnableCompression: false,
+		CheckOrigin:       s.isAllowedOrigin,
+	}
+	c, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		return
 	}
@@ -349,10 +469,6 @@ func (s *server) handlePipe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.acceptStreams(r.Context(), sess)
-}
-
-var pipeUpgrader = websocket.Upgrader{
-	EnableCompression: false,
 }
 
 type webSocketNetConn struct {
@@ -429,19 +545,85 @@ type addr string
 func (a addr) Network() string { return "websocket" }
 func (a addr) String() string  { return string(a) }
 
+const (
+	maxConcurrentStreamsPerSession = 256
+	streamSlotAcquireTimeout       = 5 * time.Second
+	bridgeIdleTimeout              = 2 * time.Minute
+)
+
 func (s *server) acceptStreams(ctx context.Context, sess *yamuxconn.Session) {
 	defer sess.Close()
+	if s.closed != nil {
+		select {
+		case <-s.closed:
+			return
+		default:
+		}
+	}
+	s.mu.Lock()
+	if s.sessions != nil {
+		s.sessions[sess] = struct{}{}
+	}
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		if s.sessions != nil {
+			delete(s.sessions, sess)
+		}
+		s.mu.Unlock()
+	}()
+	sem := make(chan struct{}, maxConcurrentStreamsPerSession)
 	for {
 		stream, err := sess.Accept(ctx)
 		if err != nil {
 			return
 		}
-		go s.bridgeTargetStream(ctx, stream)
+		select {
+		case sem <- struct{}{}:
+		default:
+			timer := time.NewTimer(streamSlotAcquireTimeout)
+			select {
+			case sem <- struct{}{}:
+				timer.Stop()
+			case <-timer.C:
+				_ = stream.Close()
+				continue
+			case <-ctx.Done():
+				timer.Stop()
+				_ = stream.Close()
+				return
+			}
+		}
+		go func(c net.Conn) {
+			defer func() { <-sem }()
+			s.bridgeTargetStream(ctx, c)
+		}(stream)
 	}
 }
 
+func (s *server) isDirectTransport() bool {
+	if s.transport == TransportDirect {
+		return true
+	}
+	if s.transport == TransportSOCKS5 {
+		return false
+	}
+	mode := strings.ToLower(strings.TrimSpace(s.socksAddr))
+	return mode == internalSOCKSMode || mode == directSOCKSMode
+}
+
+func (s *server) disallowsPrivateTargets() bool {
+	if s.disallowPrivateTargets {
+		return true
+	}
+	if s.allowPrivateTargets {
+		return false
+	}
+	return s.transport == TransportDirect || strings.EqualFold(strings.TrimSpace(s.socksAddr), directSOCKSMode)
+}
+
 func (s *server) bridgeTargetStream(ctx context.Context, stream net.Conn) {
-	if strings.EqualFold(strings.TrimSpace(s.socksAddr), internalSOCKSMode) {
+	if s.isDirectTransport() {
 		s.bridgeInternalSOCKS(ctx, stream)
 		return
 	}
@@ -463,8 +645,13 @@ func (s *server) bridgeInternalSOCKS(ctx context.Context, stream net.Conn) {
 	if err != nil {
 		return
 	}
+	dialAddr, err := s.resolveInternalTarget(ctx, host, port)
+	if err != nil {
+		_, _ = stream.Write([]byte{0x05, 0x02, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
+		return
+	}
 	d := net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
-	target, err := d.DialContext(ctx, "tcp", net.JoinHostPort(host, port))
+	target, err := d.DialContext(ctx, "tcp", dialAddr)
 	if err != nil {
 		_, _ = stream.Write([]byte{0x05, 0x01, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
 		return
@@ -477,14 +664,44 @@ func (s *server) bridgeInternalSOCKS(ctx context.Context, stream net.Conn) {
 	bridgeConns(ctx, a, b)
 }
 
+func (s *server) resolveInternalTarget(ctx context.Context, host, port string) (string, error) {
+	disallowPrivate := s.disallowsPrivateTargets()
+	var ips []net.IPAddr
+	if ip := net.ParseIP(host); ip != nil {
+		ips = []net.IPAddr{{IP: ip}}
+	} else {
+		lookupCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		resolved, err := net.DefaultResolver.LookupIPAddr(lookupCtx, host)
+		if err != nil || len(resolved) == 0 {
+			return "", fmt.Errorf("target %q does not resolve", host)
+		}
+		ips = resolved
+	}
+	for _, entry := range ips {
+		ip := entry.IP
+		if len(ip) == 0 || ip.IsUnspecified() || ip.IsLinkLocalUnicast() ||
+			ip.IsLinkLocalMulticast() || ip.IsInterfaceLocalMulticast() || ip.IsMulticast() {
+			return "", fmt.Errorf("target %q resolves to a blocked address", host)
+		}
+		if disallowPrivate && netguard.IsNonPublic(ip) {
+			return "", fmt.Errorf("target %q resolves to a non-public address", host)
+		}
+	}
+	pick := ips[0].IP
+	for _, entry := range ips {
+		if entry.IP.To4() != nil {
+			pick = entry.IP
+			break
+		}
+	}
+	return net.JoinHostPort(pick.String(), port), nil
+}
+
 // traceBridge optionally wraps both ends of a bridged stream so each
-// direction's read timeline is logged — used to localize the cold-bootstrap
-// "exactly 60s" first-request stall. Gated by ZP_BRIDGE_TRACE so it is
-// zero-cost in normal operation. The discriminator: c2u (browser→upstream)
-// logs request bytes leaving the browser; u2c (upstream→browser) logs the
-// response. A long gap on c2u before the request means the request was
-// stuck on OUR side; a long gap only on u2c (request already forwarded)
-// means the upstream held the response.
+// direction's read timeline is logged when ZP_BRIDGE_TRACE is set.
+// c2u (browser to upstream) logs request bytes leaving the browser;
+// u2c (upstream to browser) logs the response.
 func traceBridge(stream, target net.Conn, host string) (net.Conn, net.Conn) {
 	if os.Getenv("ZP_BRIDGE_TRACE") == "" {
 		return stream, target
@@ -661,15 +878,52 @@ func (s *server) bridgeToTor(ctx context.Context, stream net.Conn) {
 	bridgeConns(ctx, stream, tor)
 }
 
+type idleDeadlineConn struct {
+	net.Conn
+	peer    net.Conn
+	timeout time.Duration
+}
+
+func (c *idleDeadlineConn) touch() {
+	if c.timeout <= 0 {
+		return
+	}
+	deadline := time.Now().Add(c.timeout)
+	_ = c.Conn.SetDeadline(deadline)
+	if c.peer != nil {
+		_ = c.peer.SetDeadline(deadline)
+	}
+}
+
+func (c *idleDeadlineConn) Read(p []byte) (int, error) {
+	c.touch()
+	n, err := c.Conn.Read(p)
+	if n > 0 {
+		c.touch()
+	}
+	return n, err
+}
+
+func (c *idleDeadlineConn) Write(p []byte) (int, error) {
+	c.touch()
+	n, err := c.Conn.Write(p)
+	if n > 0 {
+		c.touch()
+	}
+	return n, err
+}
+
 func bridgeConns(ctx context.Context, a, b net.Conn) {
 	closeBoth := func() {
 		_ = a.Close()
 		_ = b.Close()
 	}
 	defer closeBoth()
+	wa := &idleDeadlineConn{Conn: a, peer: b, timeout: bridgeIdleTimeout}
+	wb := &idleDeadlineConn{Conn: b, peer: a, timeout: bridgeIdleTimeout}
 	done := make(chan struct{}, 2)
-	go func() { _, _ = io.Copy(b, a); closeBoth(); done <- struct{}{} }()
-	go func() { _, _ = io.Copy(a, b); closeBoth(); done <- struct{}{} }()
+	go func() { _, _ = io.Copy(wb, wa); closeBoth(); done <- struct{}{} }()
+	go func() { _, _ = io.Copy(wa, wb); closeBoth(); done <- struct{}{} }()
 	select {
 	case <-ctx.Done():
 		closeBoth()
@@ -679,18 +933,18 @@ func bridgeConns(ctx context.Context, a, b net.Conn) {
 	}
 }
 
-func securityHeaders(next http.Handler) http.Handler {
+func (s *server) securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "no-referrer")
-		w.Header().Set("Content-Security-Policy", zeroCSP(r))
+		w.Header().Set("Content-Security-Policy", s.zeroCSP(r))
 		next.ServeHTTP(w, r)
 	})
 }
 
-func zeroCSP(r *http.Request) string {
+func (s *server) zeroCSP(r *http.Request) string {
 	wsScheme := "ws://"
-	if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
+	if r.TLS != nil || (s.trustForwardedProto(r) && strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")) {
 		wsScheme = "wss://"
 	}
 	host := r.Host
@@ -698,4 +952,26 @@ func zeroCSP(r *http.Request) string {
 		host = "proxy.example"
 	}
 	return headers.BuildCSP(wsScheme + host)
+}
+
+func (s *server) trustForwardedProto(r *http.Request) bool {
+	if s.trustProxyHeaders {
+		return true
+	}
+	remote := strings.TrimSpace(r.RemoteAddr)
+	if remote == "" {
+		return true
+	}
+	if host, _, err := net.SplitHostPort(remote); err == nil {
+		remote = host
+	}
+	if i := strings.IndexByte(remote, '%'); i >= 0 {
+		remote = remote[:i]
+	}
+	ip := net.ParseIP(strings.Trim(remote, "[]"))
+	return ip != nil && ip.IsLoopback()
+}
+
+func zeroCSP(r *http.Request) string {
+	return (&server{}).zeroCSP(r)
 }

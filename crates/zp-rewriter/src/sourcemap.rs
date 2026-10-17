@@ -1,8 +1,8 @@
-//! D2 source-map composer.
+//! Source Map v3 composer for rewritten scripts.
 //!
 //! Builds a Source Map v3 JSON document mapping each line/column in the
-//! REWRITTEN source back to the corresponding line/column in the
-//! ORIGINAL source. DevTools breakpoints set on `var u = __zp_loc.href`
+//! rewritten source back to the corresponding line/column in the
+//! original source. DevTools breakpoints set on `var u = __zp_loc.href`
 //! therefore land on the original `var u = location.href`.
 //!
 //! ## Algorithm
@@ -11,26 +11,14 @@
 //! the dangerous identifier / member-access sites. We use it directly as
 //! the segmentation:
 //!
-//! * **Unchanged region** between two patches — byte-identical to the
+//! * **Unchanged region** between two patches: byte-identical to the
 //!   original. Emit a single mapping at the start of each generated line
 //!   that points to the matching position in the original.
-//! * **Patch region** (the replacement text) — emit a mapping at the
+//! * **Patch region** (the replacement text): emit a mapping at the
 //!   replacement's start pointing to the patch start in the original.
 //!   Subsequent characters of the replacement are not re-mapped; per
 //!   §A.5 of the spec a missing mapping interpolates from the previous
-//!   one, which is the right semantics for "the whole replacement maps
-//!   back to the same original site".
-//!
-//! ## Out of scope (deferred)
-//!
-//! * Composition with the *original* source map (e.g. when the target
-//!   site shipped a TypeScript-compiled artifact). Chaining
-//!   `rewriter_map ∘ original_map` is the next perf-track follow-on; the
-//!   wire shape here keeps the door open by carrying `sourcesContent`
-//!   so the chained composer can splice in the further-original sources.
-//! * `names` — currently empty (`[]`). The OXC AST has the identifier
-//!   text on every patched node; populating `names` for nicer DevTools
-//!   labels is a small follow-up that doesn't change correctness.
+//!   one, which maps the whole replacement back to the same original site.
 //!
 //! ## References
 //!
@@ -66,7 +54,7 @@ fn vlq_encode_into(value: i64, out: &mut String) {
 }
 
 /// JSON-escape a string into `out`. Hand-rolled to avoid pulling in
-/// `serde_json` for the rewriter (kept slim — it's hot path).
+/// `serde_json` for the rewriter hot path.
 fn json_escape_into(s: &str, out: &mut String) {
     out.push('"');
     for c in s.chars() {
@@ -109,7 +97,7 @@ fn offset_to_line_col(source: &str, offset: usize) -> (u32, u32) {
     (line, col_u16)
 }
 
-/// Compose a Source Map v3 JSON document mapping rewritten → original.
+/// Compose a Source Map v3 JSON document mapping rewritten to original.
 ///
 /// `source_url` is what goes into `"sources": [source_url]`; typically
 /// the proxy-side target URL of the script. `rewritten` is required so
@@ -120,21 +108,18 @@ pub fn compose_rewrite_map(
     patches: &[Patch],
     source_url: &str,
 ) -> String {
-    // ---------- Walk patches, emitting mappings as we go. ----------
-    //
-    // State machine: we co-iterate the rewritten string and a "cursor
-    // through the original source", switching every time we cross a
-    // patch boundary. Each generated line gets at least one mapping at
-    // column 0 (so a missing mapping never accidentally extends to the
-    // next line per §A.5).
+    // Co-iterate the rewritten string and a cursor through the original
+    // source, switching every time we cross a patch boundary. Each
+    // generated line gets at least one mapping at column 0 so a missing
+    // mapping never extends to the next line per §A.5.
     let mut mappings = String::with_capacity(rewritten.len() / 4 + 64);
     // VLQ deltas: prev_gen_col, prev_src_idx, prev_src_line, prev_src_col.
     let mut prev_gen_col: i64 = 0;
     let mut prev_src_line: i64 = 0;
     let mut prev_src_col: i64 = 0;
-    // `prev_src_idx` is implicit (we only emit one source) — every
+    // `prev_src_idx` is implicit (we only emit one source): every
     // segment delta is 0 against the previous one, which collapses to a
-    // single 'A' VLQ. Tracked here for clarity.
+    // single 'A' VLQ.
     let mut prev_src_idx: i64 = 0;
     // Track the generated-side line so we know how many ';' separators
     // we still owe in `mappings`.
@@ -174,7 +159,7 @@ pub fn compose_rewrite_map(
     // are sorted; the rewriter applies them in order, so we can pair
     // them with the matching span in `rewritten`.
     for patch in patches {
-        // ---- Unchanged region [src_offset..patch.start] / mirrored in `rewritten`. ----
+        // Unchanged region [src_offset..patch.start] mirrored in `rewritten`.
         let unchanged_len = patch.start as usize - src_offset;
         let unchanged_src = &source[src_offset..src_offset + unchanged_len];
         let unchanged_gen = &rewritten[gen_offset..gen_offset + unchanged_len];
@@ -184,8 +169,7 @@ pub fn compose_rewrite_map(
         // already emitted one for it.
         if !had_segment_on_current_line {
             let (sline, scol) = offset_to_line_col(source, src_offset);
-            // Emit at gen_col = current gen-column. We need that column —
-            // which is the col of `gen_offset` inside its line.
+            // Emit at the column of `gen_offset` inside its line.
             let (_gline, gcol) = offset_to_line_col(rewritten, gen_offset);
             // prev_gen_col resets to 0 at the start of each generated line
             // (the spec defines deltas to reset per-line). We handle that
@@ -236,10 +220,9 @@ pub fn compose_rewrite_map(
             }
         }
 
-        // ---- Patch region: emit one mapping at the start of the
-        //      replacement pointing to (patch.start in source). All
-        //      characters of the replacement map to that single site by
-        //      virtue of §A.5 interpolation. ----
+        // Patch region: emit one mapping at the start of the replacement
+        // pointing to `patch.start` in `source`. All characters of the
+        // replacement map to that site via §A.5 interpolation.
         let repl = patch.replacement.as_str();
         let (sline, scol) = offset_to_line_col(source, patch.start as usize);
         let (_gline_start, gcol_start) = offset_to_line_col(rewritten, gen_offset);
@@ -261,10 +244,9 @@ pub fn compose_rewrite_map(
                 current_gen_line += 1;
                 prev_gen_col = 0;
                 gen_offset += 1;
-                // After a newline inside the replacement we re-anchor at
-                // col 0 of the next generated line, still mapping to the
-                // same (sline, scol) — every char of the replacement
-                // attributes to the original patch site.
+                // After a newline inside the replacement, re-anchor at
+                // col 0 of the next generated line mapping to the same
+                // `(sline, scol)` original patch site.
                 emit_segment(
                     &mut mappings,
                     &mut prev_gen_col,
@@ -283,11 +265,9 @@ pub fn compose_rewrite_map(
         }
         // Advance the source cursor past the patched region.
         src_offset = patch.end as usize;
-        // `had_segment_on_current_line` stays true — we just emitted one
-        // for the replacement.
     }
 
-    // ---- Tail: unchanged region from the last patch end to EOF. ----
+    // Tail: unchanged region from the last patch end to EOF.
     let tail_src = &source[src_offset..];
     let tail_gen = &rewritten[gen_offset..];
     debug_assert_eq!(tail_src, tail_gen);
@@ -335,7 +315,7 @@ pub fn compose_rewrite_map(
     }
     let _ = current_gen_line;
 
-    // ---------- Serialize JSON. ----------
+    // Serialize JSON.
     let mut out = String::with_capacity(mappings.len() + source.len() + 256);
     out.push_str("{\"version\":3,\"sources\":[");
     json_escape_into(source_url, &mut out);
@@ -347,26 +327,13 @@ pub fn compose_rewrite_map(
     out
 }
 
-// ---------------------------------------------------------------------------
-// D2 follow-on: chain the rewriter's map with the target site's *original*
-// map (the `.map` file the bundler emitted alongside `bundled.js`). DevTools
-// then resolves rewritten → typescript-source directly, instead of stopping
-// at the bundled .js. Best-effort: any malformed input falls through to the
-// unchained map so DevTools still gets *something*.
-// ---------------------------------------------------------------------------
-
-/// Compose `rewriter_map ∘ original_map` and return the JSON for the
-/// composed map. When `original_map_json` is malformed / missing
-/// required fields, returns `zp_map_json` verbatim — never break the
-/// DevTools experience just because an upstream `.map` was bad.
-/// `script_url` is the script's absolute target URL. The upstream map's
-/// `sources` are usually RELATIVE (`"gfp-display-sdk.js"`, `"src/x.ts"`), and
-/// DevTools resolves them against the URL the MAP was served from — for us
-/// `<proxy>/zp/api/sourcemap?…`, which turned them into requests for
-/// `/zp/api/<name>` that 404. (That was the mysterious
-/// `GET /zp/api/gfp-display-sdk.js 404` in NAVER's console: a DevTools-only
-/// artifact, harmless to the page but noisy and misleading.) Resolve them
-/// against the script instead so they point at the real origin.
+/// Compose `rewriter_map` with `original_map` and return the JSON for the
+/// composed map. When `original_map_json` is malformed or missing required
+/// fields, returns `zp_map_json` verbatim.
+///
+/// `script_url` is the script's absolute target URL. Relative `sources`
+/// entries in the upstream map are resolved against `script_url` so
+/// DevTools does not resolve them against the `/zp/api/sourcemap` endpoint.
 pub fn chain_with_original_map(
     zp_map_json: &str,
     original_map_json: &str,
@@ -395,8 +362,8 @@ fn chain_with_original_map_impl(
     for i in 0..orig_map.get_source_count() {
         let src = orig_map.get_source(i).unwrap_or("");
         // Absolutise against the script so DevTools doesn't resolve the name
-        // against our `/zp/api/sourcemap?…` URL. Names that already carry a
-        // scheme (`http:`, `webpack://`, …) are left untouched.
+        // against our `/zp/api/sourcemap` URL. Names that already carry a
+        // scheme (`http:`, `webpack://`, etc.) are left untouched.
         let resolved = if src.is_empty() || src.contains("://") {
             src.to_string()
         } else {
@@ -411,8 +378,8 @@ fn chain_with_original_map_impl(
 
     // For each token in zp_map, look up its src position in orig_map.
     // If the original map covers that point, emit a chained token; if
-    // not, drop this mapping (Source Map v3 §A.5 interpolation falls
-    // back to the previous neighbour — usually one line above).
+    // not, drop this mapping so Source Map v3 §A.5 interpolation falls
+    // back to the previous neighbor.
     for tok in zp_map.tokens() {
         if let Some(orig_tok) = orig_map.lookup_token(tok.get_src_line(), tok.get_src_col()) {
             let orig_src = orig_tok.get_src_id();
@@ -461,7 +428,7 @@ mod tests {
 
     #[test]
     fn vlq_basic_round_values() {
-        // §A.4 sign-magnitude — verified against spec examples.
+        // §A.4 sign-magnitude verified against spec examples.
         let mut s = String::new();
         vlq_encode_into(0, &mut s);
         assert_eq!(s, "A");
@@ -499,7 +466,7 @@ mod tests {
         let end = tail.find('"').unwrap();
         let mappings = &tail[..end];
         assert!(!mappings.is_empty());
-        // No ';' — single generated line.
+        // Single generated line has no ';' separator.
         assert!(!mappings.contains(';'));
     }
 
@@ -522,7 +489,7 @@ mod tests {
         let tail = &map[mappings_idx + "\"mappings\":\"".len()..];
         let end = tail.find('"').unwrap();
         let mappings = &tail[..end];
-        // Two generated lines → exactly one ';' separator.
+        // Two generated lines produce one ';' separator.
         assert_eq!(mappings.matches(';').count(), 1);
     }
 
@@ -542,24 +509,13 @@ mod tests {
         assert_eq!(offset_to_line_col(src, 10), (2, 2));
     }
 
-    // ---- D2 chaining ----
-
     #[test]
     fn chain_with_original_map_redirects_to_typescript_source() {
         // Scenario: target site shipped `bundled.js` compiled from
-        // `original.ts` with a sibling `bundled.js.map`. We rewrote the
-        // bundled.js into rewritten and emitted a zp-map. After chaining,
-        // a token in the rewritten output must resolve back to a position
-        // in `original.ts`, not `bundled.js`.
-        //
-        // Layout of the original.ts → bundled.js map:
-        //   sources = ["original.ts"]
-        //   sourcesContent = ["const url = location.href;\nconsole.log(url);"]
-        //   Bundled.js line 0 col 6  (`const url`) ← original.ts line 0 col 6
-        //   Bundled.js line 1 col 12 (`console.log`) ← original.ts line 1 col 0
-        //
-        // We craft the original map directly so the test stays
-        // deterministic without invoking a real TS compiler.
+        // `original.ts` with a sibling `bundled.js.map`. We rewrote
+        // `bundled.js` and emitted a zp-map. After chaining, a token in
+        // the rewritten output must resolve back to a position in
+        // `original.ts`, not `bundled.js`.
         let mut orig = sourcemap::SourceMapBuilder::new(Some("bundled.js"));
         let src = orig.add_source("original.ts");
         orig.set_source_contents(
@@ -573,10 +529,7 @@ mod tests {
         orig.into_sourcemap().to_writer(&mut orig_json).unwrap();
         let orig_json = String::from_utf8(orig_json).unwrap();
 
-        // The zp_map's source is `bundled.js` (the SW fetched it as the
-        // "original" relative to the rewrite). One token that points
-        // into bundled.js line 0 col 6 — the place orig_map says is
-        // const-url in original.ts.
+        // The zp_map's source is `bundled.js` with a token at line 0 col 6.
         let mut zp = sourcemap::SourceMapBuilder::new(Some("rewritten.js"));
         let zp_src = zp.add_source("bundled.js");
         zp.set_source_contents(zp_src, Some("const url = __zp_get(globalThis,'location').href;\nconsole.log(url);"));
@@ -586,7 +539,7 @@ mod tests {
         zp.into_sourcemap().to_writer(&mut zp_json).unwrap();
         let zp_json = String::from_utf8(zp_json).unwrap();
 
-        // Compose: rewritten.js → original.ts directly.
+        // Compose rewritten.js to original.ts directly.
         let chained = chain_with_original_map(&zp_json, &orig_json, "https://cdn.example.com/app.js");
         let chained_map = sourcemap::SourceMap::from_slice(chained.as_bytes()).unwrap();
 
@@ -594,16 +547,15 @@ mod tests {
         let sources: Vec<&str> = (0..chained_map.get_source_count())
             .map(|i| chained_map.get_source(i).unwrap_or(""))
             .collect();
-        // Resolved against the SCRIPT url — DevTools would otherwise resolve the
-        // bare name against our /zp/api/sourcemap?… URL and request
-        // /zp/api/original.ts (404).
+        // Resolved against the script URL so DevTools does not resolve the
+        // bare name against `/zp/api/sourcemap`.
         assert!(
             sources.contains(&"https://cdn.example.com/original.ts"),
             "chained map must point at the absolutised original.ts, got {sources:?}"
         );
 
         // At least one token in the chained map must resolve to
-        // (line 0, col 6) of original.ts — the const-url site.
+        // (line 0, col 6) of original.ts.
         let tokens: Vec<_> = chained_map.tokens().collect();
         assert!(!tokens.is_empty(), "chained map must carry tokens");
         let mapped = tokens.iter().find(|t| {
@@ -620,8 +572,7 @@ mod tests {
 
     #[test]
     fn chain_with_malformed_original_returns_zp_map_verbatim() {
-        // Best-effort guarantee: an invalid upstream `.map` must NOT
-        // break DevTools. Return the rewriter map verbatim.
+        // An invalid upstream `.map` returns the rewriter map verbatim.
         let zp_json = compose_rewrite_map("a", "a", &[], "x.js");
         let chained = chain_with_original_map(&zp_json, "not a sourcemap", "https://cdn.example.com/app.js");
         assert_eq!(chained, zp_json, "fallback must be byte-identical to the zp map");

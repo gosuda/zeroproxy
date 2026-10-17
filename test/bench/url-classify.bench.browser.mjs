@@ -1,6 +1,5 @@
-// Browser bench driver — launches headless Chrome via puppeteer, mirrors
-// the Node bench. Pulls the shared bench-core.mjs source verbatim and
-// injects it into the page along with web/zp-rt.js + wasm bytes.
+// Browser benchmark driver launching headless Chrome via Puppeteer.
+// Injects bench-core.mjs, web/zp-rt.js, and zp_page_rt.wasm into the page.
 
 import { readFile, access } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
@@ -46,11 +45,8 @@ function report(title, rows, baselineLabel) {
   }
 }
 
-// Bench body — runs inside the page. Receives the bench-core source as a
-// text blob and rebuilds it as a module via blob URL + dynamic import.
+// Execute inside the browser page, importing bench-core via a Blob URL to preserve ES module exports.
 async function runInPage(coreSource, glueSource, wasmU8Array) {
-  // 1. Bootstrap bench-core via blob URL + dynamic import. This keeps the
-  //    Node ESM-style `export` syntax intact without rewriting.
   const coreBlob = new Blob([coreSource], { type: 'text/javascript' });
   const coreUrl = URL.createObjectURL(coreBlob);
   const core = await import(coreUrl);
@@ -61,7 +57,6 @@ async function runInPage(coreSource, glueSource, wasmU8Array) {
     encodeManual, encodeAsciiFast,
   } = core;
 
-  // 2. Bootstrap zp-rt glue (an IIFE registering globalThis.ZeroProxyRT).
   new Function(glueSource)();
   const ZeroProxyRT = window.ZeroProxyRT;
   if (!ZeroProxyRT) throw new Error('glue did not register ZeroProxyRT');
@@ -72,7 +67,6 @@ async function runInPage(coreSource, glueSource, wasmU8Array) {
   const now = () => performance.now();
   const t = (label, iters, fn) => timed(now, label, iters, fn);
 
-  // Parity check.
   let parityFails = 0;
   for (const s of PARITY_SAMPLES) {
     const expected = classifyJsRegex(s);
@@ -93,7 +87,6 @@ async function runInPage(coreSource, glueSource, wasmU8Array) {
   const cachedScratch = new Uint8Array(ex.memory.buffer).subarray(SCRATCH, SCRATCH + SCRATCH_CAP);
   const probeBuf = new Uint8Array(4096);
 
-  // ===== Main =====
   const main = [];
   main.push(t('js-regex', ITERS, (i) => classifyJsRegex(corpus[i % corpus.length])));
   main.push(t('js-URL (new URL parse)', ITERS, (i) => classifyJsURL(corpus[i % corpus.length])));
@@ -121,14 +114,12 @@ async function runInPage(coreSource, glueSource, wasmU8Array) {
   const handles = corpus.map(s => rt.internURL(s));
   main.push(t('wasm classifyURL (handle-only)', ITERS, (i) => ex.url_classify(handles[i % handles.length])));
 
-  // ===== Encoder isolation =====
   const enc_rows = [];
   enc_rows.push(t('encodeInto into Uint8Array', ITERS, (i) => enc.encodeInto(corpus[i % corpus.length], probeBuf).written));
   enc_rows.push(t('encodeInto into scratch view', ITERS, (i) => enc.encodeInto(corpus[i % corpus.length], cachedScratch).written));
   enc_rows.push(t('encodeManual (charCodeAt loop)', ITERS, (i) => encodeManual(corpus[i % corpus.length], probeBuf)));
   enc_rows.push(t('encodeAsciiFast (ASCII only)', ITERS, (i) => encodeAsciiFast(corpus[i % corpus.length], probeBuf)));
 
-  // ===== Wasm with alternate encoders =====
   const wasm_enc = [];
   wasm_enc.push(main.find(r => r.label === 'wasm raw (warm, cached view)'));
   wasm_enc.push(t('wasm raw + encodeManual', ITERS, (i) => {
@@ -143,7 +134,6 @@ async function runInPage(coreSource, glueSource, wasmU8Array) {
     return Number(packed & 0xffffffffn);
   }));
 
-  // ===== schemeOnly with alternate encoders =====
   const SCHEME_PROBE = 16;
   const schemeRows = [];
   schemeRows.push(main.find(r => r.label === 'wasm classifySchemeOnly (D)'));
@@ -158,10 +148,8 @@ async function runInPage(coreSource, glueSource, wasmU8Array) {
     return ex.url_classify_scheme_only(SCRATCH, n);
   }));
 
-  // ===== Batch =====
   const batch = [];
   batch.push(main.find(r => r.label === 'wasm raw (warm, cached view)'));
-  // Production rt.classifyBatch path — ASCII fast path + single-pass encoding.
   for (const N of [16, 64, 256]) {
     for (const s of corpus) rt.classOf(s);
     const batchSlice = corpus.slice(0, N);
@@ -212,13 +200,11 @@ async function runInPage(coreSource, glueSource, wasmU8Array) {
     });
   }
 
-  // ===== Cold =====
   const cold = [];
   cold.push(t('js-regex (cold unique)', ITERS, (i) => classifyJsRegex(`https://cold.example/${i}/asset.js`)));
   rt.reset();
   cold.push(t('wasm classOf (cold unique)', ITERS, (i) => rt.classOf(`https://cold.example/${i}/asset.js`)));
 
-  // ===== Length sensitivity =====
   const length = [];
   for (const mode of ['short', 'medium', 'long']) {
     const c = makeCorpus(1000, mode);
@@ -230,7 +216,6 @@ async function runInPage(coreSource, glueSource, wasmU8Array) {
     length.push(t(`wasm schemeOnly (${mode}, ~${avgLen}B)`, ITERS, (i) => rt.classifySchemeOnly(c[i % c.length])));
   }
 
-  // ===== Pool =====
   const pool = [];
   for (const SIZE of [100, 1000, 10000]) {
     rt.reset();

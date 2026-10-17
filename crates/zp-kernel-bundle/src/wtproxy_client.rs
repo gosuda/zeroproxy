@@ -1,4 +1,4 @@
-//! Virtual WebTransport client. Phase D4.
+//! Virtual WebTransport client.
 //!
 //! Exposes `WebTransport`-shaped API to target code that routes through SW
 //! over yamux/HTTP-3 to server WT gateway (`internal/wtproxy`).

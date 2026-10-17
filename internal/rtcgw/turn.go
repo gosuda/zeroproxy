@@ -1,32 +1,21 @@
 package rtcgw
 
-// Embedded TURN server — pion/turn/v4 spun in-process so operators don't
-// need to deploy coturn out-of-band. It is the whole D5 WebRTC path: the
-// page's native RTCPeerConnection runs relay-only through it (2026-09-30).
-// Uses long-term TURN-REST short-term credentials (RFC 7635): each
-// `IssueICEServerCreds` call returns a fresh username/password tuple
-// derived from `sharedSecret`, valid for `ttl`. The page realm reads
-// the tuple from `/zp/api/config` (boot JSON) and feeds it into the
-// native `RTCPeerConnection`'s `iceServers` array.
+// Embedded TURN server using pion/turn/v4 in-process so operators do not need
+// an external coturn deployment. The page's native RTCPeerConnection runs
+// relay-only through this server using short-term TURN-REST credentials
+// (RFC 7635): each `IssueICEServerCreds` call returns a username/password
+// tuple derived from `sharedSecret`, valid for `ttl`. The page realm reads
+// the tuple from `/zp/api/config` and passes it into `RTCPeerConnection`
+// `iceServers`.
 //
-// Topology:
+// Remote peers see the TURN server's external IP rather than the client's IP.
+// Operators behind NAT must supply `-rtc-turn-external-ip`; otherwise pion
+// advertises the listener's local IP in allocation responses.
 //
-//	page realm RTCPC ──(STUN/TURN)──▶ this TURN server
-//	                                  │
-//	                                  ▼
-//	                              relay UDP to target's peer
-//
-// The TURN server's external IP is what target peers see — page IP
-// stays private. Operator must supply `-rtc-turn-external-ip` when
-// behind NAT; otherwise pion fills the relay address with the
-// listener's local IP (host) and connectivity will fail through NAT.
-//
-// **Disabled by default**: requires `-rtc-enable` AND
-// `-rtc-turn-addr <ip:port>` (a routable address — Chrome ignores TURN
-// servers on loopback). Without it the page keeps the
-// RTC_GATEWAY_UNAVAILABLE stub: host candidates would connect the user
-// to the remote peer directly. DTLS/SRTP stay end to end, so the relay
-// carries ciphertext only.
+// Disabled by default: requires `-rtc-enable` and a routable `-rtc-turn-addr`
+// (Chrome ignores loopback TURN servers). Without it, the page keeps the
+// RTC_GATEWAY_UNAVAILABLE stub so host candidates cannot connect the client
+// directly to a remote peer. DTLS/SRTP remains end-to-end encrypted.
 
 import (
 	"crypto/rand"
@@ -55,9 +44,9 @@ type TURNServer struct {
 }
 
 // TURNConfig carries operator-supplied knobs. `Addr` is the UDP
-// listener `ip:port` (typically `0.0.0.0:3478`). `PublicAddr` is what
-// clients reach the server at (covers NAT — for a port-forwarded box
-// it's `<public-ip>:3478`). `ExternalIP` is the relay-address IP
+// listener `ip:port` (typically `0.0.0.0:3478`). `PublicAddr` is the
+// address clients reach the server at (for port-forwarded NAT,
+// `<public-ip>:3478`). `ExternalIP` is the relay-address IP
 // pion advertises in TURN allocation responses; for a single-IP host
 // this is the same as the listener IP. `Realm` is the TURN realm
 // string (any operator-meaningful identifier).
@@ -107,9 +96,8 @@ func NewTURNServer(cfg TURNConfig) (*TURNServer, error) {
 
 	externalIP := cfg.ExternalIP
 	if externalIP == "" {
-		// Fall back to the listener's local IP. For containerized /
-		// NAT'd deployments this is wrong and TURN will fail across
-		// NAT — operator must supply `-rtc-turn-external-ip`.
+		// Fall back to the listener's local IP; NAT deployments must supply
+		// `-rtc-turn-external-ip` explicitly.
 		externalIP = udpAddr.IP.String()
 		if externalIP == "0.0.0.0" || externalIP == "::" {
 			externalIP = "127.0.0.1"
@@ -125,18 +113,17 @@ func NewTURNServer(cfg TURNConfig) (*TURNServer, error) {
 	}
 
 	server, err := turn.NewServer(turn.ServerConfig{
-		Realm:         cfg.Realm,
-		// ★IssueICEServerCreds mints TURN-REST usernames ("<expiry>:<label>").
-		// NewLongTermAuthHandler parses the whole username as an integer, so
-		// it refused every credential this server handed out — no browser
-		// ever allocated a relay (2026-09-30, TestTURNServerAcceptsItsOwnCredentials).
-		AuthHandler:   turn.LongTermTURNRESTAuthHandler(cfg.SharedSecret, logging.NewDefaultLoggerFactory().NewLogger("turn")),
+		Realm:       cfg.Realm,
+		// IssueICEServerCreds mints TURN-REST usernames ("<expiry>:<label>"),
+		// which require LongTermTURNRESTAuthHandler rather than
+		// NewLongTermAuthHandler (which expects integer-only usernames).
+		AuthHandler: turn.LongTermTURNRESTAuthHandler(cfg.SharedSecret, logging.NewDefaultLoggerFactory().NewLogger("turn")),
 		PacketConnConfigs: []turn.PacketConnConfig{
 			{
 				PacketConn:            conn,
 				RelayAddressGenerator: relayGen,
-				// CreatePermission / ChannelBind name the peer a client may
-				// reach — the operator's own networks stay out of reach.
+				// CreatePermission and ChannelBind specify the target peer IP;
+				// block non-public peers unless AllowPrivatePeers is enabled.
 				PermissionHandler: func(_ net.Addr, peerIP net.IP) bool {
 					return cfg.AllowPrivatePeers || !netguard.IsNonPublic(peerIP)
 				},
@@ -183,7 +170,7 @@ func (s *TURNServer) Close() error {
 
 // ICEServerCred is the cred tuple the page realm consumes.
 // `URLs` is one or two TURN URLs (UDP + TLS variants). `Username` +
-// `Credential` are short-term derived per RFC 7635 — username is
+// `Credential` are short-term derived per RFC 7635: username is
 // `<expiry-unix>:<userlabel>`, credential is base64(HMAC-SHA1(secret,
 // username)).
 type ICEServerCred struct {
@@ -194,9 +181,8 @@ type ICEServerCred struct {
 
 // IssueICEServerCreds returns a fresh time-limited cred tuple the
 // caller can hand to the page realm. `userLabel` lets operators
-// attribute creds to a specific session / tab (it's embedded in the
-// username but pion's auth handler treats the cred as opaque
-// HMAC-derived input). `userLabel` empty → a random hex label.
+// attribute creds to a specific session or tab (when empty, a random
+// hex label is generated).
 func (s *TURNServer) IssueICEServerCreds(userLabel string) (ICEServerCred, error) {
 	if s == nil {
 		return ICEServerCred{}, fmt.Errorf("rtcgw: nil TURN server")

@@ -1,23 +1,19 @@
 //! Per-origin connection pool with HTTP/1.1 keep-alive.
 //!
-//! Without this layer, every fetch — even subresources on the same host
-//! as the document — pays a fresh SOCKS5 + TLS handshake. TLS handshake
-//! is dominant under `rustls-rustcrypto` (pure-Rust ECDHE / AEAD), so a
-//! reused `TlsStream` is the largest single page-load speedup we can
-//! land short of HTTP/2.
+//! Without this layer, every fetch (including subresources on the same host
+//! as the document) pays a fresh SOCKS5 + TLS handshake. TLS handshakes
+//! dominate latency under `rustls-rustcrypto` (pure-Rust ECDHE / AEAD), so
+//! reusing `TlsStream` connections is a major page-load speedup alongside
+//! HTTP/2.
 //!
 //! ## Model
 //!
-//! ```text
-//! ┌── PoolKey (scheme, host, port) ──┬─→ VecDeque<PooledConn>
-//! │   "https" / "github.com" / 443   │   [Tls, Tls, Tls]   (LIFO)
-//! │   "http"  / "127.0.0.1"  / 8080  │   [Plain]
-//! └──────────────────────────────────┴────────────────────
-//! ```
+//! Each `PoolKey (scheme, host, port, isolation_key)` maps to a
+//! `VecDeque<PooledConn>` (LIFO queue of `Tls` or `Plain` connections).
 //!
 //! * **Take**: pop the most-recently-used conn for the key (LIFO so the
-//!   warmest TCP/TLS window stays warm). Miss → `None`; caller opens a
-//!   fresh conn.
+//!   warmest TCP/TLS window stays warm). Returns `None` on a miss so the
+//!   caller opens a fresh conn.
 //! * **Put**: only after complete body framing and content decoding, when
 //!   `codec::response_keepalive` permits reuse. Errors/cancellation drop it.
 //! * **Stale recovery**: if the kept conn's next request errors at
@@ -29,13 +25,9 @@
 //! ## TLS / yamux invariants preserved
 //!
 //! The cached `TlsStream` already has its handshake complete and is
-//! sitting on a live yamux stream. Reusing it pushes:
-//!   - 0 round-trips for TLS setup
-//!   - 0 round-trips for SOCKS5 (already established by the prior request)
-//!   - 0 round-trips for the yamux SYN
-//!
-//! …leaving only the HTTP/1.1 request + response on the same wire. That's
-//! the same speedup curl / browsers get with native keep-alive.
+//! sitting on a live yamux stream. Reusing it requires 0 round-trips for
+//! TLS setup, SOCKS5, or the yamux SYN, leaving only the HTTP/1.1 request
+//! and response on the wire.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
@@ -54,13 +46,12 @@ pub(crate) struct PoolKey {
     pub scheme: String,
     pub host: String,
     pub port: u16,
+    pub isolation_key: String,
 }
 
-/// One pooled HTTP/1.1 connection. Either plain or TLS-wrapped. Both
-/// flavors implement `AsyncRead + AsyncWrite` so the HTTP layer is
-/// provider-blind — the byte stream itself is `Box<dyn AsyncIo>` from
-/// whatever `Dialer` produced it (REFACTOR.md §3.2), not hard-pinned to
-/// yamux.
+/// One pooled HTTP/1.1 connection (plain or TLS-wrapped). Both variants
+/// implement `AsyncRead + AsyncWrite` over `Box<dyn AsyncIo>` from the
+/// active `Dialer`.
 pub(crate) enum PooledConn {
     Plain(Box<dyn AsyncIo>),
     Tls(Box<TlsStream<Box<dyn AsyncIo>>>),
@@ -104,20 +95,20 @@ impl AsyncWrite for PooledConn {
     }
 }
 
-// ----- per-key idle queue ---------------------------------------------------
-
-/// Cap on idle conns kept per (scheme,host,port). Sites with bursty
+/// Cap on idle conns kept per (scheme,host,port,isolation_key). Sites with bursty
 /// fanout (CDN with N parallel requests) drain the pool then re-fill; we
 /// don't want to hold 100+ idle yamux streams against the relay.
 const MAX_IDLE_PER_KEY: usize = 6;
+/// Cap on distinct `PoolKey` buckets across all origins and isolation keys.
+const MAX_POOL_KEYS: usize = 64;
 
 thread_local! {
     static POOL: RefCell<HashMap<PoolKey, VecDeque<PooledConn>>> =
         RefCell::new(HashMap::new());
-    /// Per-origin HTTP/2 client. Unlike HTTP/1.1 we don't take/put — one
-    /// `Http2Client` serves every concurrent fetch to the origin via h2's
-    /// own stream multiplex. The `SendRequest` clone is cheap (Arc internally)
-    /// so callers `get_http2()` to grab a handle and never return it.
+    /// Per-origin HTTP/2 client. Unlike HTTP/1.1, one `Http2Client` serves
+    /// every concurrent fetch to the origin via h2's stream multiplexing.
+    /// Cloning `SendRequest` is cheap (Arc internally), so callers use
+    /// `get_http2()` to grab a handle without returning it.
     static HTTP2_POOL: RefCell<HashMap<PoolKey, Http2Client>> =
         RefCell::new(HashMap::new());
 }
@@ -141,9 +132,15 @@ pub(crate) fn take(key: &PoolKey) -> Option<PooledConn> {
 pub(crate) fn put(key: PoolKey, conn: PooledConn) {
     POOL.with(|p| {
         let mut p = p.borrow_mut();
+        p.retain(|_, q| !q.is_empty());
+        if !p.contains_key(&key) && p.len() >= MAX_POOL_KEYS {
+            if let Some(evict) = p.keys().next().cloned() {
+                p.remove(&evict);
+            }
+        }
         let q = p.entry(key).or_default();
         if q.len() >= MAX_IDLE_PER_KEY {
-            // Drop the oldest (front) — that's the conn most likely to
+            // Drop the oldest (front) connection, which is most likely to
             // have been idled out upstream.
             q.pop_front();
         }
@@ -159,9 +156,9 @@ pub(crate) fn clear() {
 }
 
 /// Look up a live HTTP/2 client for the origin. Returns a clone of the
-/// `Http2Client` (cheap — h2 stores the actual connection state behind
-/// an `Arc`) so callers send concurrently without coordinating. Dead
-/// connections (`is_alive()` false) are evicted and treated as a miss.
+/// `Http2Client` (h2 stores the connection state behind an `Arc`) so
+/// callers send concurrently without coordinating. Dead connections
+/// (`is_alive()` false) are evicted and treated as a miss.
 pub(crate) fn get_http2(key: &PoolKey) -> Option<Http2Client> {
     HTTP2_POOL.with(|p| {
         let mut p = p.borrow_mut();
@@ -169,7 +166,7 @@ pub(crate) fn get_http2(key: &PoolKey) -> Option<Http2Client> {
             if client.is_alive() {
                 return Some(client.clone());
             }
-            // Connection closed — drop the dead entry so the next caller
+            // Connection closed; drop the dead entry so the next caller
             // opens a fresh one.
             p.remove(key);
         }
@@ -179,20 +176,24 @@ pub(crate) fn get_http2(key: &PoolKey) -> Option<Http2Client> {
 
 /// Register an HTTP/2 client as the per-origin singleton. If an entry
 /// already exists (race: two parallel fetches both opened a fresh
-/// connection), the new client wins — the older one's streams will
-/// drain naturally and the connection idles out.
+/// connection), the new client wins and the older one's streams drain
+/// naturally.
 pub(crate) fn put_http2(key: PoolKey, client: Http2Client) {
     HTTP2_POOL.with(|p| {
-        p.borrow_mut().insert(key, client);
+        let mut p = p.borrow_mut();
+        if !p.contains_key(&key) && p.len() >= MAX_POOL_KEYS {
+            if let Some(evict) = p.keys().next().cloned() {
+                p.remove(&evict);
+            }
+        }
+        p.insert(key, client);
     });
 }
 
-/// Drop the cached HTTP/2 client for `key`. Called when a `send_request`
-/// on a pool clone fails — h2 0.4 has no synchronous "is the connection
-/// alive?" probe, so the pool can hand out dead clones whose underlying
-/// connection has GoAway'd or whose driver task has exited. Without
-/// eviction the next call reads the same dead clone and the cold-path
-/// fallback runs forever instead of replacing the pool entry.
+/// Drop the cached HTTP/2 client for `key`. Called when `send_request`
+/// on a pooled clone fails: h2 0.4 has no synchronous liveness probe,
+/// so the pool can hand out clones whose underlying connection has sent
+/// GOAWAY or whose driver task has exited.
 pub(crate) fn remove_http2(key: &PoolKey) {
     HTTP2_POOL.with(|p| {
         p.borrow_mut().remove(key);

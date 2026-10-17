@@ -11,16 +11,13 @@ use std::str;
 
 /// True for the WHATWG Fetch "null body status" set (101, 103, 204, 205, 304).
 ///
-/// A `Response` for one of these MUST be constructed with a null body — the
+/// A `Response` for one of these MUST be constructed with a null body; the
 /// browser's Response constructor throws `Response with null body status
-/// cannot have body` otherwise. The kernel's catch turned that throw into a
-/// bare 502, so NAVER's `POST https://nlog.naver.com/n` beacon (answers 204)
-/// and every conditional request answering 304 failed.
+/// cannot have body` otherwise.
 ///
 /// Lives here rather than beside the Response construction because
-/// `zp-kernel-bundle::kernel` is `#![cfg(target_arch = "wasm32")]` — a test
-/// placed there would never compile on the host, and a test that never runs
-/// is worse than no test.
+/// `zp-kernel-bundle::kernel` is `#![cfg(target_arch = "wasm32")]`, so a test
+/// placed there would never compile on the host.
 pub fn is_null_body_status(status: u16) -> bool {
     matches!(status, 101 | 103 | 204 | 205 | 304)
 }
@@ -34,7 +31,7 @@ mod null_body_status_tests {
         for s in [101u16, 103, 204, 205, 304] {
             assert!(is_null_body_status(s), "{s} must be a null-body status");
         }
-        // Neighbours that DO carry a body must not be caught by the guard —
+        // Neighbours that DO carry a body must not be caught by the guard;
         // suppressing a real body would silently truncate the response.
         for s in [
             100u16, 102, 200, 201, 202, 203, 206, 300, 301, 302, 303, 305, 307, 308, 400, 404, 500,
@@ -66,10 +63,8 @@ pub struct ResponseHead {
     pub head_len: usize,
 }
 
-// --- Request side ---------------------------------------------------------
-
 /// Whether a request carries a `Content-Length`: always with a body, and `Content-Length: 0` for a POST or PUT
-/// without one — what Chrome sends (net's `HttpNetworkTransaction::BuildRequestHeaders`, over HTTP/1.1 and HTTP/2
+/// without one, matching Chrome (`HttpNetworkTransaction::BuildRequestHeaders`, over HTTP/1.1 and HTTP/2
 /// alike). Servers that frame a body by its length refuse a POST without it: Optimizely's event endpoint answers
 /// an HTTP/2 POST with no `content-length` `400` and the same body with one `204`.
 pub fn wants_content_length(method: &str, body_len: usize) -> bool {
@@ -77,7 +72,7 @@ pub fn wants_content_length(method: &str, body_len: usize) -> bool {
 }
 
 /// Build the HTTP/1.1 request head as bytes: request line + headers +
-/// terminating CRLF. The body is **not** appended — the wasm wrapper
+/// terminating CRLF. The body is **not** appended; the wasm wrapper
 /// writes it separately to support streaming and large uploads.
 ///
 /// `host_header` is what we set as `Host:` if the caller didn't already
@@ -85,12 +80,12 @@ pub fn wants_content_length(method: &str, body_len: usize) -> bool {
 /// is rejected because the relay below us is SOCKS5, not an HTTP proxy.
 ///
 /// Auto-inserted headers (when not present in `headers`):
-/// * `Host:` — required (RFC 9112 §3.2.2). Errors if `host_header` is
+/// * `Host:` is required (RFC 9112 §3.2.2). Errors if `host_header` is
 ///   empty.
-/// * `Content-Length:` — added when `wants_content_length` (a body, or a POST/PUT
+/// * `Content-Length:` is added when `wants_content_length` (a body, or a POST/PUT
 ///   without one) and the caller did not set either `Content-Length` or
 ///   `Transfer-Encoding`.
-/// * `Connection: keep-alive` — added when the caller did not set
+/// * `Connection: keep-alive` is added when the caller did not set
 ///   `Connection`. We intentionally never force `close` because every
 ///   modern browser keeps the connection alive and WAFs treat
 ///   `Connection: close` on a fresh HTTPS connection as a bot signal.
@@ -178,8 +173,6 @@ pub fn build_request_head(
     buf.extend_from_slice(b"\r\n");
     Ok(buf)
 }
-
-// --- Response side --------------------------------------------------------
 
 /// Find the byte offset just *after* the first CRLFCRLF in `b`, i.e. the
 /// length of the head. Returns `None` if the head isn't complete yet.
@@ -274,8 +267,6 @@ pub fn no_body_status(status: u16) -> bool {
     matches!(status, 100..=199 | 204 | 304)
 }
 
-// --- RFC 9112 §7.1 chunked-transfer helpers --------------------------------
-
 /// Parsed `chunk-size [ ";" chunk-ext ]` line per RFC 9112 §7.1.1. The
 /// extension is dropped (we don't act on any chunk-ext today). A size of
 /// zero marks the terminal chunk, after which trailers (if any) and the
@@ -285,7 +276,7 @@ pub struct ChunkSize {
     /// Decoded chunk length in bytes. RFC 9112 §7.1 says hex value; we
     /// also reject non-hex digits and empty size fields.
     pub size: u64,
-    /// True when `size == 0` — caller now reads trailers + final CRLF.
+    /// True when `size == 0`; caller now reads trailers + final CRLF.
     pub is_terminal: bool,
 }
 
@@ -331,7 +322,7 @@ pub const MAX_CHUNK_LINE: usize = MAX_HEAD_BYTES;
 /// `zp-bundle/src/kernel/transport/http1.rs` pushes raw bytes from the
 /// upstream stream; `step()` advances the state machine and accumulates
 /// chunk bodies into an internal buffer. Trailers (and the final empty
-/// line) are recognised but the trailer content is discarded — every
+/// line) are recognised but the trailer content is discarded; every
 /// caller today only consumes the body bytes.
 ///
 /// Consumers may drain bytes before completion, but must require `Done` before
@@ -363,7 +354,7 @@ enum ChunkedState {
 /// Outcome of one `ChunkedDecoder::step()` call.
 #[derive(Debug, PartialEq, Eq)]
 pub enum ChunkedStep {
-    /// State machine needs more input bytes — caller reads more and
+    /// State machine needs more input bytes; caller reads more and
     /// pushes them with `push`.
     NeedMore,
     /// Progress made; call `step()` again. The body is in the decoder's
@@ -461,7 +452,7 @@ impl ChunkedDecoder {
                     self.state = ChunkedState::Done;
                     return Ok(ChunkedStep::Done);
                 }
-                // Non-empty trailer — discard and loop. Real trailers
+                // Non-empty trailer: discard and loop. Real trailers
                 // (e.g. gRPC-Status, Server-Timing) aren't surfaced to
                 // the page today.
                 Ok(ChunkedStep::Progress)
@@ -534,8 +525,6 @@ pub fn response_keepalive(status: u16, headers: &[(String, String)]) -> bool {
     chunked || has_cl || no_body_status(status)
 }
 
-// --- Token validation -----------------------------------------------------
-
 /// RFC 9112 §5.6.2 / RFC 7230 §3.2.6 token predicate. Used for both
 /// method names and header field names.
 pub fn is_token(s: &str) -> bool {
@@ -552,8 +541,6 @@ pub fn is_token(s: &str) -> bool {
         })
 }
 
-// --- Tests ----------------------------------------------------------------
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -561,8 +548,6 @@ mod tests {
     fn h(name: &str, value: &str) -> (String, String) {
         (name.to_string(), value.to_string())
     }
-
-    // -- request line ---
 
     #[test]
     fn request_get_no_body_adds_host_and_keep_alive() {
@@ -667,8 +652,6 @@ mod tests {
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
     }
 
-    // -- response head parsing ---
-
     #[test]
     fn find_crlf2_returns_offset_after_terminator() {
         let buf = b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\nbody";
@@ -705,13 +688,11 @@ mod tests {
     #[test]
     fn parse_response_head_incomplete_rejected() {
         // Buffer has a valid CRLFCRLF but is reported as Partial when the
-        // status line isn't terminated. Both errors land on InvalidData
-        // — we just want to assert we don't accidentally accept either.
+        // status line isn't terminated. Both errors land on InvalidData;
+        // we just want to assert we don't accidentally accept either.
         let err = parse_response_head(b"HTTP/1.1 200").expect_err("must fail");
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     }
-
-    // -- framing helpers ---
 
     #[test]
     fn terminal_chunked_when_te_ends_with_chunked() {
@@ -720,7 +701,7 @@ mod tests {
             "Transfer-Encoding",
             "gzip, chunked"
         )]));
-        // chunked NOT terminal → not chunked-framed.
+        // chunked NOT terminal: not chunked-framed.
         assert!(!header_terminal_chunked(&[h(
             "Transfer-Encoding",
             "chunked, gzip"
@@ -776,7 +757,7 @@ mod tests {
 
     #[test]
     fn response_keepalive_close_delimited_body_blocks_pool() {
-        // No CL, no chunked, status not in no-body set → close-delimited.
+        // No CL, no chunked, status not in no-body set: close-delimited.
         assert!(!response_keepalive(200, &[]));
     }
 
@@ -792,8 +773,6 @@ mod tests {
         assert!(response_keepalive(200, &[h("Transfer-Encoding", "chunked")]));
     }
 
-    // -- token predicate ---
-
     #[test]
     fn is_token_accepts_rfc_alphabet() {
         assert!(is_token("GET"));
@@ -808,8 +787,6 @@ mod tests {
         assert!(!is_token("X\tName"));
         assert!(!is_token("X\r"));
     }
-
-    // -- chunked decoder helpers ---
 
     #[test]
     fn chunk_size_plain_hex() {
@@ -834,7 +811,7 @@ mod tests {
     #[test]
     fn chunk_size_extension_dropped() {
         // RFC 9112 §7.1.1 chunk-ext is parsed but not acted on. We don't
-        // even validate its grammar — every byte after the first `;` is
+        // even validate its grammar; every byte after the first `;` is
         // discarded.
         let cs = parse_chunk_size_line("5;name=value").expect("ok");
         assert_eq!(cs.size, 5);
@@ -856,7 +833,7 @@ mod tests {
 
     #[test]
     fn chunk_size_only_extension_rejected() {
-        // ";foo" → empty size field
+        // ";foo": empty size field
         let err = parse_chunk_size_line(";foo").expect_err("must fail");
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     }
@@ -880,13 +857,10 @@ mod tests {
 
     #[test]
     fn chunk_size_overflow_rejected() {
-        // 17 hex digits → > u64::MAX, parse fails.
+        // 17 hex digits exceed u64::MAX, parse fails.
         let err = parse_chunk_size_line("ffffffffffffffff0").expect_err("must fail");
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     }
-
-
-    // -- ChunkedDecoder ---
 
     fn run_one_shot(input: &[u8]) -> io::Result<Vec<u8>> {
         let mut d = ChunkedDecoder::new(1 << 20);

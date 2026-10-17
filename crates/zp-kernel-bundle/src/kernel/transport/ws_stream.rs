@@ -1,4 +1,4 @@
-//! `web_sys::WebSocket` → `futures::io::AsyncRead + AsyncWrite` adapter.
+//! `web_sys::WebSocket` to `futures::io::AsyncRead + AsyncWrite` adapter.
 //!
 //! The WebSocket API is event-driven: incoming binary frames fire `onmessage`
 //! callbacks asynchronously, and the only outgoing write surface is the
@@ -18,7 +18,7 @@
 //!
 //! ## Frame semantics
 //!
-//! Yamux, TLS records, and HTTP all see this stream as raw bytes — they
+//! Yamux, TLS records, and HTTP all see this stream as raw bytes; they
 //! don't care about WebSocket frame boundaries, and we don't preserve them.
 //! `poll_read` returns as many bytes as fit in the caller's buffer from the
 //! current pending frame; leftover bytes stay queued for the next read.
@@ -26,8 +26,8 @@
 //! ## Thread model
 //!
 //! WASM is single-threaded; the callbacks and the futures executor run on
-//! the same JS event loop. We use `Rc<RefCell<_>>` for shared state. No
-//! `Send + Sync` bounds. The `Waker` is stored as a plain field — the JS
+//! the same JS event loop. We use `Rc<RefCell<_>>` for shared state without
+//! `Send + Sync` bounds. The `Waker` is stored as a plain field so the JS
 //! callback wakes the executor synchronously on the same task queue.
 
 use std::cell::RefCell;
@@ -44,6 +44,8 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use web_sys::{BinaryType, CloseEvent, ErrorEvent, MessageEvent, WebSocket};
 
+const MAX_WS_BUFFER_BYTES: usize = 32 * 1024 * 1024;
+
 /// Internal shared state. Lives in a single `Rc<RefCell<_>>` shared by the
 /// `WsStream` (read/write surface) and the four `Closure`s wired to the
 /// underlying `WebSocket` (open, message, error, close).
@@ -52,6 +54,8 @@ struct Inner {
     /// a whole received frame's bytes; the front entry is being drained
     /// from `read_cursor`.
     rx_buf: VecDeque<Vec<u8>>,
+    /// Total bytes held across all frames in `rx_buf`.
+    rx_bytes: usize,
     /// Byte offset within `rx_buf.front()` of the next byte to return.
     /// Reset to 0 whenever the front entry is drained and popped.
     read_cursor: usize,
@@ -78,6 +82,7 @@ impl Inner {
     fn new() -> Self {
         Self {
             rx_buf: VecDeque::new(),
+            rx_bytes: 0,
             read_cursor: 0,
             closed: false,
             error: None,
@@ -115,18 +120,12 @@ pub(crate) struct WsStream {
     _on_close: Closure<dyn FnMut(CloseEvent)>,
 }
 
-/// Cheap "is there still un-parsed inbound data?" probe, shared with the yamux
-/// driver (see `yamux::drive`). The driver owns the `Connection`, not the
-/// socket, so it cannot inspect `rx_buf` directly — this handle lets it decide
-/// whether parking is safe.
+/// Probe for un-parsed inbound data, shared with `yamux::drive`.
 ///
-/// Why it exists: `Connection::poll_next_inbound` returns `Pending` once it has
-/// consumed the frames it wants for this tick, even when more frames are still
-/// queued here. The driver used to park in that case (its `made_progress` flag
-/// only tracks new inbound streams / completed opens, neither of which happens
-/// for ordinary DATA frames), so the queued remainder sat untouched until the
-/// NEXT WebSocket message happened to arrive — for NAVER that was the upstream's
-/// 60 s keepalive PING. Hence documents that froze mid-parse for exactly 60 s.
+/// `Connection::poll_next_inbound` returns `Pending` once it has consumed
+/// the frames it needs for the current tick, even when more frames remain
+/// queued in `rx_buf`. Without checking `has_buffered()`, the yamux driver
+/// would park while ordinary DATA frames remain queued.
 #[derive(Clone)]
 pub(crate) struct RxPending(Rc<RefCell<Inner>>);
 
@@ -166,9 +165,8 @@ impl WsStream {
         ws.set_onopen(Some(on_open.as_ref().unchecked_ref()));
 
         // onmessage: extract bytes from ArrayBuffer (binaryType arraybuffer
-        // is set above) or, for string frames, the UTF-8 bytes — but we
-        // never expect string frames on this transport so a string frame is
-        // an error.
+        // is set above). Text frames are rejected as errors since the relay
+        // transport is strictly binary.
         let on_message = {
             let inner = inner.clone();
             Closure::wrap(Box::new(move |ev: MessageEvent| {
@@ -176,7 +174,32 @@ impl WsStream {
                 let bytes: Vec<u8> = if let Ok(ab) = data.clone().dyn_into::<js_sys::ArrayBuffer>()
                 {
                     let arr = Uint8Array::new(&ab);
-                    let mut v = vec![0u8; arr.length() as usize];
+                    let len = arr.length() as usize;
+                    if len == 0 {
+                        return;
+                    }
+                    let current_bytes = {
+                        let g = inner.borrow();
+                        if g.closed {
+                            return;
+                        }
+                        g.rx_bytes
+                    };
+                    if len > MAX_WS_BUFFER_BYTES.saturating_sub(current_bytes) {
+                        let mut g = inner.borrow_mut();
+                        g.rx_buf.clear();
+                        g.rx_bytes = 0;
+                        g.read_cursor = 0;
+                        g.closed = true;
+                        g.error = Some(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "ws_stream: receive buffer exceeded 32 MiB cap",
+                        ));
+                        g.wake_read();
+                        g.wake_open();
+                        return;
+                    }
+                    let mut v = vec![0u8; len];
                     arr.copy_to(&mut v);
                     v
                 } else if let Some(s) = data.as_string() {
@@ -199,12 +222,8 @@ impl WsStream {
                     g.wake_read();
                     return;
                 };
-                if bytes.is_empty() {
-                    // Treat empty binary frames as a no-op rather than EOF;
-                    // EOF is signaled by `onclose`.
-                    return;
-                }
                 let mut g = inner.borrow_mut();
+                g.rx_bytes = g.rx_bytes.saturating_add(bytes.len());
                 g.rx_buf.push_back(bytes);
                 g.wake_read();
             }) as Box<dyn FnMut(MessageEvent)>)
@@ -313,13 +332,11 @@ impl AsyncRead for WsStream {
     ) -> Poll<io::Result<usize>> {
         let mut g = self.inner.borrow_mut();
         // Drain the front frame first. Errors from `onclose`/`onerror` are
-        // surfaced ONLY after the buffered payload is fully drained — when an
+        // surfaced only after the buffered payload is fully drained: when an
         // HTTP/1.1 origin sends `Connection: close` it writes the response
         // body and immediately FINs, and the relay's `io.Copy` closes the WS
         // the moment it observes EOF in one direction. The close event can
-        // therefore fire while the last response frames are still queued; if
-        // we surfaced the error first we would TARGET_HTTP_FAILED valid
-        // responses for any non-keepalive origin.
+        // therefore fire while the last response frames are still queued.
         let (n, drained) = {
             match g.rx_buf.front() {
                 Some(front) => {
@@ -334,7 +351,9 @@ impl AsyncRead for WsStream {
         };
         if n > 0 {
             if drained {
-                g.rx_buf.pop_front();
+                if let Some(popped) = g.rx_buf.pop_front() {
+                    g.rx_bytes = g.rx_bytes.saturating_sub(popped.len());
+                }
                 g.read_cursor = 0;
             } else {
                 g.read_cursor += n;

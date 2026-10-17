@@ -20,7 +20,7 @@ type CSPOptions struct {
 // crates/zp-shared/src/csp.rs is enforced by the testdata/csp.golden file
 // consumed by both `go test ./internal/headers` and `cargo test -p zp-shared`.
 //
-// wsOrigin is `wss://<proxy-host>` (or `ws://<proxy-host>` over plain HTTP) —
+// wsOrigin is `wss://<proxy-host>` (or `ws://<proxy-host>` over plain HTTP):
 // the only non-self connect target. Wildcards are forbidden.
 func BuildCSP(wsOrigin string) string {
 	return BuildCSPWith(wsOrigin, CSPOptions{})

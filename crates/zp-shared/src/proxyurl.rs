@@ -1,41 +1,31 @@
-//! `/zp/api/fetch?url=…` 서브리소스 URL 빌더 — **단일 소스**.
+//! Single source of truth for building `/zp/api/fetch?url=...` subresource URLs.
 //!
-//! 이 문자열을 만드는 곳이 넷이었다: `zp-htmltx`(문서 파싱), `zp-css`(스타일시트),
-//! 페이지 realm 프렐류드(`subresourceProxyPath`), 그리고 SW 의 릴레이 변환.
-//! 출력이 서로 달랐다:
-//!
-//! | | 프래그먼트 | `&tab=` | 퍼센트 인코딩 |
-//! |---|---|---|---|
-//! | htmltx | 파라미터 **밖**에 보존 | 없음 | `NON_ALPHANUMERIC - -._~` |
-//! | zp-css | 파라미터 **안**으로 삼킴 | 없음 | `form_urlencoded` (공백 → `+`) |
-//! | 프렐류드 | 파라미터 **안**으로 삼킴 | 붙임 | `encodeURIComponent` |
-//!
-//! 프래그먼트가 파라미터 안으로 들어가면 **브라우저가 조각을 못 고른다** —
-//! 외부 SVG 스프라이트(`sprite.svg#icon`)를 참조하는 `<use>` 와 CSS `url()`
-//! 이 통째로 빈 채로 렌더된다. 프래그먼트는 요청에 실리지 않으므로 프록시 URL
-//! **바깥**에 그대로 붙이는 것이 맞다.
-//!
-//! 인코딩 차이는 SW 가 `URLSearchParams` 로 읽어 `+` 도 공백으로 풀기 때문에
-//! 관측되지 않았다 — 하지만 셋이 다른 채로 두면 다음 소비자가 그 가정을
-//! 깨뜨린다. 여기 하나로 모은다.
+//! Shared across `zp-htmltx` (document parsing), `zp-css` (stylesheets), the
+//! page-realm prelude (`subresourceProxyPath`), and SW relay rewriting.
+//! If the URL fragment is encoded inside the query parameter, the browser cannot
+//! select the target fragment and renders `<use>` or CSS `url()` references to
+//! external SVG sprites (`sprite.svg#icon`) blank. Since fragments are never
+//! sent over the wire, we append the raw fragment outside the proxy URL.
 
 use percent_encoding::{utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
 
-/// 쿼리 파라미터 값으로 안전한 집합. RFC 3986 unreserved 만 남긴다.
+/// Safe byte set for query parameter values; retains only RFC 3986 unreserved characters.
 pub const URL_PARAM_ENCODE: &AsciiSet = &NON_ALPHANUMERIC
     .remove(b'-')
     .remove(b'.')
     .remove(b'_')
     .remove(b'~');
 
-/// 절대 http(s) URL 을 SW 가 라우팅하는 `?url=` 경로로 바꾼다.
+/// Rewrites an absolute http(s) URL into a `?url=` path routed by the SW.
 ///
-/// `absolute` 는 **이미 절대 URL** 이어야 한다 — 상대 해석은 호출자의 몫이다
-/// (문서는 타깃 URL 기준, CSS 는 시트 URL 기준으로 base 가 다르다).
+/// `absolute` **must already be an absolute URL**. Callers are responsible for
+/// resolving relative references against the appropriate base (the target URL
+/// for documents, or the stylesheet URL for CSS).
 ///
-/// `proxy_origin` 이 비면 루트 상대 경로(`/zp/api/fetch?url=…`)가 나온다.
-/// 프록시 오리진을 아는 호출자는 반드시 넘길 것 — 멤브레인이 문서 base 를
-/// 타깃 오리진으로 가상화하므로, 루트 상대 경로는 타깃 호스트로 풀려 404 가 된다.
+/// When `proxy_origin` is empty, a root-relative path (`/zp/api/fetch?url=...`)
+/// is returned. Callers that know the proxy origin must pass it: because the
+/// membrane virtualizes the document base to the target origin, a root-relative
+/// path resolves against the target host and results in a 404.
 pub fn subresource_proxy_url(
     absolute: &str,
     proxy_origin: &str,
@@ -43,7 +33,7 @@ pub fn subresource_proxy_url(
     tab_id: Option<&str>,
 ) -> String {
     let (head, fragment) = split_fragment(absolute);
-    // 퍼센트 인코딩은 비영숫자 바이트를 `%XX` 로 늘린다 — 최악 3배.
+    // Percent-encoding expands non-alphanumeric bytes to `%XX` (up to 3x in the worst case).
     let mut out = String::with_capacity(
         proxy_origin.len() + control_prefix.len() + head.len() * 3 + fragment.len() + 32,
     );
@@ -62,13 +52,13 @@ pub fn subresource_proxy_url(
             out.push_str(chunk);
         }
     }
-    // 프래그먼트는 **맨 끝**. `&tab=` 뒤에 와야 브라우저가 쿼리와 조각을
-    // 올바르게 나눈다.
+    // Append the fragment **last**, after `&tab=`, so the browser splits query
+    // parameters and the fragment properly.
     out.push_str(fragment);
     out
 }
 
-/// `("https://t/x.svg", "#icon")` 처럼 첫 `#` 에서 가른다. 없으면 뒤가 빈 문자열.
+/// Splits `url` at the first `#`, e.g. `("https://t/x.svg", "#icon")`, or `(url, "")` if absent.
 pub fn split_fragment(url: &str) -> (&str, &str) {
     match url.find('#') {
         Some(i) => (&url[..i], &url[i..]),
@@ -84,14 +74,14 @@ mod tests {
         subresource_proxy_url(u, "http://proxy.example", "/zp/", None)
     }
 
-    /// 픽스처는 페이지 realm 의 `subresourceProxyPath` 와 **공유**한다
-    /// (`test/js/static-policy.test.js` 가 같은 파일을 읽는다).
+    /// Shared fixture with `subresourceProxyPath` in the page realm
+    /// (`test/js/static-policy.test.js` reads the same file).
     #[test]
     fn matches_shared_fixture() {
         let raw = include_str!("../testdata/proxy_url_cases.json");
         let doc: serde_json::Value = serde_json::from_str(raw).expect("parse proxy_url_cases.json");
         let cases = doc["cases"].as_array().expect("cases");
-        assert!(cases.len() >= 8, "픽스처가 비어 가면 파리티가 무의미해진다");
+        assert!(cases.len() >= 8, "fixture must stay populated for parity checks");
         for c in cases {
             let id = c["id"].as_str().unwrap_or("?");
             let url = c["url"].as_str().expect("url");
@@ -110,13 +100,13 @@ mod tests {
         );
     }
 
-    /// 프래그먼트를 파라미터 안에 넣으면 `<use href="sprite.svg#icon">` 이
-    /// 빈 채로 렌더된다 — 브라우저가 조각을 못 고르기 때문이다.
+    /// Encoding the fragment inside the query parameter leaves `<use href="sprite.svg#icon">`
+    /// blank because the browser cannot select the fragment.
     #[test]
     fn fragment_stays_outside_the_param() {
         let out = build("https://t.example/sprite.svg#icon");
-        assert!(out.ends_with("#icon"), "프래그먼트가 밖에 없다: {out}");
-        assert!(!out.contains("%23"), "프래그먼트가 파라미터로 삼켜졌다: {out}");
+        assert!(out.ends_with("#icon"), "fragment missing outside query parameter: {out}");
+        assert!(!out.contains("%23"), "fragment was percent-encoded into the parameter: {out}");
     }
 
     #[test]
@@ -130,8 +120,8 @@ mod tests {
         assert!(!subresource_proxy_url("https://t/a", "http://p", "/zp/", Some("")).contains("tab="));
     }
 
-    /// 공백은 `%20` 이다. `form_urlencoded` 는 `+` 를 내는데, 그 값을
-    /// `decodeURIComponent` 로 읽는 소비자에게는 `+` 가 그대로 남는다.
+    /// Spaces must encode as `%20`. `form_urlencoded` emits `+`, which remains a
+    /// literal `+` for consumers that decode with `decodeURIComponent`.
     #[test]
     fn space_encodes_as_percent_twenty() {
         assert!(build("https://t.example/a b.png").contains("a%20b.png"));

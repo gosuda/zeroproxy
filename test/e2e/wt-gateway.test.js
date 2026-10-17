@@ -1,12 +1,5 @@
-// D4 end to end: a page — and a worker — opens WebTransport to a pinned echo
-// target, natively and through the proxy's gateway, and the two must agree.
-//
-// Until 2026-09-30 the gateway had never carried a byte to a browser: its dial
-// lacked the QUIC datagram flag, its bidi bridge dropped replies,
-// webtransport-go's default origin check refused the proxy page, the page's
-// CSP refused the gateway's origin, and the dev certificate (30 days, a CA)
-// could not be pinned. Each of those passed the Go tests, which dial without
-// an Origin, a CSP or a browser. This runs the real thing.
+// End-to-end WebTransport gateway test: a page and a worker open WebTransport to a pinned echo
+// target natively and through the proxy gateway, verifying identical stream, datagram, and pin-rejection behavior.
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const childProcess = require('node:child_process');

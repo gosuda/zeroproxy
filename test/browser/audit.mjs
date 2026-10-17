@@ -1,7 +1,8 @@
-// 사이트 하나를 프록시로 열고 같은 잣대로 잰다.
-//   node audit.mjs <url> [waitMs]
-// 축: (1) 격리 — 프록시 밖으로 나간 요청, (2) 재현성 — 미프록시 URL / 깨진 리소스,
-//     (3) 멤브레인 소음 — CSP 위반, 403, 스타일 거부, postMessage 불일치
+// Open a target URL through the proxy and measure:
+//   (1) isolation: requests escaping the proxy origin,
+//   (2) fidelity: unproxied URLs and broken resources,
+//   (3) membrane noise: CSP violations, HTTP 403s, refused styles, and postMessage errors.
+// Usage: node audit.mjs <url> [waitMs]
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 
@@ -24,7 +25,7 @@ const probe = readFileSync(new URL('./audit-probe.js', import.meta.url), 'utf8')
 const dom = j(tw('exec-js', '-i', ID, '--world', 'isolated', '--script', probe));
 const domRes = dom && dom.result ? j(dom.result) : { error: dom && dom.message || 'probe failed' };
 
-// 격리축: 브라우저 자신의 기록에서 프록시 오리진 밖으로 나간 요청
+// Count network requests that escaped the proxy origin.
 const tape = j(tw('dump-recording', '-i', ID, '--filter', 'network')) || {};
 const outside = new Map();
 for (const e of (tape.network || [])) {
