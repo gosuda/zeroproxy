@@ -223,15 +223,36 @@ async function syncFetchRelayLoop() {
 // 탭 등록은 페이지 로드와 **경쟁**한다. 인라인 스크립트가 아주 이른 시점에
 // 동기 XHR 을 던지면 그 탭이 아직 `tabs` 에 없을 수 있다(실측: 같은 하네스에서
 // 어떤 런은 성공, 어떤 런은 SW_NOT_READY). 짧게 기다렸다 다시 보고,
-// 그래도 없으면 탭이 하나뿐일 때는 그것을 쓴다.
-async function resolveSyncTab(tabId) {
+// tabId 가 비어 있을 때만 단일 탭 폴백을 허용한다.
+async function resolveSyncTab(tabIdOrUrl, tokenOpt) {
+  if (!cookieJarLoaded) await ensureCookieJarLoaded();
+  let tabId = tabIdOrUrl;
+  let token = tokenOpt || '';
+  if (tabIdOrUrl && typeof tabIdOrUrl === 'object' && tabIdOrUrl.searchParams) {
+    tabId = tabIdOrUrl.searchParams.get('tab') || '';
+    if (!token) token = tabIdOrUrl.searchParams.get('token') || '';
+  }
+  tabId = tabId ? String(tabId) : '';
+  token = token ? String(token) : '';
   for (let i = 0; i < 20; i++) {
-    const t = tabId && tabs.get(tabId);
-    if (t) return t;
-    if (!tabId && tabs.size === 1) return tabs.values().next().value;
+    if (tabId) {
+      const t = tabs.get(tabId);
+      if (t) {
+        if (token && t.runtimeToken && token !== t.runtimeToken) return null;
+        return t;
+      }
+    } else if (tabs.size === 1) {
+      const t = tabs.values().next().value;
+      if (token && t.runtimeToken && token !== t.runtimeToken) return null;
+      return t;
+    }
     await new Promise(r => setTimeout(r, 100));
   }
-  if (tabs.size === 1) return tabs.values().next().value;
+  if (!tabId && tabs.size === 1) {
+    const t = tabs.values().next().value;
+    if (token && t.runtimeToken && token !== t.runtimeToken) return null;
+    return t;
+  }
   return null;
 }
 
@@ -262,7 +283,7 @@ const MAX_RELAYED_CSS_URLS = 12;
 const CSS_URL_STOP = '"\') \t\r\n';
 async function relayifyCSSFetchURLs(resp, job) {
   let css;
-  try { css = await resp.clone().text(); } catch { return resp; }
+  try { css = (await decodeResponseText(resp.clone(), false)).text; } catch { return resp; }
   const marker = ZP.apiPath('fetch') + '?url=';
   if (!css || css.indexOf(marker) < 0) return resp;
   let out = '';
@@ -304,7 +325,7 @@ async function handleSyncFetchJob(job) {
   // 이걸 안 실으면 "내 코드가 틀렸나" 와 "SW 가 낡았나" 를 구분할 수 없다.
   const out = { id: job.id, v: 'r4', status: 0, statusText: '', headers: [], body: null, err: '' };
   try {
-    const tab = await resolveSyncTab(job.tab);
+    const tab = await resolveSyncTab(job.tab, job.token || job.runtimeToken);
     if (!tab) throw new Error('SW_NOT_READY tab=' + (job.tab || '(none)') + ' known=' + tabs.size);
     // What the page wrote just before this request and the message has not delivered yet.
     if (tab.cookieJar && Array.isArray(job.cookies) && job.docUrl) {
@@ -907,6 +928,7 @@ async function handleFetch(event) {
   const url = new URL(req.url);
   try {
     if (isCORSPreflight(req)) return corsPreflight(req);
+    if (!cookieJarLoaded) await ensureCookieJarLoaded();
     const clientId = event.resultingClientId || event.clientId;
     const cls = classify(req, url, clientId);
     switch (cls.kind) {
@@ -1036,6 +1058,18 @@ function parseSharePath(path) {
 
 
 
+function isChildFrameDocument(req, entry, routeState) {
+  if (routeState && routeState.frameRoute) return true;
+  if (entry && (entry.frameRoute || entry.parentTargetUrl)) return true;
+  if (req) {
+    const dest = req.destination || '';
+    if (dest === 'iframe' || dest === 'frame') return true;
+    const secDest = req.headers && req.headers.get('Sec-Fetch-Dest');
+    if (secDest === 'iframe' || secDest === 'frame') return true;
+  }
+  return false;
+}
+
 async function proxyDocument(req, route, clientId) {
   cleanupPendingSubmissions();
   const state = shareRoutes.get(route.routeKey);
@@ -1046,8 +1080,11 @@ async function proxyDocument(req, route, clientId) {
     shareRoutes.delete(route.routeKey);
     return internalAsset(new Request(ZP.CONTROL_PREFIX), new URL(ZP.CONTROL_PREFIX, ORIGIN));
   }
-  tab.activeEntryId = entry.entryId;
+  const isFrame = isChildFrameDocument(req, entry, state);
+  if (isFrame) entry.frameRoute = true;
+  if (!isFrame || !tab.activeEntryId) tab.activeEntryId = entry.entryId;
   bindClientContext(clientId, tab, entry);
+  scheduleStateFlush();
   const submitId = new URL(req.url).searchParams.get('zp_submit');
   const resp = submitId
     ? await submittedDocument(req, route.routeKey, submitId, tab, entry, clientId)
@@ -1059,8 +1096,11 @@ async function submittedDocument(req, routeKey, submitId, tab, entry, clientId) 
   pendingSubmissions.delete(submitId);
   if (!pending || pending.expiresAt <= Date.now()) return safeError('SUBMISSION_EXPIRED', 410, entry.targetUrl);
   if (pending.routeKey !== routeKey || pending.tabId !== tab.tabId || pending.entryId !== entry.entryId) return safeError('POLICY_BLOCKED', 403, entry.targetUrl);
-  tab.activeEntryId = entry.entryId;
+  const isFrame = isChildFrameDocument(req, entry, null);
+  if (isFrame) entry.frameRoute = true;
+  if (!isFrame || !tab.activeEntryId) tab.activeEntryId = entry.entryId;
   bindClientContext(clientId, tab, entry);
+  scheduleStateFlush();
   return transportFetch(pending.targetUrl, { request: req, document: true, method: pending.method, headers: pending.headers, body: pending.body, tab, entryId: entry.entryId });
 }
 
@@ -1099,7 +1139,7 @@ async function rewriteCSSResponse(resp, opt) {
   // the SW the same way scripts do. On parse failure, ship the original
   // body — runtime-prelude DOM hooks still contain navigation.
   let css = '';
-  try { css = await resp.text(); } catch { return resp; }
+  try { css = (await decodeResponseText(resp, false)).text; } catch { return resp; }
   let out = css;
   try {
     // 2026-06-08 split-bundle (c.1) Step 4: CSS rewriter ported to ZPBundle
@@ -1304,12 +1344,18 @@ async function runtimeAPI(req, url, clientId) {
       let entry;
       let entryId;
       if (isDocumentRequest) {
+        const isFrameRequest = req.destination === 'iframe'
+          || req.destination === 'frame'
+          || req.headers.get('Sec-Fetch-Dest') === 'iframe'
+          || req.headers.get('Sec-Fetch-Dest') === 'frame';
         let canonical = target;
         try { canonical = ZP.canonicalTargetURL(target).href; } catch {}
         entryId = randomEntryId();
-        entry = { entryId, targetUrl: canonical, baseUrl: canonical, title: '', stateClone: null, scrollX: 0, scrollY: 0, createdAt: Date.now() };
+        entry = { entryId, targetUrl: canonical, baseUrl: canonical, title: '', stateClone: null, scrollX: 0, scrollY: 0, createdAt: Date.now(), frameRoute: isFrameRequest };
         tab.entries.set(entryId, entry);
+        if (!isFrameRequest || !tab.activeEntryId) tab.activeEntryId = entryId;
         bindClientContext(clientId, tab, entry);
+        scheduleStateFlush();
       } else {
         entryId = (ctx && ctx.entryId) || (explicitTab && explicitTab.activeEntryId) || tab.activeEntryId;
         entry = tab.entries.get(entryId);
@@ -1542,7 +1588,7 @@ async function runtimeAPI(req, url, clientId) {
       }
       const upstream = await transportFetch(target, { method: 'GET', headers: [['Accept', 'text/javascript,*/*']], tab, entryId: (ctx && ctx.entryId) || tab.activeEntryId });
       if (!upstream || upstream.status >= 400) return safeError('TARGET_HTTP_FAILED', 502, target);
-      const source = await upstream.text();
+      const source = (await decodeResponseText(upstream, false)).text;
       // D2 follow-on: chain with the target site's *original* `.map`
       // when one is referenced. DevTools then walks straight to
       // pre-bundle TypeScript / pre-minify source instead of stopping
@@ -2391,6 +2437,7 @@ async function transportFetchHop(targetUrl, opt) {
     if (entry && entry.targetUrl === context.documentUrl) { entry.targetUrl = u; entry.baseUrl = u; }
     // The tab's top-level origin decides whose client-hint preferences its documents' requests carry.
     if (!inFrame) { try { opt.tab.topOrigin = new URL(u).origin; } catch {} }
+    scheduleStateFlush();
   }
   // What a script may read of a cross-origin answer — taken from the target's own headers, before the
   // worker's policy block replaces them.
@@ -2449,6 +2496,70 @@ function applyScriptPatches(source, envelopeJson) {
   return out.join('');
 }
 
+function extractCharsetFromContentType(contentType) {
+  if (!contentType) return '';
+  const m = /;?\s*charset\s*=\s*["']?([^"';\s]+)/i.exec(String(contentType));
+  return m ? m[1].trim() : '';
+}
+function extractCharsetFromHTMLBytes(bytes) {
+  if (!bytes || !bytes.byteLength) return '';
+  const headLen = Math.min(bytes.byteLength, 2048);
+  let ascii = '';
+  try {
+    ascii = new TextDecoder('latin1').decode(bytes.subarray(0, headLen));
+  } catch {
+    for (let i = 0; i < headLen; i++) ascii += String.fromCharCode(bytes[i]);
+  }
+  const tagRe = /<meta\b[^>]*>/gi;
+  let m;
+  while ((m = tagRe.exec(ascii))) {
+    const tag = m[0];
+    const direct = /\bcharset\s*=\s*["']?\s*([a-zA-Z0-9._-]+)/i.exec(tag);
+    if (direct && direct[1]) return direct[1].trim();
+    const content = /\bcontent\s*=\s*["']([^"']*charset\s*=\s*[^"']+)["']/i.exec(tag);
+    if (content && content[1]) {
+      const sub = /charset\s*=\s*([a-zA-Z0-9._-]+)/i.exec(content[1]);
+      if (sub && sub[1]) return sub[1].trim();
+    }
+  }
+  return '';
+}
+function isUtf8CharsetLabel(label) {
+  if (!label) return true;
+  const norm = String(label).trim().toLowerCase();
+  return norm === 'utf-8' || norm === 'utf8' || norm === 'unicode-1-1-utf-8';
+}
+function decodeTextBytes(bytes, contentType, isHTML) {
+  const u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes || 0);
+  let charset = extractCharsetFromContentType(contentType);
+  if (!charset && isHTML) charset = extractCharsetFromHTMLBytes(u8);
+  const nonUtf8 = Boolean(charset && !isUtf8CharsetLabel(charset));
+  if (nonUtf8) {
+    try {
+      const dec = new TextDecoder(charset.trim().toLowerCase());
+      return { text: dec.decode(u8), charset: charset.trim(), nonUtf8: true };
+    } catch {}
+  }
+  return { text: new TextDecoder('utf-8').decode(u8), charset: 'utf-8', nonUtf8: false };
+}
+async function decodeResponseText(resp, isHTML) {
+  const buf = await resp.arrayBuffer();
+  const ct = (resp.headers && resp.headers.get('Content-Type')) || '';
+  return decodeTextBytes(new Uint8Array(buf), ct, !!isHTML);
+}
+function rewriteMetaCharsetToUtf8(html) {
+  if (!html) return html;
+  return html.replace(/<meta\b[^>]*>/gi, tag => {
+    if (/\bhttp-equiv\s*=\s*["']?content-type["']?/i.test(tag) && /\bcharset\s*=/i.test(tag)) {
+      return tag.replace(/(charset\s*=\s*)([a-zA-Z0-9._-]+)/i, '$1utf-8');
+    }
+    if (/\bcharset\s*=\s*["']?[a-zA-Z0-9._-]+["']?/i.test(tag)) {
+      return tag.replace(/(\bcharset\s*=\s*["']?)([a-zA-Z0-9._-]+)/i, '$1utf-8');
+    }
+    return tag;
+  });
+}
+
 async function rewriteScriptResponse(resp, opt) {
   rewriteStats.invocations++;
   // 우리 에러 페이지(safeError)는 HTML 이다. 그걸 스크립트 리라이터에 넣으면
@@ -2479,7 +2590,7 @@ async function rewriteScriptResponse(resp, opt) {
     // mw.loader surfaces the throw as an uncaught console error.
     // ZPBundle.ready is guaranteed by the activate handler now, so
     // `await initBundle()` below covers the lazy-retry case alone.
-    const source = await resp.text();
+    const source = (await decodeResponseText(resp, false)).text;
     // C4: cache check before invoking the OXC pipeline. Hash inputs that
     // affect output: transformer version, script kind, target URL, source bytes.
     try {
@@ -2587,6 +2698,11 @@ async function transformDocumentResponse(resp, opt) {
   // membrane into a page that has nothing to contain.
   if (resp.headers && resp.headers.get('X-ZP-Error') === '1') return resp;
 
+  const contentTypeHeader = (resp.headers && resp.headers.get('Content-Type')) || '';
+  const headerCharset = extractCharsetFromContentType(contentTypeHeader);
+  const nonUtf8Header = Boolean(headerCharset && !isUtf8CharsetLabel(headerCharset));
+  let prefetchedBytes = null;
+
   // Phase C — progressive streaming render. Used ONLY when the kernel actually
   // streamed this document (X-ZP-Stream marker, set in build_streaming_js_response
   // for 2xx text/html gzip|identity). The body is piped through the streaming
@@ -2595,7 +2711,7 @@ async function transformDocumentResponse(resp, opt) {
   // back to the buffered path (which keeps fail-closed MALFORMED_HTML + the
   // post-redirect CSS host-rewrite) on host mismatch or any failure.
   const kernelStreamed = resp.headers && resp.headers.get('X-ZP-Stream') === '1';
-  if (kernelStreamed && resp.body) {
+  if (kernelStreamed && resp.body && !nonUtf8Header) {
     try {
       await initBundle();
       if (self.ZPBundle && self.ZPBundle.ready && typeof self.ZPBundle.HtmlTxn === 'function') {
@@ -2608,15 +2724,62 @@ async function transformDocumentResponse(resp, opt) {
           try { hostMismatch = new URL(targetUrl).host !== new URL(finalUrl).host; } catch {}
         }
         if (!hostMismatch) {
-          const streamed = streamDocumentResponse(resp, opt, targetUrl);
-          if (streamed) return streamed;
+          if (headerCharset) {
+            const streamed = streamDocumentResponse(resp, opt, targetUrl);
+            if (streamed) return streamed;
+          } else {
+            const reader = resp.body.getReader();
+            const first = await reader.read();
+            const firstChunk = (!first.done && first.value) ? (first.value instanceof Uint8Array ? first.value : new Uint8Array(first.value)) : new Uint8Array(0);
+            const metaCharset = extractCharsetFromHTMLBytes(firstChunk);
+            if (metaCharset && !isUtf8CharsetLabel(metaCharset)) {
+              const chunks = firstChunk.byteLength ? [firstChunk] : [];
+              let total = firstChunk.byteLength;
+              while (!first.done) {
+                const next = await reader.read();
+                if (next.done) break;
+                const u8 = next.value instanceof Uint8Array ? next.value : new Uint8Array(next.value);
+                chunks.push(u8);
+                total += u8.byteLength;
+              }
+              prefetchedBytes = new Uint8Array(total);
+              let off = 0;
+              for (const c of chunks) { prefetchedBytes.set(c, off); off += c.byteLength; }
+            } else {
+              const replayStream = new ReadableStream({
+                start(controller) {
+                  if (firstChunk.byteLength) controller.enqueue(firstChunk);
+                  if (first.done) controller.close();
+                },
+                async pull(controller) {
+                  try {
+                    const next = await reader.read();
+                    if (next.done) controller.close();
+                    else controller.enqueue(next.value);
+                  } catch (err) {
+                    controller.error(err);
+                  }
+                },
+                cancel(reason) {
+                  try { return reader.cancel(reason); } catch {}
+                },
+              });
+              const streamed = streamDocumentResponse(resp, opt, targetUrl, replayStream);
+              if (streamed) return streamed;
+              prefetchedBytes = new Uint8Array(await new Response(replayStream).arrayBuffer());
+            }
+          }
         }
       }
     } catch { /* fall through to buffered */ }
   }
 
   let html = '';
-  try { html = await resp.text(); } catch { return resp; }
+  try {
+    const rawBytes = prefetchedBytes || new Uint8Array(await resp.arrayBuffer());
+    const decoded = decodeTextBytes(rawBytes, contentTypeHeader, true);
+    html = decoded.nonUtf8 ? rewriteMetaCharsetToUtf8(decoded.text) : decoded.text;
+  } catch { return resp; }
   let transformed = html;
   // C2: malformed-HTML policy is FAIL-CLOSED → MALFORMED_HTML error page.
   // The prior implementation fell open (ship raw HTML on lol_html error),
@@ -2713,7 +2876,7 @@ async function transformDocumentResponse(resp, opt) {
 // `controller.error` (the page sees a network failure / what already rendered)
 // instead of shipping un-rewritten bytes. The prelude is injected by HtmlTxn at
 // the <head> open tag, so NO separate injectPrelude is needed here.
-function streamDocumentResponse(resp, opt, targetUrl) {
+function streamDocumentResponse(resp, opt, targetUrl, bodyStream) {
   const preludeHTML = buildRuntimePrelude(opt.tab, opt.entry);
   let txn;
   try { txn = new self.ZPBundle.HtmlTxn(targetUrl, ORIGIN, preludeHTML); }
@@ -2767,7 +2930,7 @@ function streamDocumentResponse(resp, opt, targetUrl) {
   // 스트리밍 문서에도 버퍼 경로(`addCSP`)와 **같은** 보안 헤더를 건다.
   // 빠져 있던 동안 프록시 문서에는 CSP 가 없었다.
   applyZPSecurityHeaders(headers, opt.request, opt.tab && opt.tab.servers, opt.tab, targetUrl);
-  const out = new Response(resp.body.pipeThrough(ts), {
+  const out = new Response((bodyStream || resp.body).pipeThrough(ts), {
     status: resp.status,
     statusText: resp.statusText,
     headers,
@@ -2858,6 +3021,10 @@ function injectPrelude(html, prelude) {
 
 function scriptResponseHeaders(resp, req) {
   const h = new Headers(resp.headers);
+  h.delete('Content-Security-Policy');
+  h.delete('Content-Security-Policy-Report-Only');
+  h.delete('X-Content-Security-Policy');
+  h.delete('X-WebKit-CSP');
   h.set('Content-Type', 'text/javascript; charset=utf-8');
   h.set('Cache-Control', 'no-store');
   h.set('X-Content-Type-Options', 'nosniff');
@@ -2977,6 +3144,7 @@ async function handleMessage(event) {
   const ok = data => reply && reply.postMessage(Object.assign({ ok: true }, data || {}));
   const fail = code => reply && reply.postMessage({ ok: false, error: code });
   try {
+    if (!cookieJarLoaded) await ensureCookieJarLoaded();
     if (msg.type === ZP.MSG.OPEN_SHARE) {
       const routeKey = String(msg.routeKey || '');
       if (!routeKey || /[^A-Za-z0-9_-]/.test(routeKey)) { fail('MALFORMED_ROUTE'); return; }
@@ -2997,16 +3165,19 @@ async function handleMessage(event) {
         if (openerEnv) tab.clientEnv = openerEnv;
         const entryId = randomEntryId();
         const targetUrl = ZP.canonicalTargetURL(msg.targetUrl).href;
-        tab.entries.set(entryId, { entryId, targetUrl, baseUrl: targetUrl, title: '', stateClone: null, scrollX: 0, scrollY: 0, createdAt: Date.now(), opaque: !!msg.opaque });
-        shareRoutes.set(routeKey, { tabId: tab.tabId, entryId });
+        tab.entries.set(entryId, { entryId, targetUrl, baseUrl: targetUrl, title: '', stateClone: null, scrollX: 0, scrollY: 0, createdAt: Date.now(), opaque: !!msg.opaque, frameRoute: false });
+        shareRoutes.set(routeKey, { tabId: tab.tabId, entryId, targetURL: targetUrl, frameRoute: false });
+        scheduleStateFlush();
         ok({ path: ZP.makeSharePath(routeKey), servers: tab.servers, tabId: tab.tabId, reused: true });
         return;
       }
       tab = createTab(msg.targetUrl, msg.servers, msg.challengeCompat);
       if (openerEnv) tab.clientEnv = openerEnv;
       // A popup an opaque document opened is opaque itself (see opaqueEntry).
-      if (msg.opaque) { const first = tab.entries.get(tab.activeEntryId); if (first) first.opaque = true; }
-      shareRoutes.set(routeKey, { tabId: tab.tabId, entryId: tab.activeEntryId });
+      const first = tab.entries.get(tab.activeEntryId);
+      if (msg.opaque && first) first.opaque = true;
+      shareRoutes.set(routeKey, { tabId: tab.tabId, entryId: tab.activeEntryId, targetURL: first ? first.targetUrl : '', frameRoute: false });
+      scheduleStateFlush();
       ok({ path: ZP.makeSharePath(routeKey), servers: tab.servers, tabId: tab.tabId, reused: false });
       return;
     }
@@ -3024,8 +3195,9 @@ async function handleMessage(event) {
       let parentTargetUrl = '';
       try { if (msg.parentTargetUrl) parentTargetUrl = ZP.canonicalTargetURL(msg.parentTargetUrl).href; } catch {}
       const entryId = String(msg.entryId || randomEntryId());
-      tab.entries.set(entryId, { entryId, targetUrl, baseUrl, parentTargetUrl, title: '', stateClone: null, scrollX: 0, scrollY: 0, createdAt: Date.now(), opaque: !!msg.opaque });
-      shareRoutes.set(routeKey, { tabId: tab.tabId, entryId });
+      tab.entries.set(entryId, { entryId, targetUrl, baseUrl, parentTargetUrl, title: '', stateClone: null, scrollX: 0, scrollY: 0, createdAt: Date.now(), opaque: !!msg.opaque, frameRoute: true });
+      shareRoutes.set(routeKey, { tabId: tab.tabId, entryId, targetURL: targetUrl, frameRoute: true });
+      scheduleStateFlush();
       ok({ path: ZP.makeSharePath(routeKey) });
       return;
     }
@@ -3034,10 +3206,16 @@ async function handleMessage(event) {
       if (!tab) return;
       const targetUrl = ZP.canonicalTargetURL(msg.targetUrl).href;
       const baseUrl = msg.baseUrl ? ZP.canonicalTargetURL(msg.baseUrl, targetUrl).href : targetUrl;
-      const entry = { entryId: msg.entryId, targetUrl, baseUrl, title: '', stateClone: null, scrollX: 0, scrollY: 0, createdAt: Date.now(), opaque: !!msg.opaque };
+      const prevEntry = tab.entries.get(msg.entryId);
+      const callerCtx = event.source && event.source.id ? clientContext.get(event.source.id) : null;
+      const callerEntry = callerCtx && callerCtx.tabId === tab.tabId ? tab.entries.get(callerCtx.entryId) : null;
+      const isFrame = Boolean((prevEntry && (prevEntry.frameRoute || prevEntry.parentTargetUrl)) || (callerEntry && (callerEntry.frameRoute || callerEntry.parentTargetUrl)) || msg.frameRoute);
+      const parentTargetUrl = (prevEntry && prevEntry.parentTargetUrl) || (callerEntry && callerEntry.parentTargetUrl) || '';
+      const entry = { entryId: msg.entryId, targetUrl, baseUrl, parentTargetUrl, title: '', stateClone: null, scrollX: 0, scrollY: 0, createdAt: Date.now(), opaque: !!msg.opaque, frameRoute: isFrame };
       tab.entries.set(entry.entryId, entry);
-      tab.activeEntryId = entry.entryId;
-      if (msg.routeKey) shareRoutes.set(String(msg.routeKey), { tabId: tab.tabId, entryId: entry.entryId });
+      if (!isFrame || !tab.activeEntryId) tab.activeEntryId = entry.entryId;
+      if (msg.routeKey) shareRoutes.set(String(msg.routeKey), { tabId: tab.tabId, entryId: entry.entryId, targetURL: targetUrl, frameRoute: isFrame });
+      scheduleStateFlush();
       ok();
       return;
     }
@@ -3065,6 +3243,7 @@ async function handleMessage(event) {
       // A top-level document's window is what its tab's client hints report (a frame's own size is not: Chrome sends
       // the top window's viewport on a frame's requests too — measured).
       if (msg.env && msg.env.top === true) { const env = sanitizeClientEnv(msg.env); if (env) tab.clientEnv = env; }
+      scheduleStateFlush();
       ok({ bound: !!sourceId });
       return;
     }
@@ -3076,6 +3255,7 @@ async function handleMessage(event) {
       entry.baseUrl = ZP.canonicalTargetURL(msg.baseUrl, entry.targetUrl).href;
       const sourceId = event.source && event.source.id;
       if (sourceId) bindClientContext(sourceId, tab, entry);
+      scheduleStateFlush();
       ok({ baseUrl: entry.baseUrl });
       return;
     }
@@ -3092,6 +3272,7 @@ async function handleMessage(event) {
       const token = String(msg.policy || '').trim().toLowerCase();
       // 알 수 없는 토큰은 무시한다(정책 이름을 임의 문자열로 밀어 넣지 못하게).
       if (['', 'no-referrer', 'no-referrer-when-downgrade', 'origin', 'origin-when-cross-origin', 'same-origin', 'strict-origin', 'strict-origin-when-cross-origin', 'unsafe-url'].includes(token)) entry.referrerPolicy = token;
+      scheduleStateFlush();
       ok({ referrerPolicy: entry.referrerPolicy || '' });
       return;
     }
@@ -3108,7 +3289,7 @@ async function handleMessage(event) {
       const tab = runtimeTabForMessage(event, msg, fail);
       if (!tab) return;
       const entry = tab.entries.get(msg.entryId);
-      if (entry) { entry.scrollX = Number(msg.scrollX) || 0; entry.scrollY = Number(msg.scrollY) || 0; }
+      if (entry) { entry.scrollX = Number(msg.scrollX) || 0; entry.scrollY = Number(msg.scrollY) || 0; scheduleStateFlush(); }
       ok();
       return;
     }
@@ -3139,7 +3320,8 @@ async function handleMessage(event) {
       const entry = { entryId, targetUrl, baseUrl: targetUrl, title: '', stateClone: null, scrollX: 0, scrollY: 0, createdAt: Date.now() };
       tab.entries.set(entryId, entry);
       tab.activeEntryId = entryId;
-      shareRoutes.set(routeKey, { tabId: tab.tabId, entryId });
+      shareRoutes.set(routeKey, { tabId: tab.tabId, entryId, targetURL: targetUrl, frameRoute: false });
+      scheduleStateFlush();
       const submitId = ZP.randomId('sub');
       pendingSubmissions.set(submitId, { submitId, routeKey, tabId: tab.tabId, entryId, targetUrl, method, headers: Array.isArray(msg.headers) ? msg.headers : [], body, expiresAt: Date.now() + SUBMISSION_TTL_MS });
       ok({ submitId });
@@ -3193,7 +3375,7 @@ async function openRuntimeStream(event, msg, ok, fail) {
   }
   let stream;
   try {
-    stream = await self.kernelStream({ url: target.href, protocols: requestedProtocols, userAgent: ZP.TARGET_USER_AGENT, origin, cookie, tabId: tab.tabId, streamIsolationKey: tab.streamIsolationKey, servers: tab.servers || [] });
+    stream = await self.kernelStream({ url: target.href, protocols: requestedProtocols, userAgent: ZP.TARGET_USER_AGENT, origin, cookie, tabId: tab.tabId, isolationKey: tab.streamIsolationKey, streamIsolationKey: tab.streamIsolationKey, servers: tab.servers || [] });
   } catch (e) {
     fail(e && (e.message || e.code) || 'TARGET_CONNECT_FAILED');
     return;
@@ -3305,8 +3487,9 @@ function createTab(targetUrl, servers, challengeCompat) {
   // alone grants no egress, no eval, no cache skip.
   const targetOrigin = originKeyForURL(target);
   const tab = { tabId, activeEntryId: entryId, entries: new Map(), originMap: new Map(), cookieJar: getOrCreateJarForOrigin(targetOrigin), cookieJarOrigin: targetOrigin, storageNamespaces: new Map(), runtimeProfile: {}, streamIsolationKey: ZP.bytesToBase64Url(crypto.getRandomValues(new Uint8Array(32))), runtimeToken: ZP.randomId('rt'), servers: relayServers, challengeCompat: !!challengeCompat, topOrigin: new URL(target).origin, clientEnv: null };
-  tab.entries.set(entryId, { entryId, targetUrl: target, baseUrl: target, title: '', stateClone: null, scrollX: 0, scrollY: 0, createdAt: Date.now() });
+  tab.entries.set(entryId, { entryId, targetUrl: target, baseUrl: target, title: '', stateClone: null, scrollX: 0, scrollY: 0, createdAt: Date.now(), frameRoute: false });
   tabs.set(tabId, tab);
+  scheduleStateFlush();
   return tab;
 }
 function cleanupPendingSubmissions() {
@@ -3316,7 +3499,12 @@ function cleanupPendingSubmissions() {
   }
 }
 function randomEntryId() { return ZP.randomId('e'); }
-function bindClientContext(clientId, tab, entry) { if (clientId) clientContext.set(clientId, { tabId: tab.tabId, entryId: entry.entryId, targetUrl: entry.targetUrl, baseUrl: entry.baseUrl || entry.targetUrl }); }
+function bindClientContext(clientId, tab, entry) {
+  if (clientId) {
+    clientContext.set(clientId, { tabId: tab.tabId, entryId: entry.entryId, targetUrl: entry.targetUrl, baseUrl: entry.baseUrl || entry.targetUrl });
+    scheduleStateFlush();
+  }
+}
 function contextFromPath(path) { const p = parseSharePath(path); const state = p && shareRoutes.get(p.routeKey); const tab = state && tabs.get(state.tabId); const entry = tab && tab.entries.get(state.entryId); if (entry) return { tabId: tab.tabId, entryId: entry.entryId, targetUrl: entry.targetUrl, baseUrl: entry.baseUrl || entry.targetUrl }; return null; }
 function contextFromURL(u) { if (u.origin === ORIGIN) return resourceContext.get(u.pathname + u.search) || contextFromPath(u.pathname); return resourceContext.get(u.href) || null; }
 function contextFor(req, clientId) { const ref = req.headers.get('Referer'); if (ref) { try { const ctx = contextFromURL(new URL(ref)); if (ctx) return ctx; } catch {} } if (clientId && clientContext.has(clientId)) return clientContext.get(clientId); return null; }
@@ -3359,7 +3547,26 @@ const COOKIE_DB_VERSION = 1;
 const COOKIE_DB_STORE = 'jars';
 const COOKIE_FLUSH_INTERVAL_MS = 60_000;
 const COOKIE_SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000; // session cookies: 7d
+const STATE_TABS_KEY = '__zp_state_tabs__';
+const STATE_ROUTES_KEY = '__zp_state_routes__';
 let cookieDbPromise = null;
+let cookieJarLoaded = false;
+let cookieFlushTimer = null;
+let stateFlushTimer = null;
+function scheduleCookieFlush() {
+  if (cookieFlushTimer !== null) return;
+  cookieFlushTimer = setTimeout(() => {
+    cookieFlushTimer = null;
+    flushDirtyJarsToIDB();
+  }, 20);
+}
+function scheduleStateFlush() {
+  if (stateFlushTimer !== null) return;
+  stateFlushTimer = setTimeout(() => {
+    stateFlushTimer = null;
+    flushStateToIDB();
+  }, 20);
+}
 function openCookieDb() {
   if (cookieDbPromise) return cookieDbPromise;
   cookieDbPromise = new Promise((resolve, reject) => {
@@ -3385,9 +3592,16 @@ async function loadAllStoredJars() {
       const store = tx.objectStore(COOKIE_DB_STORE);
       const req = store.getAll();
       req.onsuccess = () => {
+        const rows = req.result || [];
         const now = Date.now();
-        for (const entry of req.result || []) {
-          if (!entry || !entry.targetOrigin || !Array.isArray(entry.records)) continue;
+        let tabsRecord = null;
+        let routesRecord = null;
+        for (const entry of rows) {
+          if (!entry || !entry.targetOrigin) continue;
+          if (entry.targetOrigin === STATE_TABS_KEY) { tabsRecord = entry; continue; }
+          if (entry.targetOrigin === STATE_ROUTES_KEY) { routesRecord = entry; continue; }
+          if (String(entry.targetOrigin).startsWith('__zp_state_')) continue;
+          if (!Array.isArray(entry.records)) continue;
           // Strip expired before mounting — a 7-day-old session cookie that
           // already passed its synthetic TTL should not be revived.
           const live = entry.records.filter(r => {
@@ -3400,9 +3614,174 @@ async function loadAllStoredJars() {
           });
           getOrCreateJarForOrigin(entry.targetOrigin, live);
         }
+        if (tabsRecord && Array.isArray(tabsRecord.tabs)) {
+          for (const st of tabsRecord.tabs) {
+            if (!st || !st.tabId) continue;
+            let tab = tabs.get(st.tabId);
+            if (!tab) {
+              const jarOrigin = st.cookieJarOrigin || originKeyForURL(st.topOrigin || '');
+              tab = {
+                tabId: st.tabId,
+                activeEntryId: st.activeEntryId || '',
+                entries: new Map(),
+                originMap: new Map(),
+                cookieJar: getOrCreateJarForOrigin(jarOrigin),
+                cookieJarOrigin: jarOrigin,
+                storageNamespaces: new Map(),
+                runtimeProfile: {},
+                streamIsolationKey: st.streamIsolationKey || ZP.bytesToBase64Url(crypto.getRandomValues(new Uint8Array(32))),
+                runtimeToken: st.runtimeToken || ZP.randomId('rt'),
+                servers: Array.isArray(st.servers) ? st.servers.slice() : [],
+                challengeCompat: !!st.challengeCompat,
+                topOrigin: st.topOrigin || '',
+                clientEnv: st.clientEnv || null,
+              };
+              tabs.set(tab.tabId, tab);
+            }
+            if (Array.isArray(st.entries)) {
+              for (const e of st.entries) {
+                if (!e || !e.entryId || tab.entries.has(e.entryId)) continue;
+                tab.entries.set(e.entryId, {
+                  entryId: e.entryId,
+                  targetUrl: e.targetUrl || '',
+                  baseUrl: e.baseUrl || e.targetUrl || '',
+                  parentTargetUrl: e.parentTargetUrl || '',
+                  title: e.title || '',
+                  stateClone: null,
+                  scrollX: Number(e.scrollX) || 0,
+                  scrollY: Number(e.scrollY) || 0,
+                  createdAt: Number(e.createdAt) || now,
+                  opaque: !!e.opaque,
+                  frameRoute: !!e.frameRoute,
+                  referrerPolicy: e.referrerPolicy || '',
+                  ...(typeof e.documentReferrer === 'string' ? { documentReferrer: e.documentReferrer } : null),
+                });
+              }
+            }
+            if (!tab.activeEntryId && tab.entries.size > 0) {
+              tab.activeEntryId = tab.entries.keys().next().value;
+            }
+          }
+        }
+        if (routesRecord) {
+          if (Array.isArray(routesRecord.routes)) {
+            for (const r of routesRecord.routes) {
+              if (!r || !r.routeKey || !r.tabId || shareRoutes.has(r.routeKey)) continue;
+              if (!tabs.has(r.tabId)) continue;
+              shareRoutes.set(r.routeKey, {
+                tabId: r.tabId,
+                entryId: r.entryId || '',
+                targetURL: r.targetURL || '',
+                frameRoute: !!r.frameRoute,
+              });
+            }
+          }
+          if (Array.isArray(routesRecord.clients)) {
+            for (const c of routesRecord.clients) {
+              if (!c || !c.clientId || !c.tabId || clientContext.has(c.clientId)) continue;
+              if (!tabs.has(c.tabId)) continue;
+              clientContext.set(c.clientId, {
+                tabId: c.tabId,
+                entryId: c.entryId || '',
+                targetUrl: c.targetUrl || '',
+                baseUrl: c.baseUrl || c.targetUrl || '',
+              });
+            }
+          }
+        }
+        cookieJarLoaded = true;
         resolve();
       };
-      req.onerror = () => resolve();
+      req.onerror = () => { cookieJarLoaded = true; resolve(); };
+    });
+  } catch {
+    cookieJarLoaded = true;
+  }
+}
+async function ensureCookieJarLoaded() {
+  if (cookieJarLoaded) return;
+  try { await restorePromise; } catch {}
+  cookieJarLoaded = true;
+}
+function serializeTabsState() {
+  const out = [];
+  for (const [, tab] of tabs) {
+    if (!tab || !tab.tabId) continue;
+    const entries = [];
+    if (tab.entries) {
+      for (const [, e] of tab.entries) {
+        if (!e || !e.entryId) continue;
+        entries.push({
+          entryId: e.entryId,
+          targetUrl: e.targetUrl || '',
+          baseUrl: e.baseUrl || e.targetUrl || '',
+          parentTargetUrl: e.parentTargetUrl || '',
+          title: e.title || '',
+          scrollX: Number(e.scrollX) || 0,
+          scrollY: Number(e.scrollY) || 0,
+          createdAt: Number(e.createdAt) || Date.now(),
+          opaque: !!e.opaque,
+          frameRoute: !!e.frameRoute,
+          referrerPolicy: e.referrerPolicy || '',
+          documentReferrer: typeof e.documentReferrer === 'string' ? e.documentReferrer : undefined,
+        });
+      }
+    }
+    out.push({
+      tabId: tab.tabId,
+      activeEntryId: tab.activeEntryId || '',
+      cookieJarOrigin: tab.cookieJarOrigin || originKeyForURL(tab.topOrigin || ''),
+      streamIsolationKey: tab.streamIsolationKey || '',
+      runtimeToken: tab.runtimeToken || '',
+      servers: Array.isArray(tab.servers) ? tab.servers.slice() : [],
+      challengeCompat: !!tab.challengeCompat,
+      topOrigin: tab.topOrigin || '',
+      clientEnv: tab.clientEnv || null,
+      entries,
+    });
+  }
+  return out;
+}
+function serializeRoutesState() {
+  const routes = [];
+  for (const [routeKey, state] of shareRoutes) {
+    if (!routeKey || !state || !state.tabId) continue;
+    const tab = tabs.get(state.tabId);
+    const entry = tab && tab.entries && tab.entries.get(state.entryId);
+    routes.push({
+      routeKey,
+      tabId: state.tabId,
+      entryId: state.entryId || '',
+      targetURL: state.targetURL || (entry && entry.targetUrl) || '',
+      frameRoute: !!(state.frameRoute || (entry && entry.frameRoute)),
+    });
+  }
+  const clients = [];
+  for (const [clientId, ctx] of clientContext) {
+    if (!clientId || !ctx || !ctx.tabId) continue;
+    clients.push({
+      clientId,
+      tabId: ctx.tabId,
+      entryId: ctx.entryId || '',
+      targetUrl: ctx.targetUrl || '',
+      baseUrl: ctx.baseUrl || ctx.targetUrl || '',
+    });
+  }
+  return { routes, clients };
+}
+async function flushStateToIDB() {
+  try {
+    const db = await openCookieDb();
+    const tabsSnap = serializeTabsState();
+    const routesSnap = serializeRoutesState();
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction(COOKIE_DB_STORE, 'readwrite');
+      const store = tx.objectStore(COOKIE_DB_STORE);
+      const now = Date.now();
+      store.put({ targetOrigin: STATE_TABS_KEY, tabs: tabsSnap, updatedAt: now });
+      store.put({ targetOrigin: STATE_ROUTES_KEY, routes: routesSnap.routes, clients: routesSnap.clients, updatedAt: now });
+      tx.oncomplete = resolve;
+      tx.onerror = () => reject(tx.error);
     });
   } catch {}
 }
@@ -3433,10 +3812,11 @@ const restorePromise = loadAllStoredJars();
 // Periodic background flush. Also flush on `unload`-equivalent transitions
 // where possible — SW lifecycle doesn't have a true `beforeunload`, but
 // `freeze`/`activate` happen at predictable points.
-setInterval(() => { flushDirtyJarsToIDB(); }, COOKIE_FLUSH_INTERVAL_MS);
+setInterval(() => { flushDirtyJarsToIDB(); flushStateToIDB(); }, COOKIE_FLUSH_INTERVAL_MS);
 self.addEventListener('message', evt => {
   if (evt.data && evt.data.type === ZP.MSG.FLUSH_COOKIES) {
-    evt.waitUntil ? evt.waitUntil(flushDirtyJarsToIDB()) : flushDirtyJarsToIDB();
+    const p = Promise.all([flushDirtyJarsToIDB(), flushStateToIDB()]);
+    evt.waitUntil ? evt.waitUntil(p) : p;
   }
 });
 
@@ -3545,7 +3925,7 @@ async function flushCookiePush(jar) {
 function createCookieJar(initialRecords, notify) {
   const records = Array.isArray(initialRecords) ? initialRecords.slice() : [];
   let dirty = false;
-  function markDirty() { dirty = true; }
+  function markDirty() { dirty = true; scheduleCookieFlush(); }
   function canonHost(h) { return String(h || '').toLowerCase().replace(/\.$/, ''); }
   // Chrome sends a Secure cookie to https and also to loopback over http (`localhost`,
   // `*.localhost`, 127.0.0.0/8, ::1) — the dev-server case. Anything stricter makes a
@@ -3990,6 +4370,10 @@ function applyZPSecurityHeaders(h, req, servers, tab, targetUrl) {
   const responseSignalled = h.get('X-ZP-Challenge-Compat') === '1';
   h.delete('X-ZP-Challenge-Compat');
   const armedHere = !!(tab && tab.challengeCompat) && responseSignalled;
+  h.delete('Content-Security-Policy');
+  h.delete('Content-Security-Policy-Report-Only');
+  h.delete('X-Content-Security-Policy');
+  h.delete('X-WebKit-CSP');
   h.set('Content-Security-Policy', proxiedCSP(servers, armedHere));
   // 2026-08-14 — 브라우저가 타깃에게 **직접** 보고하게 만드는 헤더를 전부 지운다.
   //
