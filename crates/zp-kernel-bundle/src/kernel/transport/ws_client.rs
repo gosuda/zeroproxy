@@ -118,11 +118,16 @@ async fn open_target_stream(
     host: &str,
     port: u16,
     secure: bool,
+    isolation_key: Option<&str>,
 ) -> Result<PooledConn, JsValue> {
     let relay_url = super::fetch::pick_relay_url().map_err(jserr_str)?;
     // REFACTOR.md §3.2 — fetch 와 같은 Dialer seam. 기본 RelayDialer 가
     // 기존 yamux→SOCKS5 경로(에러 코드 포함)를 그대로 수행한다.
-    let addr = TargetAddr { host: host.to_string(), port };
+    let addr = TargetAddr {
+        host: host.to_string(),
+        port,
+        isolation_key: isolation_key.filter(|k| !k.is_empty()).map(str::to_string),
+    };
     let stream = dialer().connect(&addr, &relay_url, 0.0).await?;
     if !secure {
         return Ok(PooledConn::Plain(stream));
@@ -493,11 +498,18 @@ impl WsClient {
     }
 }
 
+const MAX_WS_BUFFER_BYTES: usize = 32 * 1024 * 1024;
+
 /// Public entry point — opens the transport, performs the handshake,
 /// spawns the reader/writer drivers, and returns the JS-facing client.
-pub async fn open(url: &str, protocols: &[String], identity_headers: &[(&str, &str)]) -> Result<JsValue, JsValue> {
+pub async fn open(
+    url: &str,
+    protocols: &[String],
+    identity_headers: &[(&str, &str)],
+    isolation_key: Option<&str>,
+) -> Result<JsValue, JsValue> {
     let parsed = WsUrl::parse(url).map_err(jserr_str)?;
-    let mut conn = open_target_stream(&parsed.host, parsed.port, parsed.secure).await?;
+    let mut conn = open_target_stream(&parsed.host, parsed.port, parsed.secure, isolation_key).await?;
     let negotiated = handshake(&mut conn, &parsed, protocols, identity_headers).await?;
 
     let (reader_abort, reader_registration) = AbortHandle::new_pair();
@@ -566,6 +578,10 @@ async fn reader_task(
                     fail_connection(&shared, "continuation without start");
                     return;
                 }
+                if frame.payload.len() > MAX_WS_BUFFER_BYTES.saturating_sub(frag_buf.len()) {
+                    fail_connection(&shared, "fragmented message exceeds 32 MiB cap");
+                    return;
+                }
                 frag_buf.extend_from_slice(&frame.payload);
                 if frame.fin {
                     let op = frag_op.take().unwrap();
@@ -576,6 +592,10 @@ async fn reader_task(
             Opcode::Text | Opcode::Binary => {
                 if frag_op.is_some() {
                     fail_connection(&shared, "new data frame mid-fragment");
+                    return;
+                }
+                if frame.payload.len() > MAX_WS_BUFFER_BYTES {
+                    fail_connection(&shared, "message payload exceeds 32 MiB cap");
                     return;
                 }
                 if frame.fin {
@@ -669,10 +689,10 @@ async fn read_frame_split(
             let mut ext = [0u8; 8];
             conn.read_exact(&mut ext).await?;
             let v = u64::from_be_bytes(ext);
-            if v > 64 * 1024 * 1024 {
+            if v > MAX_WS_BUFFER_BYTES as u64 {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
-                    "ws: frame payload > 64 MiB",
+                    "ws: frame payload > 32 MiB",
                 ));
             }
             v as usize

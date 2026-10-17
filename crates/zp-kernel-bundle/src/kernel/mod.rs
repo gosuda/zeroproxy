@@ -269,6 +269,7 @@ pub async fn kernel_fetch(request_js: JsValue) -> Result<JsValue, JsValue> {
     // The SW's order for this request (lowercase names, comma-separated): Chrome's order depends on the kind of
     // request and on the client hints it carries, which only the SW knows.
     let mut sw_order: Option<Vec<String>> = None;
+    let mut isolation_key: Option<String> = None;
     headers_owned.retain(|(k, v)| {
         let kl = k.to_ascii_lowercase();
         match kl.as_str() {
@@ -291,6 +292,13 @@ pub async fn kernel_fetch(request_js: JsValue) -> Result<JsValue, JsValue> {
             "x-zp-arm-challenge-compat" => {
                 if v.trim() == "1" {
                     armed_challenge_compat = true;
+                }
+                false
+            }
+            "x-zp-stream-isolation-key" => {
+                let val = v.trim();
+                if !val.is_empty() {
+                    isolation_key = Some(val.to_string());
                 }
                 false
             }
@@ -376,6 +384,7 @@ pub async fn kernel_fetch(request_js: JsValue) -> Result<JsValue, JsValue> {
         &headers_owned,
         &body_bytes,
         armed_challenge_compat,
+        isolation_key.as_deref(),
     )
     .await
 }
@@ -411,8 +420,12 @@ pub fn kernel_stream(arg: JsValue) -> js_sys::Promise {
             .filter(|value| !value.is_empty())
             .ok_or_else(|| JsValue::from_str("MALFORMED_ROUTE: kernel_stream missing origin"))?;
         let cookie = get_string_prop(&arg, "cookie").unwrap_or_default();
+        let isolation_key = Reflect::get(&arg, &JsValue::from_str("isolationKey"))
+            .ok()
+            .and_then(|v| v.as_string())
+            .filter(|s| !s.is_empty());
         let headers = [("Origin", origin.as_str()), ("User-Agent", user_agent.as_str()), ("Cookie", cookie.as_str())];
-        transport::ws_client::open(&url, &protocols, &headers).await
+        transport::ws_client::open(&url, &protocols, &headers, isolation_key.as_deref()).await
     })
 }
 
@@ -438,6 +451,9 @@ pub(crate) fn push_trace(msg: &str) {
     } else {
         arr.unchecked_into::<js_sys::Array>()
     };
+    if arr.length() >= 512 {
+        let _ = arr.shift();
+    }
     arr.push(&JsValue::from_str(msg));
 }
 

@@ -36,6 +36,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> AsyncIo for T {}
 pub struct TargetAddr {
     pub host: String,
     pub port: u16,
+    pub isolation_key: Option<String>,
 }
 
 /// Pluggable raw-byte-connection factory.
@@ -112,8 +113,15 @@ impl Dialer for RelayDialer {
                 delta_ms(t0)
             ));
 
+            let auth = match target.isolation_key.as_deref() {
+                Some(k) if (1..=255).contains(&k.len()) => Auth::UserPassword {
+                    user: k.to_string(),
+                    pass: "zp".to_string(),
+                },
+                _ => Auth::None,
+            };
             let t_socks = now_ms();
-            socks5::connect(&mut stream, &target.host, target.port, &Auth::None)
+            socks5::connect(&mut stream, &target.host, target.port, &auth)
                 .await
                 .map_err(|e| {
                     crate::kernel::push_trace(&format!(

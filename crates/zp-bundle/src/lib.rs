@@ -82,6 +82,9 @@ fn push_trace(line: &str) {
             fresh
         }
     };
+    if arr.length() >= 512 {
+        let _ = arr.shift();
+    }
     arr.push(&JsValue::from_str(line));
     let _ = js_sys::Reflect::set(&global, &key, &arr);
 }

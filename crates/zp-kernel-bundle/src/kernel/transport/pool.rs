@@ -54,6 +54,7 @@ pub(crate) struct PoolKey {
     pub scheme: String,
     pub host: String,
     pub port: u16,
+    pub isolation_key: String,
 }
 
 /// One pooled HTTP/1.1 connection. Either plain or TLS-wrapped. Both
@@ -106,10 +107,12 @@ impl AsyncWrite for PooledConn {
 
 // ----- per-key idle queue ---------------------------------------------------
 
-/// Cap on idle conns kept per (scheme,host,port). Sites with bursty
+/// Cap on idle conns kept per (scheme,host,port,isolation_key). Sites with bursty
 /// fanout (CDN with N parallel requests) drain the pool then re-fill; we
 /// don't want to hold 100+ idle yamux streams against the relay.
 const MAX_IDLE_PER_KEY: usize = 6;
+/// Cap on distinct `PoolKey` buckets across all origins and isolation keys.
+const MAX_POOL_KEYS: usize = 64;
 
 thread_local! {
     static POOL: RefCell<HashMap<PoolKey, VecDeque<PooledConn>>> =
@@ -141,6 +144,12 @@ pub(crate) fn take(key: &PoolKey) -> Option<PooledConn> {
 pub(crate) fn put(key: PoolKey, conn: PooledConn) {
     POOL.with(|p| {
         let mut p = p.borrow_mut();
+        p.retain(|_, q| !q.is_empty());
+        if !p.contains_key(&key) && p.len() >= MAX_POOL_KEYS {
+            if let Some(evict) = p.keys().next().cloned() {
+                p.remove(&evict);
+            }
+        }
         let q = p.entry(key).or_default();
         if q.len() >= MAX_IDLE_PER_KEY {
             // Drop the oldest (front) — that's the conn most likely to
@@ -183,7 +192,13 @@ pub(crate) fn get_http2(key: &PoolKey) -> Option<Http2Client> {
 /// drain naturally and the connection idles out.
 pub(crate) fn put_http2(key: PoolKey, client: Http2Client) {
     HTTP2_POOL.with(|p| {
-        p.borrow_mut().insert(key, client);
+        let mut p = p.borrow_mut();
+        if !p.contains_key(&key) && p.len() >= MAX_POOL_KEYS {
+            if let Some(evict) = p.keys().next().cloned() {
+                p.remove(&evict);
+            }
+        }
+        p.insert(key, client);
     });
 }
 

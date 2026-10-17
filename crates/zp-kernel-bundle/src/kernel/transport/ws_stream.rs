@@ -44,6 +44,8 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use web_sys::{BinaryType, CloseEvent, ErrorEvent, MessageEvent, WebSocket};
 
+const MAX_WS_BUFFER_BYTES: usize = 32 * 1024 * 1024;
+
 /// Internal shared state. Lives in a single `Rc<RefCell<_>>` shared by the
 /// `WsStream` (read/write surface) and the four `Closure`s wired to the
 /// underlying `WebSocket` (open, message, error, close).
@@ -52,6 +54,8 @@ struct Inner {
     /// a whole received frame's bytes; the front entry is being drained
     /// from `read_cursor`.
     rx_buf: VecDeque<Vec<u8>>,
+    /// Total bytes held across all frames in `rx_buf`.
+    rx_bytes: usize,
     /// Byte offset within `rx_buf.front()` of the next byte to return.
     /// Reset to 0 whenever the front entry is drained and popped.
     read_cursor: usize,
@@ -78,6 +82,7 @@ impl Inner {
     fn new() -> Self {
         Self {
             rx_buf: VecDeque::new(),
+            rx_bytes: 0,
             read_cursor: 0,
             closed: false,
             error: None,
@@ -176,7 +181,32 @@ impl WsStream {
                 let bytes: Vec<u8> = if let Ok(ab) = data.clone().dyn_into::<js_sys::ArrayBuffer>()
                 {
                     let arr = Uint8Array::new(&ab);
-                    let mut v = vec![0u8; arr.length() as usize];
+                    let len = arr.length() as usize;
+                    if len == 0 {
+                        return;
+                    }
+                    let current_bytes = {
+                        let g = inner.borrow();
+                        if g.closed {
+                            return;
+                        }
+                        g.rx_bytes
+                    };
+                    if len > MAX_WS_BUFFER_BYTES.saturating_sub(current_bytes) {
+                        let mut g = inner.borrow_mut();
+                        g.rx_buf.clear();
+                        g.rx_bytes = 0;
+                        g.read_cursor = 0;
+                        g.closed = true;
+                        g.error = Some(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "ws_stream: receive buffer exceeded 32 MiB cap",
+                        ));
+                        g.wake_read();
+                        g.wake_open();
+                        return;
+                    }
+                    let mut v = vec![0u8; len];
                     arr.copy_to(&mut v);
                     v
                 } else if let Some(s) = data.as_string() {
@@ -199,12 +229,8 @@ impl WsStream {
                     g.wake_read();
                     return;
                 };
-                if bytes.is_empty() {
-                    // Treat empty binary frames as a no-op rather than EOF;
-                    // EOF is signaled by `onclose`.
-                    return;
-                }
                 let mut g = inner.borrow_mut();
+                g.rx_bytes = g.rx_bytes.saturating_add(bytes.len());
                 g.rx_buf.push_back(bytes);
                 g.wake_read();
             }) as Box<dyn FnMut(MessageEvent)>)
@@ -334,7 +360,9 @@ impl AsyncRead for WsStream {
         };
         if n > 0 {
             if drained {
-                g.rx_buf.pop_front();
+                if let Some(popped) = g.rx_buf.pop_front() {
+                    g.rx_bytes = g.rx_bytes.saturating_sub(popped.len());
+                }
                 g.read_cursor = 0;
             } else {
                 g.read_cursor += n;

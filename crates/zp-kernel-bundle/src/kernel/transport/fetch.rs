@@ -56,6 +56,7 @@ pub(crate) async fn fetch(
     headers: &[(String, String)],
     body: &[u8],
     armed_challenge_compat: bool,
+    isolation_key: Option<&str>,
 ) -> Result<JsValue, JsValue> {
     let parsed = parse_url(target_url).map_err(jserr_str)?;
     let relay_url = pick_relay_url().map_err(jserr_str)?;
@@ -63,6 +64,7 @@ pub(crate) async fn fetch(
         scheme: parsed.scheme.clone(),
         host: parsed.host.clone(),
         port: parsed.port,
+        isolation_key: isolation_key.unwrap_or("").to_string(),
     };
     let host_h = host_header(&parsed);
     let t0 = now_ms();
@@ -179,7 +181,8 @@ async fn cold_request(
     armed_challenge_compat: bool,
     t0: f64,
 ) -> Result<JsValue, JsValue> {
-    let opened = open_fresh(parsed, relay_url, t0).await?;
+    let isolation_key = (!key.isolation_key.is_empty()).then_some(key.isolation_key.as_str());
+    let opened = open_fresh(parsed, relay_url, isolation_key, t0).await?;
     match opened {
         FreshConn::Http2(client) => {
             // Cache the h2 client immediately so any concurrent fetches
@@ -289,12 +292,18 @@ fn delta_ms(t0: f64) -> u32 {
 /// (TLS if https). Retries once if the yamux session itself looks stale.
 /// `t0` is the parent caller's start time; we report each stage as a
 /// delta off t0 so it's easy to spot which layer dominates total latency.
-async fn open_fresh(parsed: &ParsedUrl, relay_url: &str, t0: f64) -> Result<FreshConn, JsValue> {
+async fn open_fresh(
+    parsed: &ParsedUrl,
+    relay_url: &str,
+    isolation_key: Option<&str>,
+    t0: f64,
+) -> Result<FreshConn, JsValue> {
     // REFACTOR.md §3.2 — raw-byte dial은 주입 가능한 Dialer 뒤에 있다.
     // 기본 RelayDialer 가 기존 yamux→SOCKS5 경로를 그대로 수행한다.
     let addr = TargetAddr {
         host: parsed.host.clone(),
         port: parsed.port,
+        isolation_key: isolation_key.filter(|k| !k.is_empty()).map(str::to_string),
     };
     let stream = dialer().connect(&addr, relay_url, t0).await?;
 
