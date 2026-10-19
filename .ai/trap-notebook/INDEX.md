@@ -6,6 +6,7 @@ Keep each summary to a single line under 160 characters and point every detail l
 
 | Date | Category | Summary | Detail |
 |---|---|---|---|
+| 2026-10-19 | real-site / measurement | A widget sharing its embedder's process fails even with no membrane (site isolation off: 0/4). Proxied frames need different real sites. | rewriter.md#widget-process-model-inverse |
 | 2026-10-15 | real-site / method | Inverse experiment: adding each proxy difference (AI, gated APIs, WebGL, noise, rtt, CSP, 5x CPU) to the passing native+kernel run still passes 3/3. | rewriter.md#inverse-experiment-add-differences-to-a-passing-run |
 | 2026-10-15 | real-site / measurement | The challenge class a person receives depends on HTTP/3: h3 managed 8/8, h2 2/5, kernel interactive 7/7, with an equal wire identity. | rewriter.md#challenge-class-depends-on-http3 |
 | 2026-10-15 | real-site / method | Compare widget payloads per stage by key set. A debugger on the native parent breaks it (57 s, error 300031), so read only the widget. | rewriter.md#widget-payload-stage-diff |
