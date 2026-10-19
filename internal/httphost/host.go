@@ -937,9 +937,54 @@ func (s *server) securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "no-referrer")
-		w.Header().Set("Content-Security-Policy", s.zeroCSP(r))
+		w.Header().Set("Content-Security-Policy", s.responseCSP(r))
+		if isSiteFrameBootstrap(r) {
+			// A page whose own policy demands cross-origin isolation can embed only frames that opt in on both counts.
+			w.Header().Set("Cross-Origin-Embedder-Policy", "require-corp")
+			w.Header().Set("Cross-Origin-Resource-Policy", "cross-origin")
+		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// responseCSP is zeroCSP, except that the page which boots a site frame's worker (a share route requested for an iframe on a
+// loopback host) may be embedded by pages of this proxy at other `*.localhost` hosts. Every other response stays unframeable.
+func (s *server) responseCSP(r *http.Request) string {
+	csp := s.zeroCSP(r)
+	if isSiteFrameBootstrap(r) {
+		if src := siteFrameSource(r); src != "" {
+			csp = strings.Replace(csp, "frame-ancestors 'none'", "frame-ancestors "+src, 1)
+		}
+	}
+	return csp
+}
+
+// isSiteFrameBootstrap reports a share route requested for an iframe on a loopback name: the first response of a site frame, before
+// its worker exists.
+func isSiteFrameBootstrap(r *http.Request) bool {
+	return strings.HasPrefix(r.URL.Path, "/zp/p/") && strings.EqualFold(r.Header.Get("Sec-Fetch-Dest"), "iframe") && siteFrameSource(r) != ""
+}
+
+// siteFrameSource is the CSP source matching every `<label>.localhost` host on the request's port, or "" when the request did not
+// arrive on a loopback name.
+func siteFrameSource(r *http.Request) string {
+	host, port, err := net.SplitHostPort(r.Host)
+	if err != nil {
+		host, port = r.Host, ""
+	}
+	host = strings.ToLower(host)
+	if host != "localhost" && !strings.HasSuffix(host, ".localhost") {
+		return ""
+	}
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
+	}
+	src := scheme + "://*.localhost"
+	if port != "" {
+		src += ":" + port
+	}
+	return src
 }
 
 func (s *server) zeroCSP(r *http.Request) string {

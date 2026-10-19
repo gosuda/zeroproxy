@@ -194,13 +194,26 @@
     } catch {}
     return 'other';
   }
-  function normalizePostMessageTargetOrigin(targetOrigin) {
+  // The real origin a window is served from. Every frame of the same site shares this document's; a site frame this document embeds, the
+  // page that embeds this one and the top document live at origins of their own (see ZP.siteFrameOrigin).
+  function realOriginOfWindow(win) {
+    if (!win || win === root) return proxyOrigin;
+    try { const o = frameRealOrigins.get(win); if (o) return o; } catch {}
+    if (siteFrameBoot) {
+      try {
+        if (winGet(root, 'parent') === win) return siteFrameBoot.parentOrigin;
+        if (winGet(root, 'top') === win) return siteFrameBoot.mainOrigin;
+      } catch {}
+    }
+    return proxyOrigin;
+  }
+  function normalizePostMessageTargetOrigin(targetOrigin, target) {
     if (targetOrigin == null) return targetOrigin;
     const s = String(targetOrigin);
     if (s === '*' || s === '/') return s;
     try {
       const u = new URL(s);
-      if (u.protocol === 'http:' || u.protocol === 'https:') return proxyOrigin;
+      if (u.protocol === 'http:' || u.protocol === 'https:') return realOriginOfWindow(target);
     } catch {}
     return s;
   }
@@ -261,11 +274,11 @@
       const wanted = optionsForm ? (targetOrigin.targetOrigin === undefined ? '/' : targetOrigin.targetOrigin) : (arguments.length < 2 ? '/' : targetOrigin);
       if (!postMessageTargetAccepts(target, wanted)) return undefined;
       if (optionsForm) {
-        const opts = { targetOrigin: arguments.length < 2 ? proxyOrigin : normalizePostMessageTargetOrigin(wanted) };
+        const opts = { targetOrigin: arguments.length < 2 ? realOriginOfWindow(target) : normalizePostMessageTargetOrigin(wanted, target) };
         if (targetOrigin.transfer !== undefined) opts.transfer = targetOrigin.transfer;
         return Reflect.apply(originalPm, target, [message, opts]);
       }
-      const mapped = arguments.length < 2 ? proxyOrigin : normalizePostMessageTargetOrigin(targetOrigin);
+      const mapped = arguments.length < 2 ? realOriginOfWindow(target) : normalizePostMessageTargetOrigin(targetOrigin, target);
       return arguments.length > 2 ? Reflect.apply(originalPm, target, [message, mapped, transfer]) : Reflect.apply(originalPm, target, [message, mapped]);
     };
     // Match native postMessage.length (1) and .name.
@@ -279,7 +292,7 @@
     return wrapped;
   }
   function virtualOriginForMessage(ev) {
-    if (!ev || ev.origin !== proxyOrigin || !ev.source) return '';
+    if (!ev || !ev.source || (ev.origin !== proxyOrigin && ev.origin !== realOriginOfWindow(ev.source))) return '';
     // Resolve the sender's virtual origin through windowHandles across realms.
     try {
       const o = windowHandles ? windowHandles.originOf(ev.source) : '';
@@ -300,7 +313,7 @@
   // Virtualize MessageEvent.origin and MessageEvent.source for messages
   // arriving from the physical proxy origin.
   function virtualizeMessageEvent(ev) {
-    if (ev.origin !== proxyOrigin) return ev;
+    if (ev.origin !== proxyOrigin && !(ev.source && ev.origin === realOriginOfWindow(ev.source))) return ev;
     const origin = virtualOriginForMessage(ev);
     if (!origin) return ev;
     // Map event.source to the membrane window handle so `e.source === iframe.contentWindow` holds.
@@ -338,7 +351,13 @@
     if (!target) return;
     try {
       const child = nativeFrameWindow(frame);
-      if (child) frameWindowOrigins.set(child, new URL(target).origin);
+      if (child) {
+        frameWindowOrigins.set(child, new URL(target).origin);
+        // A site frame is served from another real origin: remember it, messages to and from it are addressed there.
+        const src = Native.getAttribute.call(frame, 'src');
+        const u = src ? new Native.URL(src, proxyOrigin) : null;
+        if (u && /^https?:$/.test(u.protocol) && u.origin !== proxyOrigin) frameRealOrigins.set(child, u.origin);
+      }
     } catch {}
   }
   try { defineMasked(root, frameTargetOriginMarker, { get() { return displayOrigin(securityOrigin()); }, enumerable: false, configurable: false }); } catch {}

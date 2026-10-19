@@ -119,6 +119,7 @@
         <button>Open</button>
       </form>
       <label class="opt"><input id="challenge-compat" type="checkbox"> <span class="lbl">Challenge compatibility (Cloudflare Turnstile)</span></label>
+      <label class="opt"><input id="site-frames" type="checkbox"> <span class="lbl">Site-isolated frames (loopback relay only)</span></label>
     </div>
     <div class="stat">
       <span class="lbl"><span class="dot" aria-hidden="true"></span>02 — Status</span>
@@ -178,6 +179,10 @@
     const el = document.getElementById('challenge-compat');
     return !!(el && el.checked);
   }
+  function siteFramesEnabled() {
+    const el = document.getElementById('site-frames');
+    return !!(el && el.checked);
+  }
   // Subdomains where upstream WAFs enforce an initial ~60s IP/session reputation delay before serving the first
   // response; the launcher displays an informational status message during the initial load.
   const SLOW_LANE_RULES = [
@@ -191,7 +196,7 @@
   }
   async function registerShare(targetUrl, servers, challengeCompat, reuseTabId) {
     const share = await ZP.encryptShareURL(targetUrl);
-    const msg = { type: ZP.MSG.OPEN_SHARE, routeKey: share.encrypted, targetUrl: share.targetUrl, servers, challengeCompat, env: ZP.clientEnvOf(window) };
+    const msg = { type: ZP.MSG.OPEN_SHARE, routeKey: share.encrypted, targetUrl: share.targetUrl, servers, challengeCompat, siteFrames: siteFramesEnabled(), env: ZP.clientEnvOf(window) };
     if (reuseTabId) msg.reuseTabId = reuseTabId;
     const result = await swRequest(msg);
     const finalServers = Array.isArray(result.servers) && result.servers.length ? result.servers : servers;
@@ -251,9 +256,13 @@
     if (!key) { location.replace(ZP.errorPath('INVALID_SHARE_LINK')); return true; }
     try {
       const targetUrl = await ZP.decryptShareURL(encrypted, key);
-      const result = await swRequest({ type: ZP.MSG.OPEN_SHARE, routeKey: encrypted, targetUrl, servers, env: ZP.clientEnvOf(window) });
+      // A site frame: the embedding page lives at another real origin and describes itself in the fragment (`zpf`).
+      const zpf = params.get('zpf') || '';
+      let siteFrame = null;
+      if (zpf) { try { siteFrame = JSON.parse(new TextDecoder().decode(ZP.base64UrlToBytes(zpf))); } catch {} }
+      const result = await swRequest({ type: ZP.MSG.OPEN_SHARE, routeKey: encrypted, targetUrl, servers, env: ZP.clientEnvOf(window), ...(siteFrame ? { siteFrame, challengeCompat: !!siteFrame.challengeCompat } : null) });
       if (Array.isArray(result.servers) && result.servers.length) servers = result.servers;
-      const next = result.path + ZP.makeShareFragment(key, servers);
+      const next = result.path + ZP.makeShareFragment(key, servers) + (siteFrame ? '&zpf=' + zpf : '');
       if (location.pathname === result.path) {
         try { history.replaceState(null, '', ZP.CONTROL_PREFIX); } catch {}
       }

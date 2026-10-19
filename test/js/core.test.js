@@ -83,3 +83,46 @@ test('the persona\'s User-Agent and sec-ch-ua name one Chrome version, in every 
   assert.ok(copy, 'worker-prelude.js no longer carries a TARGET_USER_AGENT literal');
   assert.equal(copy[1], ZP.TARGET_USER_AGENT);
 });
+
+test('sites: registrable domains, labels and the hosts that serve site frames', () => {
+  const ZP = loadCore();
+  assert.equal(ZP.siteOf('https://www.glassdoor.com/a?b#c'), 'https://glassdoor.com');
+  assert.equal(ZP.siteOf('https://challenges.cloudflare.com/x'), 'https://cloudflare.com');
+  assert.equal(ZP.siteOf('https://news.bbc.co.uk/'), 'https://bbc.co.uk', 'a second-level country suffix keeps one more label');
+  assert.equal(ZP.siteOf('http://127.0.0.1:3000/'), 'http://127.0.0.1', 'an address is its own site');
+  assert.equal(ZP.sameSite('https://a.example.com/', 'https://b.example.com/x'), true);
+  assert.equal(ZP.sameSite('https://example.com/', 'http://example.com/'), false, 'the scheme is part of the site');
+  assert.equal(ZP.sameSite('https://example.com/', 'https://example.org/'), false);
+  // A loopback proxy mints one host per site; any other proxy cannot.
+  assert.equal(ZP.siteFrameCapable('http://proxy.localhost:18080'), true);
+  assert.equal(ZP.siteFrameCapable('http://localhost:18080'), true);
+  assert.equal(ZP.siteFrameCapable('https://proxy.example'), false);
+  assert.equal(ZP.siteFrameOrigin('https://proxy.example', 'https://a.test/'), '');
+  const a = ZP.siteFrameOrigin('http://proxy.localhost:18080', 'https://challenges.cloudflare.com/x');
+  assert.match(a, /^http:\/\/s-cloudflare-com-[0-9a-f]{8}\.localhost:18080$/);
+  assert.equal(ZP.siteFrameOrigin('http://proxy.localhost:18080', 'https://www.cloudflare.com/y'), a, 'one host per site');
+  assert.notEqual(ZP.siteFrameOrigin('http://proxy.localhost:18080', 'https://cloudflare.org/'), a);
+  assert.notEqual(new URL(a).hostname.split('.')[0].length > 63, true, 'a DNS label stays within 63 characters');
+  assert.equal(ZP.siteFrameSource('http://proxy.localhost:18080'), 'http://*.localhost:18080');
+  assert.equal(ZP.siteFrameSource('https://proxy.example'), '');
+});
+
+test('sites: the proxy CSP admits site hosts only for tabs that use site frames', () => {
+  const ZP = loadCore();
+  const off = ZP.fixedCSP([]);
+  assert.equal(off.includes('.localhost'), false);
+  // The CSP builder reads the worker's own origin; give it one.
+  const ctx = { crypto: require('node:crypto').webcrypto, TextEncoder, TextDecoder, URL, URLSearchParams, btoa: s => Buffer.from(s, 'binary').toString('base64'), atob: s => Buffer.from(s, 'base64').toString('binary'), location: new URL('http://proxy.localhost:18080/zp/sw.js') };
+  vm.runInNewContext(fs.readFileSync('web/zp-core.js', 'utf8'), ctx);
+  const on = ctx.ZP.fixedCSP([], { siteFrames: true });
+  assert.ok(on.includes("frame-src 'self' blob: data: http://*.localhost:18080"), on);
+  assert.ok(on.includes("child-src 'self' blob: data: http://*.localhost:18080"), on);
+  assert.equal(/script-src[^;]*localhost/.test(on), false, 'only frames and children, never scripts');
+  assert.equal(ctx.ZP.fixedCSP([]).includes('*.localhost'), false, 'a tab without site frames keeps its own policy');
+  // A meta CSP of the target must not shut the site hosts out either.
+  const meta = ctx.ZP.filterMetaCSP("default-src 'none'; frame-src https://challenges.cloudflare.com", 'http://*.localhost:18080');
+  assert.ok(meta.includes('frame-src https://challenges.cloudflare.com'), meta);
+  assert.ok(/frame-src [^;]*http:\/\/\*\.localhost:18080/.test(meta), meta);
+  assert.equal(/default-src [^;]*localhost/.test(meta), false);
+  assert.equal(ctx.ZP.filterMetaCSP("frame-src https://x.test"), "frame-src https://x.test 'self' blob: data:", 'unchanged without a site source');
+});

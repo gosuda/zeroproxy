@@ -205,6 +205,35 @@ pub fn build_proxied_csp_with(ws_origin: &str, extra_connect: &[&str], opts: &Cs
 /// Returns an empty string when no directives remain, signaling the caller to
 /// neutralize the `<meta>` tag.
 pub fn filter_meta_csp(content: &str) -> String {
+    filter_meta_csp_with(content, "")
+}
+
+/// The CSP source matching every `<label>.localhost` host of a loopback proxy origin (the real origins that serve frames of other
+/// sites), or an empty string when the proxy origin is not a loopback name. Keep in sync with `ZP.siteFrameSource`.
+pub fn site_frame_source(proxy_origin: &str) -> String {
+    let (scheme, rest) = match proxy_origin.split_once("://") {
+        Some(parts) => parts,
+        None => return String::new(),
+    };
+    let authority = rest.split('/').next().unwrap_or("");
+    let (host, port) = match authority.rsplit_once(':') {
+        Some((h, p)) if p.chars().all(|c| c.is_ascii_digit()) && !h.contains(']') => (h, p),
+        _ => (authority, ""),
+    };
+    let host = host.to_ascii_lowercase();
+    if host != "localhost" && !host.ends_with(".localhost") {
+        return String::new();
+    }
+    if port.is_empty() {
+        format!("{}://*.localhost", scheme)
+    } else {
+        format!("{}://*.localhost:{}", scheme, port)
+    }
+}
+
+/// [`filter_meta_csp`] that also admits `site_frame_source` (see [`site_frame_source`]) in `frame-src` and `child-src`, so a target's
+/// own `<meta>` policy does not block the real origins that serve its frames. The header policy decides whether a tab may use them.
+pub fn filter_meta_csp_with(content: &str, site_frame_source: &str) -> String {
     // Minimum sources required by proxy plumbing for each directive.
     fn infra_sources(name: &str) -> &'static str {
         match name {
@@ -241,6 +270,9 @@ pub fn filter_meta_csp(content: &str) -> String {
             for extra in infra_sources(&name).split_whitespace() {
                 if !sources.iter().any(|s| s == extra) { sources.push(extra.to_string()); }
             }
+            if !site_frame_source.is_empty() && (name == "frame-src" || name == "child-src") && !sources.iter().any(|s| s == site_frame_source) {
+                sources.push(site_frame_source.to_string());
+            }
             out.push(format!("{} {}", name, sources.join(" ")));
         } else if RESOURCE.contains(&name.as_str()) {
             if sources.iter().any(|s| s == "'none'") {
@@ -258,6 +290,29 @@ pub fn filter_meta_csp(content: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn site_frame_source_matches_every_label_host_of_a_loopback_proxy() {
+        assert_eq!(site_frame_source("http://proxy.localhost:18080"), "http://*.localhost:18080");
+        assert_eq!(site_frame_source("https://proxy.localhost"), "https://*.localhost");
+        assert_eq!(site_frame_source("http://localhost:8080/x"), "http://*.localhost:8080");
+        assert_eq!(site_frame_source("https://proxy.example"), "");
+        assert_eq!(site_frame_source("http://evil.localhost.example:80"), "");
+        assert_eq!(site_frame_source("not an origin"), "");
+    }
+
+    #[test]
+    fn filter_meta_csp_admits_the_site_frame_source_in_frames_only() {
+        let src = "http://*.localhost:18080";
+        let out = filter_meta_csp_with("default-src 'none'; frame-src https://challenges.cloudflare.com; child-src 'none'; script-src 'none'", src);
+        assert!(out.contains("frame-src https://challenges.cloudflare.com 'self' blob: data: http://*.localhost:18080"), "{}", out);
+        assert!(out.contains("child-src 'self' blob: data: http://*.localhost:18080"), "{}", out);
+        assert!(!out.contains("script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' blob: http"), "{}", out);
+        assert!(!out.contains("default-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' blob: data: http"), "{}", out);
+        // Without a site source the output is the plain filter's, byte for byte.
+        let plain = "frame-src https://x.test; img-src https:";
+        assert_eq!(filter_meta_csp_with(plain, ""), filter_meta_csp(plain));
+    }
 
     #[test]
     fn build_csp_strict_no_wildcards_no_script_blob() {

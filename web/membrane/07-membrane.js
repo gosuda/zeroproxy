@@ -824,6 +824,15 @@
       if (win === root) return securityOrigin();
       const own = ownMembraneOrigin(win);
       if (own) return own;
+      // A window the browser holds as cross-origin has no membrane to ask: the page that embeds this one was described in the boot
+      // configuration, and a site frame this document embeds was recorded when its route was set.
+      if (siteFrameBoot) {
+        try {
+          if (winGet(root, 'parent') === win) return new URL(siteFrameBoot.parentUrl).origin;
+          if (winGet(root, 'top') === win) return new URL(siteFrameBoot.topUrl).origin;
+        } catch {}
+      }
+      try { const remembered = frameRealOrigins.has(win) ? frameWindowOrigins.get(win) : ''; if (remembered) return remembered; } catch {}
       // Before a child frame boots its own membrane, check its host frame element's intended origin.
       try {
         const fe = winGet(win, 'frameElement');

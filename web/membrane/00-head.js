@@ -264,6 +264,11 @@
     } catch { /* defensive */ }
   }
   const activeServers = ZP.relayServersForShare(Array.isArray(boot.servers) ? boot.servers : [], { allowLoopbackWS: true });
+  // Site frames (see ZP.siteFrameOrigin): frames of another site are served from a real origin of their own, so the browser isolates
+  // them as it does natively. A document in such a frame is told who embeds it; the top document's site stays at `mainProxyOrigin`.
+  const siteFramesEnabled = boot.siteFrames === true || !!boot.siteFrame;
+  const siteFrameBoot = boot.siteFrame && typeof boot.siteFrame === 'object' ? boot.siteFrame : null;
+  const mainProxyOrigin = siteFrameBoot && siteFrameBoot.mainOrigin ? String(siteFrameBoot.mainOrigin) : proxyOrigin;
   let activeProxyPath = initialProxyURL.pathname;
   let activeProxyFragment = preservedShareFragment(initialProxyURL.hash);
   let activeRouteKey = ZP.isSharePath(activeProxyPath) ? ZP.shareRouteKey(activeProxyPath) : '';
@@ -315,6 +320,8 @@
   const srcsetMeta = newWeakMap();
   const messageListenerWrappers = newWeakMap();
   const frameWindowOrigins = newWeakMap();
+  // Real origins of the site frames this document embeds (see ZP.siteFrameOrigin), keyed by the frame's window.
+  const frameRealOrigins = newWeakMap();
   // Track frames with in-flight routed navigations so placeholder about:blank
   // loads can be suppressed and stale async routes cannot overwrite newer ones.
   const pendingFrameRoutes = newWeakSet();

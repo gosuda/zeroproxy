@@ -105,6 +105,9 @@
       if (!childWin) return childWin;
       // Leave opaque-origin frames uninstrumented; they either boot their own prelude or cannot run scripts.
       if (frame && frameHasOpaqueMark(frame)) return childWin;
+      // A site frame lives at a real origin of its own: its window is cross-origin to the browser, boots its own membrane, and is none of
+      // this realm's business.
+      if (!windowReachable(childWin)) return childWin;
       try { if (childWin[networkContainmentMarker]) return childWin; } catch { if (instrumentedWindows.has(childWin)) return childWin; }
       instrumentedWindows.add(childWin);
       // Seed the parent-side virtual window.name store from the iframe's `name` attribute.

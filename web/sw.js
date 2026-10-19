@@ -749,15 +749,25 @@ function isChildFrameDocument(req, entry, routeState) {
   return false;
 }
 
+// The launcher page, served for a share route this worker has no state for: the page boots the route from its fragment. For an iframe it
+// must be embeddable by a page that demands cross-origin isolation (a site frame is opened from another real origin).
+async function launcherForRoute(req) {
+  const resp = await internalAsset(new Request(ZP.CONTROL_PREFIX), new URL(ZP.CONTROL_PREFIX, ORIGIN));
+  if (!isChildFrameDocument(req, null, null)) return resp;
+  const h = new Headers(resp.headers);
+  h.set('Cross-Origin-Embedder-Policy', 'require-corp');
+  h.set('Cross-Origin-Resource-Policy', 'cross-origin');
+  return new Response(resp.body, { status: resp.status, statusText: resp.statusText, headers: h });
+}
 async function proxyDocument(req, route, clientId) {
   cleanupPendingSubmissions();
   const state = shareRoutes.get(route.routeKey);
-  if (!state) return internalAsset(new Request(ZP.CONTROL_PREFIX), new URL(ZP.CONTROL_PREFIX, ORIGIN));
+  if (!state) return launcherForRoute(req);
   const tab = tabs.get(state.tabId);
   const entry = tab && tab.entries.get(state.entryId);
   if (!tab || !entry) {
     shareRoutes.delete(route.routeKey);
-    return internalAsset(new Request(ZP.CONTROL_PREFIX), new URL(ZP.CONTROL_PREFIX, ORIGIN));
+    return launcherForRoute(req);
   }
   const isFrame = isChildFrameDocument(req, entry, state);
   if (isFrame) entry.frameRoute = true;
@@ -2020,6 +2030,9 @@ function buildRuntimePrelude(tab, entry) {
     wtGatewayCertHashes: Array.isArray(runtimeConfig.wtGatewayCertHashes) ? runtimeConfig.wtGatewayCertHashes : [],
     rtcICEServers: Array.isArray(runtimeConfig.rtcICEServers) ? runtimeConfig.rtcICEServers : [],
     ...(entry.opaque ? { opaque: true } : null),
+    ...(tab.siteFrames ? { siteFrames: true } : null),
+    ...(tab.challengeCompat ? { challengeCompat: true } : null),
+    ...(entry.siteFrame ? { siteFrame: entry.siteFrame } : null),
     ...(typeof entry.documentReferrer === 'string' ? { referrer: entry.documentReferrer } : null),
   };
   const bootJSON = JSON.stringify(boot).replace(/</g, '\\u003c');
@@ -2167,7 +2180,18 @@ async function handleMessage(event) {
       if (openerEnv) tab.clientEnv = openerEnv;
       const first = tab.entries.get(tab.activeEntryId);
       if (msg.opaque && first) first.opaque = true;
-      shareRoutes.set(routeKey, { tabId: tab.tabId, entryId: tab.activeEntryId, targetURL: first ? first.targetUrl : '', frameRoute: false });
+      // A site frame: its embedder lives at another real origin of this proxy (see ZP.siteFrameOrigin), so the tab is born as a frame
+      // of that page: the embedder's address is the Referer, the top document's origin decides what counts as cross-site.
+      const siteFrame = msg.siteFrame ? sanitizeSiteFrame(msg.siteFrame) : null;
+      if (siteFrame && first) {
+        first.frameRoute = true;
+        first.parentTargetUrl = siteFrame.parentUrl;
+        first.siteFrame = siteFrame;
+        tab.siteFrames = true;
+        try { tab.topOrigin = new URL(siteFrame.topUrl).origin; } catch {}
+      }
+      if (msg.siteFrames) tab.siteFrames = true;
+      shareRoutes.set(routeKey, { tabId: tab.tabId, entryId: tab.activeEntryId, targetURL: first ? first.targetUrl : '', frameRoute: !!siteFrame });
       scheduleStateFlush();
       ok({ path: ZP.makeSharePath(routeKey), servers: tab.servers, tabId: tab.tabId, reused: false });
       return;
@@ -2421,6 +2445,19 @@ function runtimeMessageAuthorized(event, tab, msg, fail) {
   return true;
 }
 
+// What a site frame is told about the page that embeds it: the embedder's real origin and address, the top document's address, and
+// the origin of the proxy page that owns the tab. Only http(s) URLs and origins are kept.
+function sanitizeSiteFrame(raw) {
+  const out = { parentOrigin: '', parentUrl: '', topUrl: '', mainOrigin: '' };
+  try {
+    if (!raw || typeof raw !== 'object') return null;
+    out.parentOrigin = new URL(String(raw.parentOrigin)).origin;
+    out.mainOrigin = new URL(String(raw.mainOrigin)).origin;
+    out.parentUrl = ZP.canonicalTargetURL(String(raw.parentUrl)).href;
+    out.topUrl = ZP.canonicalTargetURL(String(raw.topUrl)).href;
+  } catch { return null; }
+  return out;
+}
 function createTab(targetUrl, servers, challengeCompat) {
   const target = ZP.canonicalTargetURL(targetUrl).href;
   const tabId = ZP.randomId('t');
@@ -2548,6 +2585,7 @@ async function loadAllStoredJars() {
                 runtimeToken: st.runtimeToken || ZP.randomId('rt'),
                 servers: Array.isArray(st.servers) ? st.servers.slice() : [],
                 challengeCompat: !!st.challengeCompat,
+                siteFrames: !!st.siteFrames,
                 topOrigin: st.topOrigin || '',
                 clientEnv: st.clientEnv || null,
               };
@@ -2569,6 +2607,7 @@ async function loadAllStoredJars() {
                   opaque: !!e.opaque,
                   frameRoute: !!e.frameRoute,
                   referrerPolicy: e.referrerPolicy || '',
+                  ...(e.siteFrame ? { siteFrame: sanitizeSiteFrame(e.siteFrame) } : null),
                   ...(typeof e.documentReferrer === 'string' ? { documentReferrer: e.documentReferrer } : null),
                 });
               }
@@ -2638,6 +2677,7 @@ function serializeTabsState() {
           opaque: !!e.opaque,
           frameRoute: !!e.frameRoute,
           referrerPolicy: e.referrerPolicy || '',
+          siteFrame: e.siteFrame || undefined,
           documentReferrer: typeof e.documentReferrer === 'string' ? e.documentReferrer : undefined,
         });
       }
@@ -2650,6 +2690,7 @@ function serializeTabsState() {
       runtimeToken: tab.runtimeToken || '',
       servers: Array.isArray(tab.servers) ? tab.servers.slice() : [],
       challengeCompat: !!tab.challengeCompat,
+      siteFrames: !!tab.siteFrames,
       topOrigin: tab.topOrigin || '',
       clientEnv: tab.clientEnv || null,
       entries,
@@ -3136,9 +3177,10 @@ const ZP_TARGET_POLICY_HEADERS = __ZP_TARGET_POLICY_HEADERS__;
 // Browser reporting headers (`Report-To`, `Reporting-Endpoints`, `NEL`, `Content-Security-Policy-Report-Only`) that trigger out-of-band browser egress bypassing the Service Worker.
 const ZP_REPORTING_HEADERS = __ZP_REPORTING_HEADERS__;
 // Admits the WebTransport gateway origin in `connect-src` across document headers, meta tags, and worker bootstraps.
-function proxiedCSP(servers, challengeCompat) {
+function proxiedCSP(servers, challengeCompat, siteFrames) {
   return ZP.fixedCSP(servers || [], {
     challengeCompat: !!challengeCompat,
+    siteFrames: !!siteFrames,
     extraConnect: runtimeConfig.wtGateway ? [runtimeConfig.wtGateway] : [],
   });
 }
@@ -3154,7 +3196,7 @@ function applyZPSecurityHeaders(h, req, servers, tab, targetUrl) {
   h.delete('Content-Security-Policy-Report-Only');
   h.delete('X-Content-Security-Policy');
   h.delete('X-WebKit-CSP');
-  h.set('Content-Security-Policy', proxiedCSP(servers, armedHere));
+  h.set('Content-Security-Policy', proxiedCSP(servers, armedHere, tab && tab.siteFrames));
   for (const name of ZP_REPORTING_HEADERS) h.delete(name);
   for (const name of ZP_TARGET_POLICY_HEADERS) h.delete(name);
   for (const name of ZP_HOP_BY_HOP_HEADERS) h.delete(name);

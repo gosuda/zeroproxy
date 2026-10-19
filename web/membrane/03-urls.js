@@ -133,7 +133,7 @@
     const eq = String(value || '').trim().toLowerCase();
     if (eq === 'content-security-policy' || eq === 'content-security-policy-report-only') {
       const content = Native.getAttribute ? Native.getAttribute.call(el, 'content') : null;
-      const filtered = content != null ? ZP.filterMetaCSP(content) : '';
+      const filtered = content != null ? ZP.filterMetaCSP(content, ZP.siteFrameSource(proxyOrigin)) : '';
       if (filtered) {
         // Avoid overwriting data-zp-blocked-content when MutationObserver
         // re-observes the filtered attribute write.

@@ -306,7 +306,7 @@ test('CSP-equiv list neutralizes CSP, report-only, and origin-trial', () => {
 
 test('neutralizeCSPMeta removes the active equiv and keeps the original', () => {
   const Native = fakeNative();
-  const { neutralizeCSPMeta } = load(CSP_META_BLOCK, ['neutralizeCSPMeta'], { Native });
+  const { neutralizeCSPMeta } = load(CSP_META_BLOCK, ['neutralizeCSPMeta'], { Native, proxyOrigin: 'http://proxy.test:18080' });
   const el = fakeEl({ 'http-equiv': 'origin-trial', content: 'TOKEN123' });
   neutralizeCSPMeta(el, 'origin-trial');
   assert.equal(el.attrs['http-equiv'], undefined);
@@ -329,7 +329,7 @@ test('proxiedRefreshContent rewrites only the URL part', () => {
 
 test('enforceMetaPolicy handles CSP-equiv, refresh, and unrelated metas', () => {
   const Native = fakeNative();
-  const { isCSPHttpEquiv, neutralizeCSPMeta } = load(CSP_META_BLOCK, ['isCSPHttpEquiv', 'neutralizeCSPMeta'], { Native });
+  const { isCSPHttpEquiv, neutralizeCSPMeta } = load(CSP_META_BLOCK, ['isCSPHttpEquiv', 'neutralizeCSPMeta'], { Native, proxyOrigin: 'http://proxy.test:18080' });
   const { proxiedRefreshContent } = load(REFRESH_BLOCK, ['proxiedRefreshContent'], {
     targetURLIfHTTP: v => (/^https?:/i.test(v) ? new URL(v).href : null),
     proxyViaURL: abs => 'VIA(' + abs + ')',
@@ -578,6 +578,8 @@ function pmEnv(destOrigin) {
   const target = { postMessage: (...a) => { sent.push(a); } };
   const env = load(PM_BLOCK, ['postMessageWrapperFor', 'postMessageTargetAccepts', 'normalizePostMessageTargetOrigin'], {
     proxyOrigin: 'http://proxy.test:18080',
+    siteFrameBoot: null,
+    frameRealOrigins: new WeakMap(),
     virtualURL: new URL('http://a.test:3000/page'),
     windowHandles: { originOf: () => destOrigin },
     securityOrigin: () => 'http://a.test:3000',
@@ -664,6 +666,9 @@ function xoriginEnv(opts = {}) {
   const env = load(XORIGIN_BLOCK, ['windowHandleFor', 'crossOriginWindow', 'virtualOriginOfWindow'], {
     get, root, scope,
     virtualURL: new URL('http://a.test:3000/'),
+    siteFrameBoot: opts.siteFrameBoot || null,
+    frameRealOrigins: new WeakMap(),
+    frameWindowOrigins: new WeakMap(),
     urlMeta,
     securityOrigin: opts.securityOrigin || (() => 'http://a.test:3000'),
     displayOrigin: o => (String(o).indexOf('null#') === 0 ? 'null' : o),
@@ -1299,3 +1304,53 @@ test('embedding bridge API: ZP.configureBridge, ctx.setBridge, and ctx.dispose m
   assert.equal(nextDisposed, 1);
 });
 
+
+// Site frames live at real origins of their own, so a message is addressed to the origin the browser holds for the window, not to the
+// proxy origin every other frame shares.
+function siteMsgEnv({ siteFrameBoot = null, frameRealOrigins = new WeakMap(), parent = null, top = null } = {}) {
+  const sent = [];
+  const target = { postMessage: (...a) => { sent.push(a); } };
+  const root = { parent, top };
+  const env = load(PM_BLOCK, ['postMessageWrapperFor', 'realOriginOfWindow'], {
+    proxyOrigin: 'http://proxy.test:18080',
+    siteFrameBoot,
+    frameRealOrigins,
+    virtualURL: new URL('http://a.test:3000/page'),
+    windowHandles: { originOf: () => 'http://b.test:3000' },
+    securityOrigin: () => 'http://a.test:3000',
+    displayOrigin: o => o,
+    root,
+    winGet: (w, n) => w[n],
+    postMessageWrappers: new WeakMap(),
+    maskNativeFunction() {},
+    defineMasked() {},
+    restoreNativePostMessage() {},
+    installEarlyPostMessage() {},
+    URL,
+  });
+  return { env, target, sent, root };
+}
+
+test('site frames: a message to an embedded site frame is addressed to the frame\'s own real origin', () => {
+  const frameRealOrigins = new WeakMap();
+  const { env, target, sent } = siteMsgEnv({ frameRealOrigins });
+  assert.equal(env.realOriginOfWindow(target), 'http://proxy.test:18080', 'an ordinary frame shares the proxy origin');
+  frameRealOrigins.set(target, 'http://s-b-test-1234.localhost:18080');
+  assert.equal(env.realOriginOfWindow(target), 'http://s-b-test-1234.localhost:18080');
+  const wrapped = env.postMessageWrapperFor(target);
+  wrapped('m', 'http://b.test:3000');
+  wrapped('m', '*');
+  wrapped('m', { targetOrigin: 'http://b.test:3000' });
+  assert.deepEqual(sent.map(a => a[1]), ['http://s-b-test-1234.localhost:18080', '*', { targetOrigin: 'http://s-b-test-1234.localhost:18080' }]);
+});
+
+test('site frames: the embedding page and the top document are addressed at the origins the boot configuration names', () => {
+  const embedder = { postMessage() {} }, top = { postMessage() {} }, stranger = { postMessage() {} };
+  const { env } = siteMsgEnv({
+    siteFrameBoot: { parentOrigin: 'http://s-p-test-aaaaaaaa.localhost:18080', mainOrigin: 'http://proxy.localhost:18080', parentUrl: 'https://p.test/', topUrl: 'https://t.test/' },
+    parent: embedder, top,
+  });
+  assert.equal(env.realOriginOfWindow(embedder), 'http://s-p-test-aaaaaaaa.localhost:18080');
+  assert.equal(env.realOriginOfWindow(top), 'http://proxy.localhost:18080', 'the top document lives at the main origin');
+  assert.equal(env.realOriginOfWindow(stranger), 'http://proxy.test:18080', 'any other window is ours');
+});

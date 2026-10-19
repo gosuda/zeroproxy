@@ -67,6 +67,8 @@ fn attr_settings(
 ) -> Settings<'static, 'static> {
     let diags_for_attr = diagnostics;
     let target_for_attr = target;
+    // Real origins that serve frames of other sites (loopback proxies only); a target's `<meta>` CSP must not block them.
+    let site_frames = zp_shared::csp::site_frame_source(&proxy_origin);
     // `<base href>` sets the base URL for all subsequent relative URLs in document
     // order. `lol_html` streams in document order, so `<base>` in `<head>` arrives
     // before body subresources, matching the HTML specification.
@@ -132,7 +134,7 @@ fn attr_settings(
                             let content = decode_url_html_entities(&el.get_attribute("content").unwrap_or_default()).into_owned();
                             let _ = el.set_attribute("data-zp-blocked-http-equiv", &equiv);
                             let _ = el.set_attribute("data-zp-blocked-content", &content);
-                            let filtered = zp_shared::csp::filter_meta_csp(&content);
+                            let filtered = zp_shared::csp::filter_meta_csp_with(&content, &site_frames);
                             if filtered.is_empty() {
                                 let _ = el.remove_attribute("http-equiv");
                                 let _ = el.remove_attribute("content");

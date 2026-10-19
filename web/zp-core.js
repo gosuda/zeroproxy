@@ -343,8 +343,11 @@
     }
     const armed = !!(options && options.challengeCompat);
     const cf = ' https://challenges.cloudflare.com';
+    // Frames of other sites are served from `<label>.localhost` hosts of this proxy; the page may embed them.
+    const siteSrc = options && options.siteFrames && loc ? siteFrameSource(loc.origin) : '';
+    const sites = siteSrc ? ' ' + siteSrc : '';
     if (armed) connect.add('https://challenges.cloudflare.com');
-    return "default-src 'none'; script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' blob:" + (armed ? cf : '') + "; style-src 'self' 'unsafe-inline' blob: data:; img-src 'self' blob: data:; font-src 'self' blob: data:; media-src 'self' blob: data:; connect-src " + Array.from(connect).join(' ') + " blob: data:; frame-src 'self' blob: data:" + (armed ? cf : '') + "; child-src 'self' blob: data:" + (armed ? cf : '') + "; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'self'; manifest-src 'self'; report-uri /zp/api/csp-report";
+    return "default-src 'none'; script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' blob:" + (armed ? cf : '') + "; style-src 'self' 'unsafe-inline' blob: data:; img-src 'self' blob: data:; font-src 'self' blob: data:; media-src 'self' blob: data:; connect-src " + Array.from(connect).join(' ') + " blob: data:; frame-src 'self' blob: data:" + sites + (armed ? cf : '') + "; child-src 'self' blob: data:" + sites + (armed ? cf : '') + "; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'self'; manifest-src 'self'; report-uri /zp/api/csp-report";
   }
   // Filters `<meta http-equiv="Content-Security-Policy">` directives to match `zp-shared::csp::filter_meta_csp`.
   // Browser `<meta>` CSP only tightens header policies, so infrastructure directives merge required proxy sources
@@ -364,7 +367,8 @@
     'default-src': "'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' blob: data:",
   };
   const META_CSP_RESOURCE = newSet(['img-src', 'media-src', 'font-src', 'object-src', 'manifest-src', 'prefetch-src', 'form-action', 'base-uri']);
-  function filterMetaCSP(content) {
+  // `siteFrameSrc` (see siteFrameSource) is also admitted in `frame-src` and `child-src`.
+  function filterMetaCSP(content, siteFrameSrc) {
     const out = [];
     for (const segment of String(content || '').split(';')) {
       const seg = segment.trim();
@@ -376,6 +380,7 @@
       if (infra) {
         const sources = parts.filter(s => s !== "'none'");
         for (const extra of infra.split(/\s+/)) if (!sources.includes(extra)) sources.push(extra);
+        if (siteFrameSrc && (name === 'frame-src' || name === 'child-src') && !sources.includes(siteFrameSrc)) sources.push(siteFrameSrc);
         out.push(name + ' ' + sources.join(' '));
       } else if (META_CSP_RESOURCE.has(name)) {
         if (parts.includes("'none'")) out.push(name + " 'none'");
@@ -423,6 +428,48 @@
   function isLoopbackHost(host) {
     const h = String(host || '').toLowerCase();
     return h === 'localhost' || h.endsWith('.localhost') || h === '127.0.0.1' || h === '::1' || h === '[::1]' || /^127\.\d+\.\d+\.\d+$/.test(h);
+  }
+  // Site-isolated frames. On a loopback relay every `<label>.localhost` host is a site of its own, so the browser puts a frame of
+  // another target site in another process, as it does natively. `siteOf` is the target-side site (registrable domain) a frame
+  // belongs to; `siteFrameOrigin` is the real origin that serves frames of that site.
+  const SECOND_LEVEL_SUFFIX = newSet(['co', 'ne', 'or', 'ac', 'go', 're', 'pe', 'kg', 'seoul', 'busan', 'com', 'net', 'org', 'gov', 'edu', 'mil', 'int', 'info', 'biz', 'nom']);
+  function registrableDomain(host) {
+    const h = String(host || '').toLowerCase().replace(/\.$/, '');
+    if (!h || /^\d+(\.\d+)*$/.test(h) || h.indexOf(':') >= 0) return h;
+    const parts = h.split('.');
+    if (parts.length <= 2) return h;
+    const tld = parts[parts.length - 1];
+    const sld = parts[parts.length - 2];
+    if (tld.length === 2 && SECOND_LEVEL_SUFFIX.has(sld)) return parts.slice(-3).join('.');
+    return parts.slice(-2).join('.');
+  }
+  function siteOf(targetUrl) {
+    const u = new URL(String(targetUrl));
+    return u.protocol + '//' + registrableDomain(u.hostname);
+  }
+  function sameSite(a, b) {
+    try { return siteOf(a) === siteOf(b); } catch { return false; }
+  }
+  function siteFrameCapable(proxyOrigin) {
+    try { const h = new URL(proxyOrigin).hostname.toLowerCase(); return h === 'localhost' || h.endsWith('.localhost'); } catch { return false; }
+  }
+  function siteLabel(site) {
+    let h = 0x811c9dc5;
+    for (let i = 0; i < site.length; i++) h = Math.imul(h ^ site.charCodeAt(i), 0x01000193);
+    const name = site.replace(/^https?:\/\//, '').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'site';
+    return 's-' + name + '-' + (h >>> 0).toString(16).padStart(8, '0');
+  }
+  // The origin serving frames of `targetUrl`'s site, or '' where the proxy cannot mint hosts (a non-loopback relay).
+  function siteFrameOrigin(proxyOrigin, targetUrl) {
+    if (!siteFrameCapable(proxyOrigin)) return '';
+    const p = new URL(proxyOrigin);
+    return p.protocol + '//' + siteLabel(siteOf(targetUrl)) + '.localhost' + (p.port ? ':' + p.port : '');
+  }
+  // CSP source matching every site host of a loopback proxy origin.
+  function siteFrameSource(proxyOrigin) {
+    if (!siteFrameCapable(proxyOrigin)) return '';
+    const p = new URL(proxyOrigin);
+    return p.protocol + '//*.localhost' + (p.port ? ':' + p.port : '');
   }
   function redirectMethod(status, method) {
     if ((status === 301 || status === 302) && method === 'POST') return 'GET';
@@ -504,7 +551,7 @@
     Object.defineProperty(w, '__zp_bridge_factory', { value: factory, configurable: true, enumerable: false, writable: true });
     return null;
   }
-  const api = Object.freeze({ CONTROL_PREFIX, ASSET_PREFIX, TARGET_USER_AGENT, TARGET_SEC_CH_UA, TARGET_CHROME_FULL_VERSION, TARGET_UA_HIGH_ENTROPY, uaHighEntropyValues, clientEnvOf, chromeBrandList, bytesToBase64Url, base64UrlToBytes, webTransportGatewayRequest, relayOnlyRTCConfiguration, ENVELOPE_MIME,encodeEnvelope, decodeEnvelope, encryptShareURL, decryptShareURL, makeShareURL, makeSharePath, makeShareFragment, defaultRelayServer, relayServersForShare, isSharePath, shareRouteKey, controlPath, assetPath, assetURL, versionedAsset, apiPath, errorPath, INTERNAL_ASSET_SCRIPTS, isInternalAssetScriptPath, isInternalPath, canonicalTargetURL, canonicalWebSocketURL, encodeTargetURL, decodeTargetURL, randomId, fixedCSP, filterMetaCSP, parseRelayServersFromFragment, normalizeRelayServers, isLoopbackHost, redirectMethod, createFetchResponseAdapter, configureBridge, ERRORS, errorInfo, MSG });
+  const api = Object.freeze({ CONTROL_PREFIX, ASSET_PREFIX, TARGET_USER_AGENT, TARGET_SEC_CH_UA, TARGET_CHROME_FULL_VERSION, TARGET_UA_HIGH_ENTROPY, uaHighEntropyValues, clientEnvOf, chromeBrandList, bytesToBase64Url, base64UrlToBytes, webTransportGatewayRequest, relayOnlyRTCConfiguration, ENVELOPE_MIME,encodeEnvelope, decodeEnvelope, encryptShareURL, decryptShareURL, makeShareURL, makeSharePath, makeShareFragment, defaultRelayServer, relayServersForShare, isSharePath, shareRouteKey, controlPath, assetPath, assetURL, versionedAsset, apiPath, errorPath, INTERNAL_ASSET_SCRIPTS, isInternalAssetScriptPath, isInternalPath, canonicalTargetURL, canonicalWebSocketURL, encodeTargetURL, decodeTargetURL, randomId, fixedCSP, filterMetaCSP, parseRelayServersFromFragment, normalizeRelayServers, isLoopbackHost, registrableDomain, siteOf, sameSite, siteFrameCapable, siteFrameOrigin, siteFrameSource, redirectMethod, createFetchResponseAdapter, configureBridge, ERRORS, errorInfo, MSG });
   // `configurable: true` allows the page prelude to delete `globalThis.ZP` after capturing it into a closure binding,
   // preventing `Object.getOwnPropertyNames(window)` from exposing `ZP` to target scripts.
   Object.defineProperty(globalThis, 'ZP', { value: api, enumerable: false, configurable: true, writable: false });

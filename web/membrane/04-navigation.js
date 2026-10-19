@@ -79,12 +79,45 @@
   }
   // `opaque` may be a boolean or a predicate evaluated when the route is sent;
   // defaults to the embedding document's opacity.
+  // The real origin that should serve a frame of `target`, or '' when this document's own origin does (frames of the top document's
+  // site live where the top document lives; every other site gets a host of its own).
+  function siteFrameHostFor(target) {
+    if (!siteFramesEnabled || !ZP.siteFrameCapable(mainProxyOrigin)) return '';
+    try {
+      const host = ZP.sameSite(target, topDocumentURL()) ? mainProxyOrigin : ZP.siteFrameOrigin(mainProxyOrigin, target);
+      return host && host !== proxyOrigin ? host : '';
+    } catch { return ''; }
+  }
+  function topDocumentURL() {
+    if (siteFrameBoot && siteFrameBoot.topUrl) return siteFrameBoot.topUrl;
+    try {
+      const t = winGet(root, 'top');
+      if (t && t !== root) {
+        const g = t.__zp_get;
+        if (typeof g === 'function') { const l = g(t, 'location'); if (l && l.href) return String(l.href); }
+      }
+    } catch {}
+    return virtualURL.href;
+  }
+  // Fragment of a site frame's address: its share key, the relay servers other than this document's own, and a description of the
+  // embedder (`zpf`) that the frame's launcher page hands to its own worker.
+  function siteFrameFragment(key) {
+    const params = new URLSearchParams();
+    params.set('k', String(key));
+    const own = ZP.defaultRelayServer(proxyOrigin);
+    for (const server of activeServers) if (server !== own) params.append('server', server);
+    const frame = { parentOrigin: proxyOrigin, parentUrl: virtualURL.href, topUrl: topDocumentURL(), mainOrigin: mainProxyOrigin, challengeCompat: boot.challengeCompat === true };
+    params.set('zpf', ZP.bytesToBase64Url(new TextEncoder().encode(JSON.stringify(frame))));
+    return '#' + params.toString();
+  }
   async function activatedFrameURL(raw, base = baseURL, opaque) {
     const target = targetURL(raw, base);
     const share = await ZP.encryptShareURL(target);
     rememberFrameRoute(share.encrypted, target);
     const entryId = 'e' + ZP.randomId();
     const isOpaque = typeof opaque === 'function' ? !!opaque() : opaque === undefined ? opaqueDocument : !!opaque;
+    const siteHost = isOpaque ? '' : siteFrameHostFor(target);
+    if (siteHost) return siteHost + ZP.makeSharePath(share.encrypted) + siteFrameFragment(share.key);
     // Pass parentTargetUrl so the service worker sends the embedding page's
     // virtual URL in the iframe document's Referer header.
     await ctx.bridge.send({ type: ZP.MSG.FRAME_ROUTE, tabId: boot.tabId, routeKey: share.encrypted, entryId, targetUrl: target, baseUrl: target, parentTargetUrl: virtualURL.href, ...(isOpaque ? { opaque: true } : null) });
