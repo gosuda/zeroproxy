@@ -1,22 +1,11 @@
 #!/usr/bin/env node
-//
-// Day 0 dogfood baseline capture (E4 Stage 1 helper).
-//
-// Drives the taskweaver `zp` instance through the launcher → opens
-// gosuda.org as the canonical SPA baseline target, captures a screenshot,
-// dumps console errors, and writes everything under
-//   `.ai/dogfood/<YYYY-MM-DD>/`
-// so the operator has a reproducible reference for the rest of the
-// 5-7 day Stage 1 journal.
+// Capture a baseline screenshot and console error log via the taskweaver `zp` instance.
+// Writes output under `.ai/dogfood/<YYYY-MM-DD>/`.
 //
 // Usage:
 //   node scripts/dogfood-baseline.mjs                 # default: gosuda.org
 //   node scripts/dogfood-baseline.mjs https://...     # custom target
 //   node scripts/dogfood-baseline.mjs --label nact    # extra label in dir name
-//
-// Assumes: zeroproxy-server.exe listening on 127.0.0.1:18080 (per CLAUDE.md
-// canonical command) and `taskweaver` on PATH. Re-uses the shared `zp`
-// instance per the project's taskweaver policy.
 
 import { spawnSync } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
@@ -58,7 +47,6 @@ function navigate(url) {
 }
 
 function openTarget(targetUrl) {
-  // Submit through the launcher form (input field + Open button).
   tw('fill-form', '-i', 'zp', '--selector', 'input', '--value', targetUrl);
   tw('click', '-i', 'zp', '--text', 'Open');
 }
@@ -97,8 +85,7 @@ async function wait(ms) { return new Promise(r => setTimeout(r, ms)); }
   await wait(1500);
 
   openTarget(target);
-  // Give the SW + first transportFetch + page bundle time to settle. The
-  // first cold visit also pulls the lazy kernel wasm (split-bundle c.3).
+  // Wait for service worker activation, lazy kernel WASM instantiation, and initial navigation.
   await wait(8000);
 
   const finalUrl = probeUrl();

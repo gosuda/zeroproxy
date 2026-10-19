@@ -2,12 +2,12 @@
 //!
 //! The SW names the order Chrome would use (`X-ZP-Header-Order`, lowercase, comma-separated): Chrome orders a
 //! navigation and a sub-request differently, client hints sit between the browser's own headers, and `cookie` precedes
-//! `priority` on HTTP/2 (measured 2026-10-13). The kernel adds Referer / Origin / Accept-Encoding / Cookie after the SW
+//! `priority` on HTTP/2. The kernel adds Referer / Origin / Accept-Encoding / Cookie after the SW
 //! is done, then sorts with this.
 
 /// Sort `headers` (stable) by their position in `sw_order`; a name the list does not carry goes last, keeping its
-/// place among such. Without a list — a caller that sends none — a fixed navigation rank applies (2026-08-16: the
-/// kernel's promotions only append, and the referer / accept-encoding they add used to trail `priority` on the wire).
+/// place among such. Without a list (when a caller sends none), a fixed navigation rank applies so headers appended
+/// by the kernel do not trail `priority` on the wire.
 pub fn order_request_headers(headers: &mut [(String, String)], sw_order: Option<&[String]>) {
     match sw_order {
         Some(order) => {

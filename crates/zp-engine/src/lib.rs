@@ -1,16 +1,16 @@
-//! zp-engine — host-agnostic transform facade (REFACTOR.md §3.1).
+//! Host-agnostic document transform facade (`zp-engine`).
 //!
 //! Single entry point for embedders that need ZeroProxy's document
-//! pipeline without the wasm-bindgen surface: script rewrite (full +
-//! patch mode), source-map composition, HTML transform (one-shot +
+//! pipeline without the wasm-bindgen surface: script rewrite (full and
+//! patch mode), source-map composition, HTML transform (one-shot and
 //! streaming [`zp_htmltx::HtmlTxn`]), CSS rewrite, CSP construction, and
 //! Cloudflare challenge detection.
 //!
 //! `zp-bundle` and `zp-page-bundle` `#[wasm_bindgen]` exports delegate
-//! here so the JS-facing and native paths share one implementation —
-//! including error strings, which callers surface verbatim.
+//! here so the JS-facing and native paths share one implementation,
+//! including error strings.
 //!
-//! No wasm-bindgen, no web-sys: this crate builds for any target.
+//! Builds for any target without `wasm-bindgen` or `web-sys`.
 
 pub use zp_css as css;
 pub use zp_htmltx as htmltx;
@@ -21,11 +21,12 @@ use std::fmt;
 
 use zp_rewriter::{RewriteOpts, RewriterInstance, ScriptKind};
 
-/// Per-document transform context: the virtual target identity plus the
-/// proxy origin that emitted links resolve against.
+/// Per-document transform context: the virtual target identity, the proxy
+/// origin that emitted links resolve against, and the control route prefix.
 pub struct DocCtx<'a> {
     pub target_url: &'a str,
     pub proxy_origin: &'a str,
+    pub control_prefix: &'a str,
 }
 
 impl<'a> DocCtx<'a> {
@@ -33,7 +34,13 @@ impl<'a> DocCtx<'a> {
         DocCtx {
             target_url,
             proxy_origin,
+            control_prefix: "/zp/",
         }
+    }
+
+    pub fn with_control_prefix(mut self, control_prefix: &'a str) -> Self {
+        self.control_prefix = control_prefix;
+        self
     }
 
     fn rewrite_opts(&self, kind: ScriptKind) -> RewriteOpts {
@@ -55,9 +62,8 @@ impl<'a> DocCtx<'a> {
     }
 }
 
-/// Facade error. `Display` deliberately delegates to the inner error's
-/// text so wasm shims (`JsError::new(&e.to_string())`) emit byte-identical
-/// messages to the pre-facade code.
+/// Facade error. `Display` delegates to the inner error text so WASM shims
+/// (`JsError::new(&e.to_string())`) emit identical messages.
 #[derive(Debug)]
 pub enum EngineError {
     UnknownScriptKind(String),
@@ -91,24 +97,15 @@ impl From<zp_htmltx::TransformError> for EngineError {
     }
 }
 
-/// `kind` string → [`ScriptKind`]. The accepted names are part of the JS
-/// ABI (`rewriteScript(src, kind, …)`), so the table lives here where
-/// both bundle shims can share it.
+/// Maps a `kind` string to [`ScriptKind`]. The accepted names form part of the
+/// JS ABI (`rewriteScript(src, kind, ...)`).
 pub fn parse_script_kind(kind: &str) -> Result<ScriptKind, EngineError> {
-    match kind {
-        "classic" => Ok(ScriptKind::Classic),
-        "classic-local" => Ok(ScriptKind::ClassicLocal),
-        "module" => Ok(ScriptKind::Module),
-        "event-handler" => Ok(ScriptKind::EventHandler),
-        "eval" => Ok(ScriptKind::Eval),
-        "function" => Ok(ScriptKind::Function),
-        "worker" => Ok(ScriptKind::Worker),
-        other => Err(EngineError::UnknownScriptKind(other.to_string())),
-    }
+    kind.parse::<ScriptKind>()
+        .map_err(EngineError::UnknownScriptKind)
 }
 
-/// JSON envelope for patch-mode rewrites. Hand-rolled to avoid a
-/// serde_json dependency drag — the schema is the frozen wire contract:
+/// JSON envelope for patch-mode rewrites. Serialized without `serde_json`
+/// following the wire contract:
 /// `{"len":<u32>,"patches":[{"start":<u32>,"end":<u32>,"replacement":"<str>"}]}`.
 pub fn patches_to_json(source_len: usize, patches: &[zp_rewriter::Patch]) -> String {
     let mut out = String::with_capacity(source_len / 4 + 64);
@@ -170,10 +167,24 @@ impl TransformEngine {
         }
     }
 
-    /// Transformer version — mirrors `zp_shared::TRANSFORMER_VERSION`;
-    /// the SW↔prelude version check keys off this string.
+    /// Transformer version (mirrors `zp_shared::TRANSFORMER_VERSION`), used
+    /// by the version check between the Service Worker and prelude.
     pub fn version(&self) -> &'static str {
         zp_shared::TRANSFORMER_VERSION
+    }
+
+    /// Strict-mode script rewrite using a typed [`ScriptKind`].
+    pub fn rewrite_script_kind(
+        &mut self,
+        source: &str,
+        kind: ScriptKind,
+        ctx: &DocCtx,
+    ) -> Result<String, EngineError> {
+        let opts = ctx.rewrite_opts(kind);
+        self.rewriter
+            .rewrite(source, &opts)
+            .map(|r| r.code)
+            .map_err(EngineError::from)
     }
 
     /// Strict-mode script rewrite. Returns the rewritten source.
@@ -184,14 +195,23 @@ impl TransformEngine {
         ctx: &DocCtx,
     ) -> Result<String, EngineError> {
         let kind = parse_script_kind(kind)?;
-        let opts = ctx.rewrite_opts(kind);
-        self.rewriter
-            .rewrite(source, &opts)
-            .map(|r| r.code)
-            .map_err(EngineError::from)
+        self.rewrite_script_kind(source, kind, ctx)
     }
 
-    /// Patch-mode emit — returns the flat patch JSON envelope
+    /// Patch-mode emit using a typed [`ScriptKind`], reusing the persistent OXC
+    /// arena on [`RewriterInstance`].
+    pub fn rewrite_script_patches_json_kind(
+        &mut self,
+        source: &str,
+        kind: ScriptKind,
+        ctx: &DocCtx,
+    ) -> Result<String, EngineError> {
+        let opts = ctx.rewrite_opts(kind);
+        let result = self.rewriter.rewrite_patches(source, &opts)?;
+        Ok(patches_to_json(source.len(), &result.patches))
+    }
+
+    /// Patch-mode emit: returns the flat patch JSON envelope
     /// (`patches_to_json`) without reconstructing the output source.
     pub fn rewrite_script_patches_json(
         &mut self,
@@ -200,9 +220,20 @@ impl TransformEngine {
         ctx: &DocCtx,
     ) -> Result<String, EngineError> {
         let kind = parse_script_kind(kind)?;
+        self.rewrite_script_patches_json_kind(source, kind, ctx)
+    }
+
+    /// Source Map v3 mapping rewritten positions back to the original using a
+    /// typed [`ScriptKind`].
+    pub fn compose_source_map_kind(
+        &mut self,
+        source: &str,
+        kind: ScriptKind,
+        ctx: &DocCtx,
+        source_url: &str,
+    ) -> Result<String, EngineError> {
         let opts = ctx.rewrite_opts(kind);
-        let result = zp_rewriter::rewrite_script_patches(source, &opts)?;
-        Ok(patches_to_json(source.len(), &result.patches))
+        Ok(zp_rewriter::compose_source_map(source, &opts, source_url)?)
     }
 
     /// Source Map v3 mapping rewritten positions back to the original.
@@ -214,8 +245,25 @@ impl TransformEngine {
         source_url: &str,
     ) -> Result<String, EngineError> {
         let kind = parse_script_kind(kind)?;
+        self.compose_source_map_kind(source, kind, ctx, source_url)
+    }
+
+    /// `compose_source_map_kind` + chain with the target site's original map.
+    pub fn compose_source_map_chained_kind(
+        &mut self,
+        source: &str,
+        kind: ScriptKind,
+        ctx: &DocCtx,
+        source_url: &str,
+        original_map_json: &str,
+    ) -> Result<String, EngineError> {
         let opts = ctx.rewrite_opts(kind);
-        Ok(zp_rewriter::compose_source_map(source, &opts, source_url)?)
+        Ok(zp_rewriter::compose_source_map_chained(
+            source,
+            &opts,
+            source_url,
+            original_map_json,
+        )?)
     }
 
     /// `compose_source_map` + chain with the target site's original map.
@@ -228,13 +276,7 @@ impl TransformEngine {
         original_map_json: &str,
     ) -> Result<String, EngineError> {
         let kind = parse_script_kind(kind)?;
-        let opts = ctx.rewrite_opts(kind);
-        Ok(zp_rewriter::compose_source_map_chained(
-            source,
-            &opts,
-            source_url,
-            original_map_json,
-        )?)
+        self.compose_source_map_chained_kind(source, kind, ctx, source_url, original_map_json)
     }
 
     /// One-shot HTML transform (strict mode + pending gate).
@@ -245,11 +287,21 @@ impl TransformEngine {
             .map_err(EngineError::from)
     }
 
-    /// Streaming HTML transform — the caller feeds decoded chunks into
+    /// Streaming HTML transform: the caller feeds decoded chunks into
     /// the returned transaction and pipes rewritten bytes out per write.
     pub fn html_txn(&self, ctx: &DocCtx, prelude_html: &str) -> zp_htmltx::HtmlTxn {
         let opts = ctx.transform_options();
         zp_htmltx::HtmlTxn::new(&opts, prelude_html.to_string())
+    }
+
+    /// CSS rewrite using `ctx.control_prefix` and `ctx.proxy_origin`.
+    pub fn rewrite_css_with_ctx(
+        &mut self,
+        source: &str,
+        base_url: &str,
+        ctx: &DocCtx,
+    ) -> Result<String, EngineError> {
+        self.rewrite_css(source, base_url, ctx.control_prefix, ctx)
     }
 
     /// CSS rewrite. `base_url` is the CSS file's absolute URL;
@@ -291,5 +343,44 @@ impl TransformEngine {
     /// Force-drop arena capacity after a one-off large rewrite.
     pub fn reset(&mut self) {
         self.rewriter.reset();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn typed_and_string_rewrites_share_arena_and_match() {
+        let mut engine = TransformEngine::new();
+        let ctx = DocCtx::new("https://example.com/app.js", "http://proxy.localhost:8080");
+        let src = "var f = eval; f('return globalThis');";
+        let by_str = engine.rewrite_script(src, "classic", &ctx).unwrap();
+        let by_kind = engine
+            .rewrite_script_kind(src, ScriptKind::Classic, &ctx)
+            .unwrap();
+        assert_eq!(by_str, by_kind);
+        assert!(by_kind.contains("__zp_get"));
+
+        let patches_str = engine
+            .rewrite_script_patches_json(src, "classic", &ctx)
+            .unwrap();
+        let patches_kind = engine
+            .rewrite_script_patches_json_kind(src, ScriptKind::Classic, &ctx)
+            .unwrap();
+        assert_eq!(patches_str, patches_kind);
+        assert!(patches_kind.contains("eval"));
+    }
+
+    #[test]
+    fn doc_ctx_with_control_prefix_routes_css() {
+        let mut engine = TransformEngine::new();
+        let ctx = DocCtx::new("https://example.com/", "http://proxy.localhost:8080")
+            .with_control_prefix("/custom-zp/");
+        let css = "body { background: url('/bg.png'); }";
+        let out = engine
+            .rewrite_css_with_ctx(css, "https://example.com/style.css", &ctx)
+            .unwrap();
+        assert!(out.contains("http://proxy.localhost:8080/custom-zp/api/fetch?url="));
     }
 }

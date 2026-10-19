@@ -6,11 +6,9 @@
 //!
 //! ## Why the transport needs this
 //!
-//! The very first request on a freshly-opened yamux session (the page's
-//! main document) intermittently stalls ~60s: the response bytes arrive but
-//! the cold-bootstrap wakeup is lost until an unrelated keepalive ping pumps
-//! the loop — OR an upstream anti-bot slow-lane holds the first stream.
-//! Either way a fresh retry on a new h2 connection clears it in <1s. The
+//! The first request on a newly opened yamux session can stall if the
+//! cold-bootstrap wakeup is lost or an upstream anti-bot slow-lane holds
+//! the first stream. A fresh retry on a new h2 connection clears it. The
 //! cold path in `fetch` races the request against [`with_timeout`] and
 //! retries on a fresh connection when the deadline fires.
 //!
@@ -63,7 +61,7 @@ impl Timeout {
             }
         }) as Box<dyn FnMut()>);
         // In a Service Worker `self` is a ServiceWorkerGlobalScope, which
-        // extends WorkerGlobalScope — the cast is always valid here.
+        // extends WorkerGlobalScope.
         let global: web_sys::WorkerGlobalScope = js_sys::global().unchecked_into();
         let handle = global
             .set_timeout_with_callback_and_timeout_and_arguments_0(
@@ -109,8 +107,8 @@ pub(crate) enum Raced<T> {
 
 /// Race `fut` against a `ms`-millisecond deadline. If `fut` resolves first
 /// we return `Raced::Done` with its output; otherwise `Raced::TimedOut` and
-/// `fut` is dropped — for our transport futures that means the h2 stream /
-/// TLS conn drops, sending RST and freeing the upstream stream.
+/// `fut` is dropped (dropping the h2 stream or TLS connection, sending RST,
+/// and freeing the upstream stream).
 pub(crate) async fn with_timeout<F>(fut: F, ms: f64) -> Raced<F::Output>
 where
     F: std::future::Future,

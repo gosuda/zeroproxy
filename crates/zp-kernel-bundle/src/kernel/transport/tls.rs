@@ -10,18 +10,15 @@
 //!
 //! ## Provider
 //!
-//! [`rustls_rustcrypto`] supplies the crypto provider — pure-Rust ciphers
+//! [`rustls_rustcrypto`] supplies the crypto provider: pure-Rust ciphers
 //! from the RustCrypto org. `ring` and `aws-lc-rs` are the conventional
-//! choices in native Rust but neither works on `wasm32-unknown-unknown`
+//! choices in native Rust, but neither works on `wasm32-unknown-unknown`
 //! (ring uses target-specific asm, aws-lc-rs requires the BoringSSL C lib).
-//! rustcrypto is slower but works.
 //!
 //! ## Root certificates
 //!
-//! [`webpki_roots::TLS_SERVER_ROOTS`] — Mozilla's CA bundle baked into
-//! the binary. Same trust store that ships with curl/most browsers'
-//! defaults; no platform/system root access needed (which is what we
-//! want — we're in WASM, no platform certs).
+//! [`webpki_roots::TLS_SERVER_ROOTS`] embeds Mozilla's CA bundle in the
+//! binary so WASM needs no platform certificate access.
 //!
 //! ## ALPN
 //!
@@ -29,30 +26,18 @@
 //! and exposes the negotiated value on the open connection. The HTTP layer
 //! reads it to decide between HTTP/2 (`h2`) and HTTP/1.1 (`http/1.1`).
 //!
-//! ## JA3 fingerprint shaping (phase 1: cipher reorder)
+//! ## JA3 fingerprint shaping
 //!
-//! NAVER's WAF (nid.naver.com login) imposes a ~60s "slow lane" on
-//! ClientHellos whose JA3 hash doesn't look browser-like. rustls's
-//! default ordering — pulled from `rustls_rustcrypto::ALL_CIPHER_SUITES` —
-//! puts TLS 1.2 ECDHE suites *before* TLS 1.3, which is the inverse of
-//! every real browser. Chrome 134 emits TLS 1.3 first
-//! (`0x1301, 0x1302, 0x1303`), then TLS 1.2 ECDHE in `AES128, AES256,
-//! CHACHA` order, ECDHE_ECDSA then ECDHE_RSA.
+//! Upstream WAFs penalize ClientHellos whose JA3 hash does not match a
+//! browser. `rustls_rustcrypto::ALL_CIPHER_SUITES` puts TLS 1.2 ECDHE
+//! suites before TLS 1.3, whereas Chrome emits TLS 1.3 first
+//! (`0x1301, 0x1302, 0x1303`), followed by TLS 1.2 ECDHE interleaved by
+//! AES key size.
 //!
-//! Phase 1 (this module): override `cipher_suites` on the
-//! `CryptoProvider` to Chrome's order. No rustls fork — fully public API.
-//! Flips the JA3 hash; whether the new hash also bypasses NAVER's
-//! blocklist is what we're verifying.
-//!
-//! Phase 2 (pending — rustls fork): GREASE injection (RFC 8701) and the
-//! extensions Chrome sends that rustls doesn't (`record_size_limit`,
-//! `renegotiation_info`, ALPS, padding ordering). Required for an exact
-//! Chrome JA3 match if phase 1 isn't enough.
-//!
-//! ## What this module still doesn't do
-//!
-//! * **No session resumption / 0-RTT.** Future optimisation.
-//! * **No client certificates.** None of our target sites need them.
+//! This module overrides `cipher_suites` on the `CryptoProvider` to
+//! Chrome's order and prepends `X25519MLKEM768` to `kx_groups`, while the
+//! rustls fork shapes GREASE, extension ordering, and decoy cipher suites
+//! from `ja3::CapturedSpec` when installed.
 
 use std::cell::RefCell;
 use std::io;
@@ -71,61 +56,42 @@ use rustls_pki_types::ServerName;
 
 thread_local! {
     /// Cached `ClientConfig`s keyed by ALPN list. Rebuilding the config
-    /// on every fetch dominates `tls:` timing — `webpki_roots::TLS_SERVER_ROOTS`
-    /// is 145 certificates that must be inserted into a fresh
-    /// `RootCertStore` and indexed for trust-anchor lookup, plus the
-    /// `rustls_rustcrypto::provider()` does its own per-call setup. That
-    /// work is 20-80ms inside WASM on a modest machine. Caching moves it
-    /// to a one-time cost per ALPN combination per browsing session.
-    ///
-    /// Today only `["http/1.1"]` is ever requested; once h2 lands a
-    /// second entry for `["h2","http/1.1"]` joins it. A `Vec<Vec<u8>>`
-    /// key fits both cases without a separate cache shape.
+    /// on every fetch is expensive: `webpki_roots::TLS_SERVER_ROOTS`
+    /// inserts and indexes 145 certificates into a `RootCertStore`, and
+    /// `rustls_rustcrypto::provider()` runs per-call setup. Caching makes
+    /// this a one-time cost per ALPN combination (`["http/1.1"]` or
+    /// `["h2", "http/1.1"]`).
     static CONFIG_CACHE: RefCell<Vec<(Vec<Vec<u8>>, Arc<ClientConfig>)>> = const {
         RefCell::new(Vec::new())
     };
 }
 
-/// Build (or reuse) a `ClientConfig` for the requested ALPN protocol list.
-/// First call per ALPN: certificate-store + crypto-provider initialisation.
-/// Cached calls: an `Arc::clone`. The `Arc<ClientConfig>` shares the heavy
-/// internal state (root store, crypto provider) so a TLS handshake
-/// allocates only the per-connection `ClientConnection` itself.
 /// Build a Chrome-ordered cipher suite list from `rustls_rustcrypto`'s
-/// public constants. Order matches Chrome 148 stable's TLS ClientHello:
+/// public constants. Order matches Chrome's TLS ClientHello:
 /// TLS 1.3 first (`AES128, AES256, CHACHA20`), then TLS 1.2 ECDHE
-/// suites INTERLEAVED by AES key size — Chrome puts each ECDHE_ECDSA
-/// next to its ECDHE_RSA twin (AES128 ECDSA → AES128 RSA → AES256 ECDSA
-/// → AES256 RSA → CHACHA ECDSA → CHACHA RSA), not grouped-by-cert-type
-/// like rustls's stock layout.
+/// suites interleaved by AES key size (each `ECDHE_ECDSA` suite followed
+/// by its `ECDHE_RSA` counterpart).
 ///
-/// JA3's "Cipher" component hashes this list verbatim, so changing the
-/// order changes the hash. rustls's stock ordering is TLS 1.2 first,
-/// which is the giveaway — no browser does that today.
-///
-/// Phase 5.8: this list is only the rustls-NEGOTIABLE subset (9 entries
-/// = ciphers `rustls_rustcrypto` actually implements). The wire-emitted
-/// ClientHello cipher list is overridden in the rustls fork's
-/// `client::hs::apply_chrome_ja3_shape` from `ja3::CapturedSpec` when
-/// installed, adding the 6 legacy RSA fallback ciphers (49171, 49172,
-/// 156, 157, 47, 53) as decoys so the on-wire tuple matches Chrome 148
-/// exactly. Decoys never get negotiated because a modern server picks
-/// TLS 1.3 or ECDHE_GCM/CHACHA20 — which are in this list.
+/// This list contains the 9 negotiable suites implemented by
+/// `rustls_rustcrypto`. When `ja3::CapturedSpec` is installed, the rustls
+/// fork's `client::hs::apply_chrome_ja3_shape` overrides the wire-emitted
+/// ClientHello cipher list to include legacy RSA fallback cipher IDs
+/// (49171, 49172, 156, 157, 47, 53) as non-negotiated decoys.
 fn chrome_ordered_cipher_suites() -> Vec<rustls::SupportedCipherSuite> {
     use rustls_rustcrypto as rc;
     vec![
-        // TLS 1.3 (Chrome: AES128 → AES256 → CHACHA20)
+        // TLS 1.3 (Chrome order: AES128, AES256, CHACHA20)
         rc::TLS13_AES_128_GCM_SHA256,
         rc::TLS13_AES_256_GCM_SHA384,
         rc::TLS13_CHACHA20_POLY1305_SHA256,
-        // TLS 1.2 ECDHE interleaved by AES size (Chrome 148 order):
-        // AES128 ECDSA → AES128 RSA
+        // TLS 1.2 ECDHE interleaved by AES size:
+        // AES128 ECDSA, AES128 RSA
         rc::TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
         rc::TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
-        // AES256 ECDSA → AES256 RSA
+        // AES256 ECDSA, AES256 RSA
         rc::TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
         rc::TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
-        // CHACHA20 ECDSA → CHACHA20 RSA
+        // CHACHA20 ECDSA, CHACHA20 RSA
         rc::TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
         rc::TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
     ]
@@ -139,26 +105,12 @@ fn build_client_config(alpn: &[&[u8]]) -> io::Result<Arc<ClientConfig>> {
         }
         let mut roots = RootCertStore::empty();
         roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-        // Phase-1 JA3 shaping: replace rustls-rustcrypto's stock
-        // `cipher_suites` (TLS 1.2 first) with Chrome's ordering (TLS 1.3
-        // first). Everything else on the provider — KX groups, signing,
-        // KeyProvider — stays as rustls-rustcrypto built it.
         let mut provider = rustls_rustcrypto::provider();
         provider.cipher_suites = chrome_ordered_cipher_suites();
-        // Phase 5.9 (re-armed): prepend our X25519MLKEM768 hybrid
-        // (group 0x11ec = 4588) so a captured Chrome 148 ClientHello
-        // with `supportedCurves: [4588, 29, 23, 24]` can emit the
-        // matching key_share. Chrome 148 advertises both the hybrid
-        // and the classical X25519 sibling — our `Active::hybrid_component`
-        // returns the X25519 tail of the 1216-byte share so rustls
-        // emits the "free" extra entry too (see hs.rs:287-296). On
-        // wasm32 the hybrid uses ml-kem 0.3.2 (FIPS 203 standard
-        // (t_hat || rho) encoding) + x25519-dalek; this is the parked
-        // 2026-06-02 attempt with `hybrid_component` and
-        // `complete_hybrid_component` added so the wire share matches
-        // Chrome 148 rather than emitting only the 1216-byte hybrid
-        // alone (which produced an `IllegalParameter` reject on
-        // tls.peet.ws in the first attempt).
+        // Prepend X25519MLKEM768 hybrid (group 0x11ec = 4588) so a captured
+        // Chrome ClientHello with `supportedCurves: [4588, 29, 23, 24]`
+        // emits both the 1216-byte hybrid share and the classical X25519
+        // sibling via `ActiveKeyExchange::hybrid_component`.
         let mut kx_groups = provider.kx_groups.clone();
         kx_groups.insert(0, &super::mlkem_hybrid::X25519MLKEM768);
         provider.kx_groups = kx_groups;
@@ -201,8 +153,7 @@ where
     /// resolves, plaintext reads/writes succeed.
     pub async fn connect(inner: S, server_name: &str, alpn: &[&[u8]]) -> io::Result<Self> {
         let config = build_client_config(alpn)?;
-        // ServerName::try_from rejects IP literals — fine; we only ever
-        // pass hostnames here.
+        // ServerName::try_from rejects IP literals; callers only pass hostnames.
         let name = ServerName::try_from(server_name.to_string())
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, format!("tls: SNI: {e}")))?;
         let conn = ClientConnection::new(config, name)
@@ -226,10 +177,10 @@ where
     }
 
     /// Drive the handshake until `!conn.is_handshaking()`. Alternates
-    /// write-drain ↔ read-fill until rustls reports the handshake done.
+    /// write-drain and read-fill until rustls reports the handshake done.
     async fn handshake(&mut self) -> io::Result<()> {
         while self.conn.is_handshaking() {
-            // Phase 1: drain any pending outbound TLS bytes.
+            // Drain any pending outbound TLS bytes.
             self.drain_pending_out().await?;
             while self.conn.wants_write() {
                 let mut chunk = Vec::with_capacity(4096);
@@ -240,7 +191,7 @@ where
             }
             self.inner.flush().await?;
 
-            // Phase 2: if we still need more from the peer, read it.
+            // If we still need more from the peer, read it.
             if self.conn.is_handshaking() && self.conn.wants_read() {
                 self.read_more_into_conn().await?;
                 self.conn.process_new_packets().map_err(|e| {
@@ -287,14 +238,12 @@ where
     }
 }
 
-// ---------- AsyncRead / AsyncWrite ----------------------------------------
-//
 // After handshake completes, reads pull plaintext via `conn.reader()` and
 // writes push plaintext via `conn.writer()`. The state-machine pump runs
 // inside the poll fns: on poll_read we may need to refill the encrypted
 // inbound buffer; on poll_write we always need to flush encrypted outbound.
 //
-// We park on the *inner* stream's wakers — when the underlying byte stream
+// We park on the *inner* stream's wakers: when the underlying byte stream
 // has new bytes for us, the runtime wakes us and we re-poll the state
 // machine. No separate waker bookkeeping needed.
 
@@ -313,26 +262,18 @@ where
                 Ok(0) if self.eof_observed => return Poll::Ready(Ok(0)),
                 Ok(n) if n > 0 => return Poll::Ready(Ok(n)),
                 Ok(_) | Err(_) => {
-                    // Read errors here are typically "no data ready" —
-                    // rustls returns std::io::Error::ErrorKind::WouldBlock
-                    // in that case. Fall through to refill.
+                    // Read errors here are typically `WouldBlock` when no
+                    // plaintext is ready; fall through to refill.
                 }
             }
 
-            // No plaintext yet. BEFORE touching the socket, feed rustls any
-            // ciphertext we are already holding.
+            // No plaintext yet. Before polling the socket, feed rustls any
+            // ciphertext already buffered in `pending_in`.
             //
-            // `read_tls` takes at most one TLS message per call, so a single
-            // 8 KiB socket read routinely leaves whole records behind in
-            // `pending_in`. Polling the socket first meant that on a `Pending`
-            // (nothing new on the wire — the peer had already sent everything)
-            // we parked with those records still un-decrypted, and they only
-            // moved when the NEXT inbound bytes happened to arrive. Against
-            // NAVER that was the upstream's 60 s keepalive PING: the response
-            // was complete on the wire within ~200 ms, yet the document froze
-            // mid-parse for exactly 60 s at zero CPU. Drain first, and only
-            // fall through to the socket when rustls genuinely cannot take
-            // more (`consumed == 0`), which keeps this loop finite.
+            // `read_tls` consumes at most one TLS message per call, so a single
+            // 8 KiB socket read can leave whole records in `pending_in`.
+            // Draining `pending_in` first ensures buffered records are
+            // decrypted before parking on the socket (`consumed == 0`).
             if !self.pending_in.is_empty() {
                 let raw = std::mem::take(&mut self.pending_in);
                 let mut slice: &[u8] = &raw;
@@ -398,13 +339,12 @@ where
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        // Step 1: push plaintext into rustls.
+        // Push plaintext into rustls.
         let written = match self.conn.writer().write(buf) {
             Ok(n) => n,
             Err(e) => return Poll::Ready(Err(e)),
         };
-        // Step 2: drain whatever encrypted bytes rustls produced into our
-        // outbound buffer and try to flush them.
+        // Drain encrypted bytes produced by rustls into `pending_out`.
         while self.conn.wants_write() {
             let mut chunk = Vec::with_capacity(4096);
             if let Err(e) = self.conn.write_tls(&mut chunk) {
@@ -415,7 +355,7 @@ where
             }
             self.pending_out.extend_from_slice(&chunk);
         }
-        // Step 3: write as many of pending_out's bytes as the inner stream
+        // Write as many of `pending_out`'s bytes as the inner stream
         // will take right now without blocking.
         let pending = std::mem::take(&mut self.pending_out);
         let mut offset = 0;
@@ -486,12 +426,3 @@ where
         }
     }
 }
-
-// Host-side TLS handshake tests remain deferred — rustls is wired
-// against `rustls-rustcrypto` and the WASM-only `getrandom/wasm_js`
-// entropy backend, so a `cargo test -p zp-bundle` driver would need to
-// pull a parallel host CryptoProvider just for the test, doubling the
-// dep surface. Better to verify the handshake end-to-end through the
-// SW against a real upstream and let the rustls test suite cover the
-// codec itself. wasm-bindgen-test against a public TLS host inside
-// Node is the other option once we settle the test infra question.

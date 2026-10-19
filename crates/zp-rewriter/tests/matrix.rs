@@ -1,11 +1,10 @@
-//! ERRATA §O1 — rewriter emission matrix.
+//! Rewriter emission matrix.
 //!
-//! `scratch.rs` prints emitted code for manual inspection; this file pins the
-//! **invariants** so a regression fails loudly. Each case asserts on the
-//! mediation helper that must appear (or must NOT appear for the negative
-//! controls), and — where the emitted goal is still classic-parseable — that
-//! the output itself re-parses (a second `rewrite_script` call is the cheapest
-//! parser we have; it must not error).
+//! `scratch.rs` prints emitted code for manual inspection; this file tests
+//! the invariants so a regression fails immediately. Each case asserts on the
+//! mediation helper that must appear (or must not appear for the negative
+//! controls), and, where the emitted goal is still classic-parseable, that
+//! the output itself re-parses.
 
 use zp_rewriter::{rewrite_script, with_helper_prefix, RewriteOpts, ScriptKind};
 
@@ -41,7 +40,7 @@ fn not_emits(src: &str, needles: &[&str]) {
 }
 
 /// The emitted code must itself parse (round-trip through the rewriter).
-/// Cases that emit module-goal syntax (import/export) are exempt — the
+/// Cases that emit module-goal syntax (import/export) are exempt because the
 /// parser is goal-sensitive and the test opts are Classic.
 fn reparses(src: &str) {
     let code = out(src);
@@ -49,10 +48,8 @@ fn reparses(src: &str) {
         .unwrap_or_else(|e| panic!("emitted code does not re-parse for {src:?}: {e:?}\nOUT: {code}"));
 }
 
-// ---------------------------------------------------------------------------
 // Assignment-target matrix: every writable position must route through the
 // `__zp_get.d` write facade so the sink sees a real reference, not a copy.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn assignment_targets_route_through_write_facade() {
@@ -69,8 +66,8 @@ fn assignment_targets_route_through_write_facade() {
     }
 }
 
-/// Declaration-position dangerous names get a temp binding + a `__zp_set`
-/// sync — never a raw `var location` that would shadow the virtual location.
+/// Declaration-position dangerous names get a temp binding and a `__zp_set`
+/// sync rather than a raw `var location` that would shadow the virtual location.
 #[test]
 fn declaration_targets_sync_via_temp() {
     for src in [
@@ -86,9 +83,7 @@ fn declaration_targets_sync_via_temp() {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Computed-member matrix: `x[k]` and `x["literal"]` must both mediate.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn computed_member_reads() {
@@ -119,7 +114,7 @@ fn computed_member_writes_and_calls() {
     emits("x[k](1,2);", &["__zp_call((x),(k),[1,2])"]);
     emits("x['location']();", &["__zp_call((x),('location'),[])"]);
     // A `?.` guards everything to its right: key and args run only on a
-    // non-nullish base, inside the continuation (2026-09-29).
+    // non-nullish base, inside the continuation.
     emits("x?.[k](a);", &["__zp_ochain((x),__zp_oc=>__zp_ocall((__zp_oc),(k),[a],2))"]);
     emits(
         "x?.[k]?.();",
@@ -136,8 +131,8 @@ fn computed_member_writes_and_calls() {
     }
 }
 
-/// `obj.location.assign/replace/reload` style calls must keep `this` bound —
-/// mediated call, never an unbound function rip.
+/// `obj.location.assign/replace/reload` calls must keep `this` bound via a
+/// mediated call.
 #[test]
 fn dangerous_method_calls_stay_bound() {
     emits(
@@ -152,19 +147,15 @@ fn dangerous_method_calls_stay_bound() {
     reparses("history.pushState({},'','/p');");
 }
 
-// ---------------------------------------------------------------------------
-// Operator matrix.
-// ---------------------------------------------------------------------------
-
 #[test]
 fn optional_chain_flags_distinguish_base_and_call_nullish() {
-    // `x?.location?.()` — both `?.` short-circuit; the method keeps its
+    // `x?.location?.()`: both `?.` short-circuit; the method keeps its
     // receiver through `__zp_ocallv` and runs as a native optional call.
     emits(
         "x?.location?.();",
         &["__zp_ochain((x),__zp_oc=>__zp_ochain((__zp_ocallv((__zp_oc),\"location\")),__zp_oc=>__zp_oc?.()))"],
     );
-    // `x?.m()` — safe name, native optional preserved (negative control).
+    // `x?.m()`: safe name, native optional preserved (negative control).
     emits("x?.m();", &["x?.m()"]);
     // A lone literal-key link needs no continuation.
     emits("x?.location;", &["__zp_oget((x),\"location\")"]);
@@ -175,7 +166,7 @@ fn optional_chain_flags_distinguish_base_and_call_nullish() {
         "x?.location.href;",
         &["__zp_ochain((x),__zp_oc=>__zp_get(__zp_oget((__zp_oc),\"location\"),\"href\"))"],
     );
-    // Rewrites inside a key/arg stay inside a native chain — no continuation.
+    // Rewrites inside a key/arg stay inside a native chain without a continuation.
     not_emits("cb?.(a[k]);", &["__zp_ochain("]);
     // Special forms carry their own mediation and are never unwrapped into a
     // bare `__zp_ocallv(Reflect,"get")`.
@@ -191,14 +182,14 @@ fn optional_chain_flags_distinguish_base_and_call_nullish() {
 
 #[test]
 fn update_and_logical_assign_mediate() {
-    // Logical identifier assign: inline get ?? set — RHS stays in the
-    // enclosing scope (await/yield survive).
+    // Logical identifier assign: inline `get ?? set` keeps RHS in the
+    // enclosing scope so `await`/`yield` survive.
     emits(
         "location ??= u;",
         &["(__zp_get(globalThis,\"location\")??__zp_set(globalThis,\"location\",(u)))"],
     );
-    // Member assigns go through the accessor-adapter Reference — the engine
-    // owns get→RHS→set order and logical short-circuiting.
+    // Member assigns go through the accessor-adapter Reference so the engine
+    // owns get/RHS/set evaluation order and logical short-circuiting.
     emits(
         "obj.location ??= u;",
         &["get v(){return __zp_get(this.b,\"location\")}", "set v(v){__zp_set(this.b,\"location\",v)", ".v??=(u)"],
@@ -240,9 +231,7 @@ fn reads_mediate_in_expression_positions() {
     emits("location = u, x = 1;", &["__zp_set(globalThis,\"location\",(u)), x = 1"]);
 }
 
-// ---------------------------------------------------------------------------
-// `with` matrix — section D. Innermost with-object must be consulted first.
-// ---------------------------------------------------------------------------
+// `with` matrix: innermost with-object must be consulted first.
 
 #[test]
 fn with_body_dangerous_names_chain_innermost_first() {
@@ -274,17 +263,13 @@ fn with_body_dangerous_names_chain_innermost_first() {
     reparses("with(o){ ({location} = y); }");
 }
 
-// ---------------------------------------------------------------------------
-// Reflect / Object routing matrix.
-// ---------------------------------------------------------------------------
-
 #[test]
 fn reflect_object_routing() {
     emits("Reflect.get(doc, k);", &["__zp_rget((doc),(k))"]);
     emits("Reflect.get(doc, 'location');", &["__zp_rget((doc),('location'))"]);
     emits("Reflect.set(doc, 'location', v);", &["__zp_rset((doc),('location'),(v))"]);
     emits("Reflect.get(doc, 'location', r);", &["__zp_rget((doc),('location'),(r))"]);
-    // Safe literal — pass through, no mediation tax.
+    // Safe literal passes through without mediation.
     emits("Reflect.get(obj, 'foo');", &["Reflect.get(obj, 'foo')"]);
     emits("Reflect.set(doc, k, v);", &["__zp_rset((doc),(k),(v))"]);
     emits("Reflect.set(doc, k, v, r);", &["__zp_rset((doc),(k),(v),(r))"]);
@@ -297,13 +282,9 @@ fn reflect_object_routing() {
     reparses("Reflect.set(doc, k, v, r);");
 }
 
-// ---------------------------------------------------------------------------
-// eval / dynamic-code matrix.
-// ---------------------------------------------------------------------------
-
 #[test]
 fn eval_literal_nested_rewrite() {
-    // R2: every unshadowed direct `eval(...)` — literal or not — is routed
+    // Every unshadowed direct `eval(...)` (literal or not) is routed
     // through `__zp_eval.call(this, [args][0], desc, strict)`, which turns
     // it back into a real direct eval with caller-scope descriptors.
     emits(
@@ -325,7 +306,7 @@ fn eval_literal_nested_rewrite() {
     emits("(0,eval)('location');", &["(0,__zp_get(globalThis,\"eval\"))('location')"]);
     emits("eval?.('location');", &["__zp_get(globalThis,\"eval\")?.('location')"]);
     emits("e=eval; e('location');", &["e=__zp_get(globalThis,\"eval\");"]);
-    // `var eval = f` still emits the DEVAL wrapper — the runtime reads the
+    // `var eval = f` still emits the DEVAL wrapper; the runtime reads the
     // rebound callee via __zp_get and applies it as an ordinary call.
     emits("var eval=function(){}; eval('x');", &["__zp_eval.call(this,__zp_get(globalThis,\"eval\"),['x']"]);
     emits("new Function('return this')();", &["new (__zp_get(globalThis,\"Function\"))('return this')()"]);
@@ -348,8 +329,8 @@ fn eval_caller_scope_descriptor() {
             "arguments",
         ],
     );
-    // Function-local `var eval` shadows the intrinsic — call stays a plain
-    // local call, no DEVAL wrapper.
+    // Function-local `var eval` shadows the intrinsic so the call stays a
+    // plain local call without a DEVAL wrapper.
     not_emits("function g(){ var eval=function(){}; eval('x'); }", &["__zp_eval"]);
     // Strict call-site (module) marks the strict bit.
     let module_out = rewrite_script(
@@ -372,13 +353,13 @@ fn eval_caller_scope_descriptor() {
 
 #[test]
 fn eval_var_decl_hoists_to_caller_varenv() {
-    // R3: sloppy 리터럴 eval 의 var 선언은 호출자 varEnv 에 삽입되고,
-    // desc 접근자가 그 바인딩을 노출한다 — eval'd `__zp_set` 이 도달.
+    // Sloppy literal eval `var` declarations are hoisted into the caller's
+    // varEnv and exposed via `desc` accessors so eval'd `__zp_set` reaches them.
     emits(
         "function f(){ eval('var z=1'); return z; }",
         &["var z;", "get z(){return z},set z(v){z=v}"],
     );
-    // strict 호출자(모듈)는 호이스트 없음 — strict eval 은 var 를 새지 않는다.
+    // Strict callers (modules) do not hoist `var` from `eval`.
     let module_out = rewrite_script(
         "function f(){ eval('var z=1'); return z; }",
         &RewriteOpts {
@@ -395,13 +376,13 @@ fn eval_var_decl_hoists_to_caller_varenv() {
         module_out.code
     );
     reparses("function f(){ eval('var z=1'); return z; }");
-    // 함수 선언도 동일하게 호이스트된다.
+    // Function declarations hoist identically.
     emits(
         "function f(){ eval('function z(){}'); return z; }",
         &["var z;", "get z(){return z},set z(v){z=v}"],
     );
-    // directive prologue 앞에 삽입되면 'use strict' 가 무효화된다 — 삽입은
-    // directive 뒤에 와야 한다. strict eval 이므로 호이스트는 없어야 한다.
+    // Inserting before a directive prologue would invalidate `'use strict'`,
+    // and strict eval does not hoist.
     let strict_fn = rewrite_script(
         "function f(){ 'use strict'; eval('var z=1'); return z; }",
         &RewriteOpts {
@@ -417,7 +398,7 @@ fn eval_var_decl_hoists_to_caller_varenv() {
         "inner strict eval must not hoist: {}",
         strict_fn.code
     );
-    // 이미 선언된 이름은 중복 삽입하지 않는다.
+    // Names already declared in the caller are not re-inserted.
     let out = rewrite_script(
         "function f(){ var z=0; eval('var z=1'); return z; }",
         &RewriteOpts {
@@ -428,9 +409,8 @@ fn eval_var_decl_hoists_to_caller_varenv() {
         },
     )
     .expect("rewrite");
-    // 'var z=1' 리터럴이 문자열로 남아 있으므로 삽입 패치('var z;') 유무로 판별.
     assert_eq!(out.code.matches("var z;").count(), 0, "dup var: {}", out.code);
-    // 중첩 함수 — eval 의 var 는 가장 가까운 함수 varEnv 에만 간다.
+    // Nested functions: eval `var` hoists only into the nearest enclosing function varEnv.
     let nested = rewrite_script(
         "function outer(){ function inner(){ eval('var w=1'); } }",
         &RewriteOpts {
@@ -444,7 +424,7 @@ fn eval_var_decl_hoists_to_caller_varenv() {
     let inner_pos = nested.code.find("function inner").unwrap();
     let w_pos = nested.code.find("var w;").unwrap();
     assert!(w_pos > inner_pos, "hoist landed outside inner fn: {}", nested.code);
-    // sloppy 함수의 directive 는 유지되며 삽입은 그 뒤에 온다.
+    // Sloppy function directives remain first, with hoisted `var` inserted after them.
     let dir = rewrite_script(
         "function f(){ 'use asm'; eval('var z=1'); return z; }",
         &RewriteOpts {
@@ -460,14 +440,12 @@ fn eval_var_decl_hoists_to_caller_varenv() {
         "insert must land after directives: {}",
         dir.code
     );
-    // 최상위 프로그램(함수 없음)의 eval 은 삽입 대상 없음 — 파손 없이 통과.
+    // Top-level eval (no enclosing function) needs no hoisted `var` insertion.
     reparses("eval('var z=1')");
 }
 
-// ---------------------------------------------------------------------------
-// R1: classic top-level let/const/class → __zp_lex 레지스트리 등록 +
-// per-decl accessor 바인딩. 스크립트 간 공유 전역 렉시컬 환경 에뮬레이션.
-// ---------------------------------------------------------------------------
+// Classic top-level `let`/`const`/`class` register in `__zp_lex` with per-decl
+// accessor bindings to emulate the shared global lexical environment across scripts.
 
 #[test]
 fn lex_registry_for_classic_toplevel() {
@@ -485,16 +463,15 @@ fn lex_registry_for_classic_toplevel() {
         ],
     );
     reparses("let x=1; const c=2; class K{} var v=3; function fn(){}");
-    // ASI: 세미콜론 없는 선언의 span 은 초기화식 끝에서 끝난다 — bind 를 그
-    // 자리에 그대로 붙이면 `{ href: 1 }__zp_lex_bind(` 가 되어 스크립트 전체가
-    // SyntaxError 로 죽는다(2026-09-29 CI rewriter.test.js 가 잡음). 세미콜론
-    // 없는 스타일은 실사이트에 흔하다.
+    // ASI: declarations without a trailing semicolon end at the initializer
+    // span, so a leading `;` before `__zp_lex_bind` is required to avoid
+    // concatenating `{ href: 1 }__zp_lex_bind(`.
     emits("const receiver = { href: 1 }\nreceiver.href += 2", &["__zp_lex_bind(\"receiver\""]);
     reparses("const receiver = { href: 1 }\nreceiver.href += 2");
     reparses("let a\nlet b = 2\nclass C {}\nC");
     reparses("const q = 1 // tail comment\nq");
     reparses("const last = [1]");
-    // 선언 없는 스크립트는 접두 없음.
+    // Scripts without declarations emit no prefix.
     emits("foo();", &[]);
     let clean = rewrite_script("foo();", &RewriteOpts {
         kind: ScriptKind::Classic,
@@ -504,7 +481,7 @@ fn lex_registry_for_classic_toplevel() {
     })
     .expect("rewrite");
     assert!(!clean.code.contains("__zp_lex"), "no decls: {}", clean.code);
-    // module 은 모듈 자체 환경이라 레지스트리 대상이 아니다.
+    // Modules have their own lexical environment and do not use `__zp_lex`.
     let m = rewrite_script("let x=1;", &RewriteOpts {
         kind: ScriptKind::Module,
         target_url: "https://example.com/".into(),
@@ -513,7 +490,7 @@ fn lex_registry_for_classic_toplevel() {
     })
     .expect("module rewrite");
     assert!(!m.code.contains("__zp_lex"), "module must not emit: {}", m.code);
-    // directive 는 decl 접두보다 앞에 남아 'use strict' 가 유지된다.
+    // Directives remain before `__zp_lex_decl` so `'use strict'` is preserved.
     let s = rewrite_script("'use strict'; let y=1;", &RewriteOpts {
         kind: ScriptKind::Classic,
         target_url: "https://example.com/".into(),
@@ -526,8 +503,7 @@ fn lex_registry_for_classic_toplevel() {
         "directive must precede decl: {}",
         s.code
     );
-    // 함수 내부의 let 은 대상 아님 — top-level 만 (함수명 자체는 var-like
-    // 라 checkvar 배열에만 들어간다).
+    // Function-local `let` is not registered (only top-level declarations).
     let f = rewrite_script("function g(){ let inner=1; }", &RewriteOpts {
         kind: ScriptKind::Classic,
         target_url: "https://example.com/".into(),
@@ -537,7 +513,7 @@ fn lex_registry_for_classic_toplevel() {
     .expect("fn rewrite");
     assert!(f.code.contains("__zp_lex_decl({},"), "empty lexmap: {}", f.code);
     assert!(!f.code.contains("\"inner\""), "fn-local let must not register: {}", f.code);
-    // 블록/초기화식 안의 let 도 제외.
+    // Block-scoped and `for`-initializer `let` bindings are also excluded.
     let b = rewrite_script("{ let blk=1; } for(let i=0;;i++){}", &RewriteOpts {
         kind: ScriptKind::Classic,
         target_url: "https://example.com/".into(),
@@ -549,11 +525,9 @@ fn lex_registry_for_classic_toplevel() {
     assert!(!b.code.contains("__zp_lex_bind"), "for-let bind: {}", b.code);
 }
 
-// ---------------------------------------------------------------------------
 // Loop-cap matrix: constant-true loops get a counter; position must stay
 // syntactically legal (bare bodies get braced, labels get renamed when the
 // loop is wrapped in a block).
-// ---------------------------------------------------------------------------
 
 /// Every shape of `for` header, in every statement position, still parses once the cap is in: the cap is a patch at the
 /// statement's start plus a patch inside the header, and the two used to collide.
@@ -595,8 +569,7 @@ fn loop_cap_constant_true() {
     emits("for(i=0;;i++){}", &["let __zp_lc_1=0;for(i=0;__zp_lc_1++<10000000||"]);
     emits("for(i=0;true;i++){}", &["__zp_lc_1++<10000000"]);
     emits("for(const x=0;;x++){}", &["__zp_lc_1++<10000000"]);
-    // No init, an update: the marker's range must not swallow the `let counter` prefix (NYT's hls.js: `for(;;e++)` came out as
-    // `let c=0;let c=0;c++<…for(;;e++)` and the module did not parse).
+    // No init, with an update: the marker's range must not swallow the `let counter` prefix.
     emits("for(;;i++){}", &["let __zp_lc_1=0;for(;__zp_lc_1++<10000000||"]);
     not_emits("for(;;i++){}", &["let __zp_lc_1=0;let __zp_lc_1"]);
     emits("for ( ; ; i++, j++ ) { f(i) }", &["let __zp_lc_1=0;for ( ;__zp_lc_1++<10000000||"]);
@@ -607,10 +580,9 @@ fn loop_cap_constant_true() {
     }
     emits("while(true){}", &["for(let __zp_lc_1=0;__zp_lc_1++<10000000||"]);
     emits("do{}while(true);", &["do{}while(__zp_lc_1++<10000000||"]);
-    // Cap-trip is observable — warn once, then exit.
+    // Cap-trip warns once, then exits.
     emits("while(true){}", &["console.warn('", "infinite-loop cap"]);
-    // R7: `await`/`yield` bodies can suspend — infinite async polls are a
-    // legitimate pattern, not a wedge vector. Uncapped (native parity).
+    // `await`/`yield` bodies can suspend, so infinite async poll loops stay uncapped.
     not_emits(
         "async function f(){ while(true){ await x(); } }",
         &["__zp_lc_"],
@@ -627,17 +599,17 @@ fn loop_cap_constant_true() {
         "function* g(){ while(true){ yield 1; } }",
         &["__zp_lc_"],
     );
-    // Nested-function await is a different async context — still capped.
+    // Nested-function await is a different async context and remains capped.
     emits(
         "async function f(){ while(true){ const g = async()=>{ await x(); }; g(); } }",
         &["__zp_lc_1++<10000000"],
     );
-    // `for await` suspends at THIS async level — the outer loop yields.
+    // `for await` suspends at this async level so the outer loop yields.
     not_emits(
         "async function f(){ while(true){ for await (const x of y){} } }",
         &["__zp_lc_"],
     );
-    // Negative: real condition — no cap.
+    // Negative: real condition has no cap.
     emits("for(i=0;i<n;i++){}", &["for(i=0;i<n;i++){}"]);
     not_emits("for(i=0;i<n;i++){}", &["__zp_lc_"]);
     for src in [
@@ -677,7 +649,7 @@ fn loop_cap_bare_and_labeled_positions() {
         "a: b: for(i=0;;i++){ continue a; break b; }",
         &["a: b: {let __zp_lc_1=0;__zp_lbl_1:for(", "continue __zp_lbl_1; break __zp_lbl_1;"],
     );
-    // No block-wrap needed when the cap lands inside the for-init —
+    // No block-wrap needed when the cap lands inside the for-init so
     // the label stays usable.
     emits("outer: for(;;){ continue outer; }", &["outer: for(let __zp_lc_1=0;", "continue outer"]);
     for src in [
@@ -694,10 +666,6 @@ fn loop_cap_bare_and_labeled_positions() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// var/function shadowing matrix — section A1/B.
-// ---------------------------------------------------------------------------
-
 #[test]
 fn var_function_shadowing_neutralized() {
     // Initialised `var` on a dangerous name is rewritten as a sync-through.
@@ -709,23 +677,22 @@ fn var_function_shadowing_neutralized() {
         "var a = 1, location = 2, b = 3;",
         &["var a = 1, __zp_vdcl_1=(__zp_set(globalThis,\"location\",(2)),void 0), b = 3;"],
     );
-    // Top-level `function location(){}` would throw on the real Location —
-    // renamed to a temp, references still mediated.
+    // Top-level `function location(){}` would throw on the real Location, so
+    // it is renamed to a temp while references remain mediated.
     emits(
         "function location(){} location.href = 'https://t/';",
         &["function __zp_vdcl_1(){}", "__zp_set(__zp_get(globalThis,\"location\"),\"href\""],
     );
     emits("if (x) function location(){}", &["if (x) function __zp_vdcl_1(){}"]);
-    // Bare `var location;` is a native no-op — kept, references mediated.
+    // Bare `var location;` is a native no-op; kept while references are mediated.
     emits(
         "var location; location.href = 'https://t/';",
         &["var location;", "__zp_set(__zp_get(globalThis,\"location\"),\"href\""],
     );
     reparses("var a = 1, location = 2, b = 3;");
     reparses("function location(){} location.href = 'https://t/';");
-    // Module goal is different: top-level declarations are MODULE-scoped, so
-    // `location` really is the local function (native semantics) — not the
-    // global. ERRATA A1 once listed this as an escape; it is correct as-is.
+    // Module goal: top-level declarations are module-scoped, so `location`
+    // is the local function (native semantics), not the global.
     let m = rewrite_script("function location(){} location.href = 'u';", &RewriteOpts {
         kind: ScriptKind::Module,
         target_url: "https://example.com/".into(),
@@ -737,10 +704,8 @@ fn var_function_shadowing_neutralized() {
     assert!(!m.code.contains("__zp_get(globalThis,\"location\")"), "module local resolved globally: {}", m.code);
 }
 
-// ---------------------------------------------------------------------------
-// Scope matrix: local bindings must NOT be mediated — a `var location`
+// Scope matrix: local bindings must NOT be mediated because `var location`
 // inside a function is a real local.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn local_scope_bindings_not_mediated() {
@@ -758,17 +723,11 @@ fn local_scope_bindings_not_mediated() {
     reparses("(() => { var location = 1; location; })();");
 }
 
-// ---------------------------------------------------------------------------
-// Misc: meta properties, global reads through computed base, export-goal.
-// ---------------------------------------------------------------------------
-
-/// A program with static import/export (or import.meta) IS a module — a
-/// classic script cannot contain them. The SW can request `classic` for a
-/// module that arrives without its script type (modulepreload → the generic
-/// fetch path); classic-only emission (the R1 lexical registry) then put every
-/// module-level const into the SHARED global registry, so two modules reusing
-/// a name threw "Identifier 'R' has already been declared" (naver's main
-/// bundle died at line 0, 2026-09-29).
+/// A program with static import/export (or import.meta) is a module; a
+/// classic script cannot contain them. When the SW requests `classic` for a
+/// module that arrives without its script type (e.g., `modulepreload`),
+/// promoting to module semantics avoids putting module-level `const` bindings
+/// into the shared global lexical registry.
 #[test]
 fn module_syntax_under_classic_request_gets_module_semantics() {
     let src = "import x from './a.js'; const R = 1; export const y = R + x;";
@@ -778,7 +737,7 @@ fn module_syntax_under_classic_request_gets_module_semantics() {
     let tla = rewrite_script("import a from './a.js'; await a; const R = 2;", &opts())
         .expect("top-level await in a module");
     assert!(!tla.code.contains("__zp_lex"), "{}", tla.code);
-    // Dynamic import() alone is NOT module syntax — a classic script keeps R1.
+    // Dynamic import() alone is not module syntax; a classic script keeps `__zp_lex_decl`.
     let classic = out_of("import('./m.js'); const z = 1;");
     assert!(classic.contains("__zp_lex_decl("), "classic script lost its registry: {classic}");
 }
@@ -786,9 +745,8 @@ fn module_syntax_under_classic_request_gets_module_semantics() {
 fn out_of(src: &str) -> String { out(src) }
 
 /// Literal `data:`/`blob:` dynamic-import specifiers take the same runtime
-/// path as computed ones (`__zp_module_url` reads, rewrites and re-imports the
-/// module). Left raw, they bypassed the rewriter: only CSP stopped them, and a
-/// legitimate `import('data:…')` broke where Chrome runs it. ERRATA §E.
+/// path as computed ones (`__zp_module_url` reads, rewrites, and re-imports
+/// the module).
 #[test]
 fn dynamic_import_data_blob_literals_take_runtime_path() {
     for src in [
@@ -820,15 +778,13 @@ fn misc_invariants() {
         "var window; window['location'].href = 'https://t/';",
         &["__zp_set(__zp_get((__zp_get(globalThis,\"window\")),('location')),\"href\""],
     );
-    // `open` is NOT a dangerous name — a user-declared `var open` is local.
+    // `open` is not a dangerous name; a user-declared `var open` is local.
     emits("var open; open('u');", &["var open; open('u');"]);
     reparses("document['location'].href = 'https://t/';");
 }
 
-/// `x => expr` bodies are expressions, not statement starts: the `_STMT`
-/// forms' ASI guard `0,` ended the arrow and left `, (...)` as an invalid
-/// second declarator. CNN's Permutive SDK had `const E=(e,t)=>t[e]??=[]`
-/// and died whole with "Unexpected token '('" (2026-09-29).
+/// `x => expr` bodies are expressions, not statement starts: emitting the
+/// `_STMT` ASI guard `0,` would terminate the arrow expression at the comma.
 #[test]
 fn arrow_expression_body_is_not_a_statement_position() {
     for src in [
@@ -846,9 +802,7 @@ fn arrow_expression_body_is_not_a_statement_position() {
     reparses("x = 1\no[k] ??= [];");
 }
 
-// ---------------------------------------------------------------------------
-// `this` in global code is the global object — it must read what `window` reads (the facade), not the real global.
-// ---------------------------------------------------------------------------
+// `this` in global code is the global object: it must read the `window` facade, not the real global.
 
 #[test]
 fn global_this_reads_like_window() {
@@ -900,7 +854,7 @@ fn error_prepare_stack_trace_is_the_pages_own_view() {
 #[test]
 fn sloppy_function_this_maps_only_the_real_global() {
     let mapped = "__zp_this(this)";
-    // A plain call of sloppy function code gets the real global from the engine — natively the window.
+    // A plain call of sloppy function code gets the real global from the engine (natively the window).
     emits("function f(){ return this }", &[&format!("return {mapped}")]);
     emits("var o = { m() { return this }, get g() { return this } };", &[&format!("m() {{ return {mapped} }}"), &format!("get g() {{ return {mapped} }}")]);
     emits("var f = function(){ return () => this }", &[&format!("() => {mapped}")]);
@@ -912,7 +866,7 @@ fn sloppy_function_this_maps_only_the_real_global() {
     not_emits("function f(){ 'use strict'; return this }", &["__zp_this"]);
     not_emits("'use strict'; function f(){ return this }", &["__zp_this"]);
     not_emits("class A { x = this.y; static { this.z = 1 } m() { return function(){ return this } } }", &["__zp_this"]);
-    // `Function('return this')()` — a Function body is sloppy function code.
+    // `Function('return this')()`: a Function body is sloppy function code.
     let body = rewrite_script("return this", &RewriteOpts { kind: ScriptKind::Function, ..opts() }).unwrap().code;
     assert!(body.contains(&format!("return {mapped}")), "got: {body}");
     let module = rewrite_script("function f(){ return this }", &RewriteOpts { kind: ScriptKind::Module, ..opts() }).unwrap().code;
@@ -923,10 +877,8 @@ fn sloppy_function_this_maps_only_the_real_global() {
     assert!(worker.contains(&format!("return {mapped}")), "got: {worker}");
 }
 
-// ---------------------------------------------------------------------------
-// The runtime helpers the emitted code names: a page `with` cannot answer for them, a page binding or write of
-// one is refused.
-// ---------------------------------------------------------------------------
+// Runtime helpers named by emitted code: a page `with` cannot shadow them, and
+// a page binding or write of one is refused.
 
 #[test]
 fn with_body_binds_the_helpers_before_the_page_object_can_answer() {
@@ -978,7 +930,7 @@ fn a_page_binding_or_write_of_a_helper_name_is_refused() {
     }
     refused("import { x as __zp_get } from './m.js'; location;", ScriptKind::Module, "__zp_get");
     refused("return __zp_call = f", ScriptKind::Function, "__zp_call");
-    // Reading them is what rewritten code does — a function's own source run again (`eval(f.toString())`, a worker
+    // Reading them is what rewritten code does: a function's own source run again (`eval(f.toString())`, a worker
     // made from it) carries the calls and the temps the rewriter declares.
     for src in [
         "function f(){ with(o){ location } for(;;){ break } let a = 1; return x[k](1) + this.y }",
@@ -1002,10 +954,8 @@ fn a_page_binding_or_write_of_a_helper_name_is_refused() {
     not_emits("o.__zp_get = 1; document.__ZP_EXEC_EVENT = f; var zp_get = 3, _zp_x = 4, __zpx = 5, __zp = 6;", &["Unexpected identifier"]);
 }
 
-// ---------------------------------------------------------------------------
 // Inline guards: a computed member keeps its native access for data bases (arrays, strings, typed arrays,
 // functions), its operands in function temps.
-// ---------------------------------------------------------------------------
 
 const G1: &str = "(__zp_t_1=(0,a),__zp_t_2=(0,i),__zp_fast(__zp_t_1,__zp_t_2)?__zp_t_1[__zp_t_2]:__zp_get(__zp_t_1,__zp_t_2))";
 
@@ -1030,8 +980,7 @@ fn computed_members_keep_their_native_access_behind_a_guard() {
     // Arguments holding guards of their own are not copied into both arms.
     emits("function f(o, k, a, i) { return o[k](a[i]) }", &["return __zp_call((o),(k),[(__zp_t_1=(0,a)"]);
     reparses("function f(a, b, i) { return a[b[i]] + b[i](a[i], a[b[i]]) }");
-    // A function whose body ends with a site: its temps are its own, after that site, not inside its operand
-    // (Glassdoor's challenge script: `I[k] = function(){ …, I[aN(gB.a)] = !0 }` stopped parsing).
+    // A function whose body ends with a site: its temps are its own, after that site, not inside its operand.
     let tail = out("function f(I, k, n) { I[k] = function () { n = 1, I[n] = !0 } }");
     assert!(tail.contains("__zp_t_3=(0,!0),__zp_fastset("), "{tail}");
     assert_eq!(tail.matches(";var ").count(), 2, "{tail}");
@@ -1064,10 +1013,10 @@ fn a_guard_that_starts_a_statement_does_not_continue_the_line_before() {
     assert!(code.contains("var x = y\n0,(__zp_t_1=(0,a)"), "{code}");
     assert_eq!(code.matches("\n0,(").count(), 3, "{code}");
     reparses("function f(a, i) { var x = y\na[i] = 1\na[i]\na[i](2) }");
-    // …but a guard inside another patch that starts the statement is that patch's operand.
+    // A guard inside another patch that starts the statement is that patch's operand.
     emits("function f(e) { e.ports[0].postMessage(1) }", &["{ __zp_call((__zp_t_1=(0,e.ports)"]);
     not_emits("function f(e) { e.ports[0].postMessage(1) }", &["__zp_call(0,"]);
-    // Minified `else(…)` has no space: the prefix must not join `else` (BBC: `else0` is not defined).
+    // Minified `else(…)` has no space: the prefix must not join `else`.
     let glued = out("function f(a, i, c) { if (c) g(); else(a)[i] = 1; if (c) g(); else(a)[i] += 1 }");
     assert!(!glued.contains("else0"), "{glued}");
     assert!(glued.contains("else 0,("), "{glued}");

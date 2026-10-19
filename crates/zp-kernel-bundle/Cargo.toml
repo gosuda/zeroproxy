@@ -7,19 +7,10 @@ license.workspace = true
 [lib]
 crate-type = ["cdylib", "rlib"]
 
-# 2026-06-08 split-bundle (c.3): SW kernel/transport WASM bundle. Holds the
-# heavy client-side stack (rustls + h2 + yamux + mlkem + tokio adapter +
-# compression decoders + membrane/rtcgw/wtproxy stubs) so it can be
-# fetched + instantiated *lazily* — only on first `transportFetch` —
-# instead of blocking SW `activate`. The eager `zp-bundle` keeps the
-# rewriter + htmltx + sourcemap + CSP/CSS helpers (those run on every
-# script/CSS response, so they stay on the critical path).
-#
-# Same export surface as the kernel-side of the pre-(c.3) `zp-bundle`:
-# `kernelVersion / kernelInit / kernelFetch / kernelStream /
-# kernelEchoSync / kernelLastNamedGroups / kernelSetCapturedSpec`,
-# plus the (currently stub) `zp_membrane_version / rtcgw_version /
-# wtproxy_version`.
+# Service Worker kernel and transport WASM bundle (rustls, h2, yamux, ml-kem,
+# tokio adapter, and response-body decoders). Instantiated lazily on first
+# `transportFetch` so `zp-bundle` can activate without waiting for transport
+# compilation.
 
 [dependencies]
 zp-shared = { workspace = true }
@@ -34,7 +25,6 @@ base64 = { version = "0.22", default-features = false, features = ["alloc"] }
 # RFC 6455 `Sec-WebSocket-Accept` = base64(SHA1(key || GUID)).
 sha1 = { version = "0.10", default-features = false }
 
-# Client-side transport stack — same set the pre-(c.3) zp-bundle had.
 futures-util = { workspace = true }
 pin-project-lite = { workspace = true }
 bytes = { workspace = true }
@@ -56,7 +46,7 @@ tokio = { workspace = true }
 tokio-util = { workspace = true }
 getrandom_02 = { package = "getrandom", version = "0.2", default-features = false, features = ["js"] }
 
-# Phase 5.12 response-body decoders (gzip/deflate/brotli/zstd).
+# Response-body decoders (gzip/deflate/brotli/zstd).
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 brotli = { version = "8", default-features = false, features = ["std"] }
 ruzstd = { version = "0.8", default-features = false, features = ["std"] }

@@ -1,17 +1,9 @@
-// E2 real-site regression harness — fresh Chromium profile per cycle so
-// the SW-registration accumulation that wedged the taskweaver-based
-// verification never happens. Spawns a single zeroproxy-server pointed
-// at ./dist/web and walks puppeteer through each target in REAL_TARGETS,
-// asserting the page renders (title non-empty + no fatal ZP error code
-// in console) and snapshotting artifacts under
-// `.ai/dogfood/e2-real-site/<YYYY-MM-DD>/<host>/`.
+// E2 real-site regression harness. Spawns zeroproxy-server against ./dist/web
+// and visits each target in REAL_TARGETS with a fresh Chromium profile,
+// verifying non-empty target title and zero fatal ZP console errors.
 //
-// Run: `node --test test/e2e/real-site-regression.test.js`
-//   or `npm run dogfood:real-site` (added to package.json).
-//
-// Network gating: if the harness can't reach the open internet within
-// 8 s of boot, every site test SKIPS rather than fails — the harness
-// doubles as a CI-friendly regression that just-runs-when-it-can.
+// Run: `node --test test/e2e/real-site-regression.test.js` or `npm run dogfood:real-site`.
+// Skips when outbound internet is unreachable within 8 s of boot.
 
 'use strict';
 const { test } = require('node:test');
@@ -22,67 +14,25 @@ const os = require('node:os');
 const { spawn } = require('node:child_process');
 const puppeteer = require('puppeteer');
 
-// Pick an ephemeral port per harness invocation by default — sharing a
-// fixed `18181` across reruns meant a previous orphan process could
-// silently own the port and answer requests, hiding fresh-spawn bind
-// failures (Wikipedia "passes" through the orphan, later tests fail
-// when the orphan finally stutters). Caller can pin via `ZP_PROXY_PORT`
-// when manually correlating logs/screenshots.
+// Pick an ephemeral port by default so an orphan server from a prior run cannot
+// silently answer requests on a fixed port; set ZP_PROXY_PORT to pin manually.
 const PROXY_PORT = process.env.ZP_PROXY_PORT
   || String(30000 + Math.floor(Math.random() * 20000));
 const DIST_WEB = path.resolve('dist/web');
 const SERVER_BIN = path.resolve(process.platform === 'win32' ? 'dist/zeroproxy-server.exe' : 'dist/zeroproxy-server');
 
-// `titleMatches` MUST NOT match the launcher's "ZeroProxy" title (any
-// fallback `|ZeroProxy` would pass before navigation completes). Each
-// regex matches only the *target's* finalized page title.
-//
-// Default target list: Wikipedia (SPA-style mw.loader, no CF challenge,
-// reliable on first cold visit). Cloudflare-protected sites like
-// gosuda.org are opt-in via `ZP_TARGETS=cloudflare` because their CF
-// challenge handling can exceed puppeteer's default 180 s
-// protocolTimeout on first visit — they're closer to a manual
-// dogfood check than an automated regression.
+// `titleMatches` must match only the target's finalized page title, never the launcher's "ZeroProxy" title.
 const ALL_TARGETS = {
-  // Wikipedia — SPA-style mw.loader, no CF gate, stable cold visit.
   wikipedia: { host: 'en.wikipedia.org', url: 'https://en.wikipedia.org/wiki/Main_Page', titleMatches: /Wikipedia, the free encyclopedia/i },
-  // example.com — IANA reserved-for-documentation domain. Tiny static
-  // page, no JS frameworks, ZERO third-party fetches: the canonical
-  // "does the SW + rewriter + transport path produce a renderable
-  // document at all" smoke target.
   example: { host: 'example.com', url: 'https://example.com/', titleMatches: /Example Domain/i },
-  // MDN docs landing page. Heavier JS surface (Yari React app), useful
-  // signal for "real developer site" smoke under the page bundle.
   mdn: { host: 'developer.mozilla.org', url: 'https://developer.mozilla.org/en-US/docs/Web', titleMatches: /MDN|Mozilla/i },
-  // Hacker News — server-rendered, minimal JS, lightweight. Exercises
-  // the document path with no SPA bundle to confound title timing.
   hackernews: { host: 'news.ycombinator.com', url: 'https://news.ycombinator.com/', titleMatches: /Hacker News/i },
-  // Cloudflare-protected sites are opt-in via `ZP_TARGETS=cloudflare`
-  // because CF challenge handling can exceed puppeteer's default 180 s
-  // protocolTimeout — they're closer to a manual dogfood check than
-  // an automated regression.
   cloudflare: { host: 'gosuda.org', url: 'https://gosuda.org', titleMatches: /gosuda/i },
-  // CNN — 무거운 광고/프레임 표면. 역사적으로 두 번째 정지 + 프레임 갭
-  // 잔여가 관측됐던 사이트 (T6-2).
   cnn: { host: 'edition.cnn.com', url: 'https://edition.cnn.com/', titleMatches: /CNN/i },
-  // Cloudflare Turnstile 데모 — per-tab origin arming 게이팅 검증 (T6-3).
-  // `challengeCompat: true` → 런처의 #challenge-compat 체크박스를 켠다.
+  // `challengeCompat: true` enables the launcher's #challenge-compat checkbox.
   turnstile: { host: 'turnstile.zeroclover.io', url: 'https://turnstile.zeroclover.io/', titleMatches: /turnstile|cloudflare|demo/i, challengeCompat: true },
 };
-// `ZP_TARGETS=matrix` expands to the auto-evidence matrix. Both
-// `wikipedia` and `example` (the latter after the rustls fork patch
-// landed 2026-06-08 to tolerate SCT in TLS 1.3 CertificateEntry
-// extensions, see `.ai/trap-notebook/INDEX.md`) qualify as
-// known-good across the SW + transport + rewriter pipeline.
-// `mdn` / `hackernews` remain in `ALL_TARGETS` for opt-in evidence
-// runs and Phase 3 investigation:
-//   - `mdn` — Cloudflare 403 anti-bot rejection (corrected diagnosis
-//     2026-06-09; the earlier "transport hang" hypothesis was wrong
-//     — the page is unresponsive because the SW returned an error
-//     page after the 403, NOT because the SW is stuck). Same class
-//     as gosuda.org; Phase 3 fingerprint hardening would address it.
-//   - `hackernews` — sequential cookie probes noisy under headless
-//     puppeteer without further harness work.
+// `ZP_TARGETS=matrix` expands to the default automated regression targets.
 const MATRIX_KEYS = ['wikipedia', 'example'];
 const rawTargets = process.env.ZP_TARGETS || 'wikipedia';
 const REAL_TARGETS = (rawTargets === 'matrix' ? MATRIX_KEYS.join(',') : rawTargets)
@@ -160,10 +110,8 @@ test('E2 real-site regression — fresh profile, no stale SW', async (t) => {
   await waitForHTTP(`http://127.0.0.1:${PROXY_PORT}/zp/`).catch(err => {
     throw new Error(`${err.message}\nserver log:\n${serverLog}`);
   });
-  // Fail-fast: if the spawned server exited before waitForHTTP returned
-  // (typically `bind: address already in use` from a prior orphan), the
-  // waitForHTTP poll may have succeeded against the *orphan* instead.
-  // Refuse to proceed — a real evidence run must own its own port.
+  // Fail fast if the spawned server exited during boot (such as on a port conflict)
+  // while waitForHTTP succeeded against an older process.
   if (serverDied || /bind:.*permitted|address already in use/i.test(serverLog)) {
     throw new Error(`server died during boot (likely port conflict on ${PROXY_PORT}):\n${serverLog}`);
   }
@@ -174,9 +122,8 @@ test('E2 real-site regression — fresh profile, no stale SW', async (t) => {
   browser = await puppeteer.launch({
     headless: 'new',
     userDataDir,
-    // Cloudflare-protected first-cold visits can exceed the default
-    // 180 s CDP protocolTimeout — bump it generously so the actual
-    // test-level timeouts (waitForFunction) own the deadline.
+    // Cloudflare-protected cold visits can exceed the default 180 s CDP protocolTimeout;
+    // raise it so test-level waitForFunction timeouts govern the deadline.
     protocolTimeout: 300000,
     args: [
       '--no-sandbox',
@@ -188,11 +135,7 @@ test('E2 real-site regression — fresh profile, no stale SW', async (t) => {
 
   for (const target of REAL_TARGETS) {
     await t.test(target.host, async (sub) => {
-      // Fresh incognito BrowserContext per subtest so SW
-      // registrations / cookies / storage do NOT cross-contaminate.
-      // The matrix-run-4 (2026-06-08) regression showed Wikipedia's
-      // SW state aliased to the next subtest's proxy.localhost
-      // origin and broke example.com's launcher submission.
+      // Use a fresh BrowserContext per subtest so SW registrations, cookies, and storage do not leak across targets.
       const ctx = await browser.createBrowserContext();
       sub.after(() => ctx.close().catch(() => {}));
       const page = await ctx.newPage();
@@ -202,7 +145,6 @@ test('E2 real-site regression — fresh profile, no stale SW', async (t) => {
       });
       page.on('pageerror', err => { consoleErrors.push(String(err && err.message || err)); });
 
-      // 1. Open the proxy launcher and submit the target URL.
       await page.goto(`http://proxy.localhost:${PROXY_PORT}/zp/`, { waitUntil: 'domcontentloaded' });
       await page.waitForFunction(
         () => navigator.serviceWorker && navigator.serviceWorker.controller,
@@ -219,26 +161,10 @@ test('E2 real-site regression — fresh profile, no stale SW', async (t) => {
       const openBtn = await page.$('button');
       if (openBtn) await openBtn.click();
 
-      // 2. Wait up to 45 s for the proxied target's real title to land.
-      // The page realm's `location` is virtualized to return the
-      // target URL, so we can't use it to detect "navigated off
-      // launcher" — instead we rely on the strict per-target title
-      // regex (configured above) which won't match the launcher's
-      // "ZeroProxy" title.
-      //
-      // Sites that do `location.replace` (e.g. MDN's locale resolver)
-      // destroy the page's execution context mid-poll, which makes
-      // `page.title()` block until the protocol timeout. We avoid
-      // that by binding a `page.on('domcontentloaded', …)` listener
-      // that fires every time the renderer commits a new doc —
-      // recording the most-recent `document.title` snapshot from
-      // within each fresh context. The harness then races a deadline
-      // against "any committed doc whose title matches the regex."
-      //
-      // Belt-and-suspenders: also poll every 250 ms inside try/catch,
-      // tolerating context-destroyed faults so stable docs that
-      // never re-commit (the common case — Wikipedia, example.com)
-      // still resolve quickly.
+      // Wait up to 45 s for the proxied target's title. Because `location` is virtualized,
+      // detect navigation completion via the target-specific title regex.
+      // Listen to `domcontentloaded` and `load` alongside polling so redirects that destroy
+      // the execution context mid-poll do not block `page.title()` until protocolTimeout.
       let titleSeen = '';
       const titleListener = async () => {
         try { titleSeen = (await page.title()) || titleSeen; } catch {}
@@ -277,7 +203,7 @@ test('E2 real-site regression — fresh profile, no stale SW', async (t) => {
             url: location.href,
             bodyLen: (document.body && document.body.innerText || '').length,
           }));
-        } catch { /* context destroyed — fall back to listener-captured title */ }
+        } catch { /* context destroyed; fall back to listener-captured title */ }
         try { await page.screenshot({ path: path.join(outDir, `${target.host}-FAIL.png`), fullPage: false }); } catch {}
         fs.writeFileSync(
           path.join(outDir, `${target.host}-errors.json`),
@@ -286,10 +212,8 @@ test('E2 real-site regression — fresh profile, no stale SW', async (t) => {
         throw new Error(`${target.host}: ${err.message}; state=${JSON.stringify(state)}`);
       }
 
-      // 3. Snapshot the result for visual verification.
       await page.screenshot({ path: path.join(outDir, `${target.host}.png`), fullPage: false });
 
-      // 4. No fatal ZP error code in console.
       const fatal = consoleErrors.filter(line => FATAL_ZP_ERRORS.some(code => line.includes(code)));
       if (fatal.length > 0) {
         fs.writeFileSync(

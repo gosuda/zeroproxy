@@ -1,20 +1,10 @@
-// 동시에 살아 있는 두 타깃 사이의 채널 격리 (BroadcastChannel).
-//
-// 스토리지 축(run.mjs)은 A 에 쓰고 B 에서 읽는 **순차** 방식이라 채널을 못 잰다 —
-// 채널은 지속되지 않고 양쪽이 **동시에** 살아 있어야 의미가 있다. 그래서 A 문서
-// 안에 프레임 둘을 띄운다: 같은 타깃 A 하나, 다른 타깃 B 하나.
-//
-// 눈이 둘이다:
-//   ① 재현성 — 같은 타깃 프레임은 **받아야** 한다 (안 받으면 BC 가 통째로 깨진 것)
-//   ② 격리   — 다른 타깃 프레임은 **못 받아야** 한다
-// ①이 없으면 ②의 "안 받았다" 는 아무 증거가 아니다. 예전에 그 함정을 밟았다:
-// 프레임 인덱스를 확인 안 하고 A 프레임에 수신기를 심어 놓고 "격리됨" 이라
-// 읽을 뻔했다. 그래서 지금은 **심기 전에 프레임 신원을 확인**하고, 안 맞으면 멈춘다.
+// Verify cross-document BroadcastChannel and SharedWorker isolation between
+// concurrent frames targeting the same origin (A) vs a different origin (B).
 import { execFileSync } from 'node:child_process';
 
 const ID = 'zp';
 const PROXY = 'http://proxy.localhost:18080';
-// 프레임이 적은 최소 페이지를 쓴다(매트릭스 /page 는 자기 iframe 이 18개다).
+// Use `/hdrprobe` rather than `/page` because `/page` spawns 18 iframes of its own.
 const A = 'http://localhost:18099/hdrprobe';
 const B = 'http://127.0.0.1:18098/hdrprobe';
 const tw = (...a) => {
@@ -49,7 +39,7 @@ run(`
 `);
 await sleep(11000);
 
-// 프레임 신원을 **먼저** 확인한다. 인덱스를 믿지 않는다.
+// Resolve child frame indices by `document.baseURI` rather than assuming fixed frame ordering.
 const total = Number(json(tw('get-frames', '-i', ID)).total_count || 0);
 let sameIdx = -1, otherIdx = -1;
 for (let i = 0; i < total; i++) {
@@ -57,9 +47,9 @@ for (let i = 0; i < total; i++) {
   if (base === A && sameIdx < 0) sameIdx = i;
   else if (base === B && otherIdx < 0) otherIdx = i;
 }
-console.log(`프레임 ${total}개 — 같은타깃(A)=${sameIdx} 다른타깃(B)=${otherIdx}`);
+console.log(`Frames (${total}): same-target(A)=${sameIdx} other-target(B)=${otherIdx}`);
 if (sameIdx < 0 || otherIdx < 0) {
-  console.log('[!] 프레임을 못 찾았다 — 이 실행은 판정 불가다. (인덱스를 추측해서 진행하면 안 된다.)');
+  console.log('[!] Target frames not found; run is inconclusive.');
   process.exit(0);
 }
 
@@ -72,8 +62,8 @@ const ARM = `
     return 'armed';
   } catch (e) { return 'arm-err:' + e.name; }
 `;
-console.log('A 프레임 수신기:', run(ARM, '--frame', String(sameIdx)));
-console.log('B 프레임 수신기:', run(ARM, '--frame', String(otherIdx)));
+console.log('Frame A receiver:', run(ARM, '--frame', String(sameIdx)));
+console.log('Frame B receiver:', run(ARM, '--frame', String(otherIdx)));
 
 const sent = run(`
   const tx = new BroadcastChannel('zp_probe_chan');
@@ -84,23 +74,20 @@ const sent = run(`
 const gotSame = json(run('return JSON.stringify(self.__zp_bc_got || null);', '--frame', String(sameIdx)) || 'null') || [];
 const gotOther = json(run('return JSON.stringify(self.__zp_bc_got || null);', '--frame', String(otherIdx)) || 'null') || [];
 
-console.log('\n── 판정 ──');
-console.log('[재현성] 같은 타깃 프레임 수신:', gotSame.length ? gotSame.join(',') : '없음');
-console.log('[격리]  다른 타깃 프레임 수신:', gotOther.length ? gotOther.join(',') : '없음');
+console.log('\nVerdict:');
+console.log('[fidelity] same-target frame received:', gotSame.length ? gotSame.join(',') : 'none');
+console.log('[isolation] other-target frame received:', gotOther.length ? gotOther.join(',') : 'none');
 if (!gotSame.length) {
-  console.log('[!] 같은 타깃끼리도 전달이 안 됐다 — BroadcastChannel 이 통째로 깨졌거나 계측이 틀렸다.');
-  console.log('    이 실행에서 "격리 없음" 은 증거가 아니다.');
+  console.log('[!] Same-target delivery failed; BroadcastChannel is broken or instrumentation failed.');
+  console.log('    Zero messages on other-target is not evidence of isolation in this run.');
 } else if (gotOther.length) {
-  console.log('[!!] 다른 타깃이 받았다 — 격리 누출이다.');
+  console.log('[!!] Other-target received message: isolation leak.');
 } else {
-  console.log('[ok] 같은 타깃은 받고 다른 타깃은 못 받았다 — 양성 대조를 가진 격리다.');
+  console.log('[ok] Same-target received and other-target did not: verified isolation with positive control.');
 }
 
-// ── SharedWorker: 같은 이름이면 인스턴스를 공유한다 ─────────────────────────
-//
-// 접속 순번을 돌려주는 워커를 두 프레임이 같은 이름으로 붙는다.
-//   같은 타깃 두 접속  → 1, 2 (공유돼야 정상 = 재현성)
-//   다른 타깃          → 다시 1 (공유되면 격리 누출)
+// SharedWorker instance sharing: two connections from target A should receive
+// sequential connection numbers (1, 2), whereas target B should receive 1 from a separate instance.
 const SW_CONNECT = (origin) => `
   try {
     const w = new SharedWorker(${JSON.stringify('%ORIGIN%/sharedworker.js')}.replace('%ORIGIN%', ${JSON.stringify(origin)}), 'zp_probe_sw');
@@ -116,13 +103,13 @@ const SW_CONNECT = (origin) => `
 const swSame1 = run(SW_CONNECT(new URL(A).origin), '--frame', String(sameIdx));
 const swSame2 = run(SW_CONNECT(new URL(A).origin));
 const swOther = run(SW_CONNECT(new URL(B).origin), '--frame', String(otherIdx));
-console.log('\n[SharedWorker] 같은타깃 프레임=' + swSame1 + ' / 같은타깃 최상위=' + swSame2 + ' / 다른타깃=' + swOther);
+console.log('\n[SharedWorker] same-target frame=' + swSame1 + ' / same-target top=' + swSame2 + ' / other-target=' + swOther);
 if (String(swSame1).startsWith('err') || String(swSame2).startsWith('err')) {
-  console.log('[!] 같은 타깃에서도 SharedWorker 접속이 안 됐다 — 이 실행에서 격리 판정은 불가다.');
+  console.log('[!] SharedWorker connection failed on same-target; isolation verdict is inconclusive.');
 } else if (String(swSame2) === String(swSame1)) {
-  console.log('[!] 같은 타깃 두 접속이 같은 순번이다 — 인스턴스를 공유하지 않는다(재현성 결함 후보).');
+  console.log('[!] Both same-target connections received the same sequence number; instance is not shared.');
 } else if (!String(swOther).startsWith('err') && Number(swOther) > 1) {
-  console.log('[!!] 다른 타깃이 같은 인스턴스에 붙었다 — 격리 누출이다.');
+  console.log('[!!] Other-target attached to the same SharedWorker instance: isolation leak.');
 } else {
-  console.log('[ok] 같은 타깃끼리는 공유하고 다른 타깃은 별도다 — 양성 대조를 가진 격리다.');
+  console.log('[ok] Same-target shares instance and other-target is isolated: verified with positive control.');
 }

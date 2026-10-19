@@ -6,10 +6,7 @@
       Object.defineProperty(w, iframeHooksMarker, { value: true, enumerable: false, configurable: false });
     } catch {}
     const instrumentedWindows = newWeakSet();
-    // Document level, capture phase: it runs before every listener the page adds
-    // and before the element's own onload. NOT the window — a `load` event fired
-    // at an element never propagates to the Window (DOM: a Document's parent is
-    // null for `load`). Children have their own prelude.
+    // Listen on document in capture phase so placeholder load events can be stopped before page listeners run (element load events do not bubble to Window).
     if (w === root) { try { root.document.addEventListener('load', swallowPlaceholderLoad, true); } catch {} }
     const nativeCreateElement = w === root ? Native.createElement : w.document.createElement.bind(w.document);
     const nativeCreateElementNS = w === root ? Native.createElementNS : w.document.createElementNS && w.document.createElementNS.bind(w.document);
@@ -17,16 +14,7 @@
     installFrameAccessors(w.HTMLIFrameElement && w.HTMLIFrameElement.prototype);
     installFrameAccessors(w.HTMLFrameElement && w.HTMLFrameElement.prototype);
 
-    // Natively these live on Document.prototype, so defining them on the
-    // document INSTANCE was both a fingerprint (own names a real document does
-    // not have) and a coverage hole: a second document — from
-    // document.implementation.createHTMLDocument() or DOMParser — kept the
-    // untouched native and created script/iframe nodes with no instrumentation.
-    //
-    // Relocating needs `this`-correct dispatch. `nativeCreateElement` is BOUND
-    // to w.document, so calling it for another document would put the element in
-    // the wrong one; use the unbound prototype method with the real receiver
-    // instead. Captured before we overwrite it.
+    // Define createElement and createElementNS on Document.prototype rather than the document instance so secondary documents (DOMParser, createHTMLDocument) also instrument created elements.
     const docProtoForCreate = w.Document && w.Document.prototype;
     const rawCreateElement = docProtoForCreate && docProtoForCreate.createElement;
     const rawCreateElementNS = docProtoForCreate && docProtoForCreate.createElementNS;
@@ -49,9 +37,7 @@
     patchInsertion(w.Node.prototype, 'appendChild', w.Node.prototype.appendChild);
     patchInsertion(w.Node.prototype, 'insertBefore', w.Node.prototype.insertBefore);
     patchInsertion(w.Node.prototype, 'replaceChild', w.Node.prototype.replaceChild);
-    // Every door a node can come through: a script put in by any of them has to reach the browser
-    // rewritten, or it runs raw (measured 2026-10-02: replaceChildren, insertAdjacentElement and
-    // Range.insertNode did — location read the proxy's URL, and assigning it left for the target).
+    // Hook all DOM insertion methods so script and iframe nodes are prepared before reaching the live document.
     for (const proto of [w.Element && w.Element.prototype, w.Document && w.Document.prototype, w.DocumentFragment && w.DocumentFragment.prototype, w.CharacterData && w.CharacterData.prototype]) {
       for (const method of ['append', 'prepend', 'replaceChildren', 'before', 'after', 'replaceWith']) patchInsertion(proto, method, proto && proto[method]);
     }
@@ -67,21 +53,19 @@
         prepareActivatingNodes(args);
         const frames = collectIframesFromArgs(args);
         const ret = nativeFn.apply(this, args);
-        // Frames parked while their markup was inert load now, behind the sandbox rewrite above.
+        // Restore frames whose src was parked while inside an inert document.
         if (frames) for (const frame of frames) restoreParkedFrame(frame);
         instrumentFrameList(frames);
         return ret;
       };
       define(proto, name, hook);
-      // The native method's `length` (the wrapper takes ...args, which reads 0).
       try { Object.defineProperty(hook, 'length', { value: nativeFn.length, configurable: true }); } catch {}
     }
     function installFrameAccessors(proto) {
       if (!proto) return;
       const win = frameDescriptor(proto, 'contentWindow');
       if (win && win.get) {
-        // The page gets a window handle, not the window: another site's frame
-        // is handed out as the restricted cross-origin stand-in (windowHandles).
+        // Return a cross-origin Window handle when the frame's virtual origin differs from the embedder's.
         try {
           defineMasked(proto, 'contentWindow', {
             get() {
@@ -101,7 +85,6 @@
               const childWin = childDoc && childDoc.defaultView;
               if (childWin) {
                 containFrameWindow(childWin, this);
-                // Natively null for a frame of another origin.
                 if (windowHandles && windowHandles.isCrossOrigin(childWin, this)) return null;
               }
               return childDoc;
@@ -120,28 +103,18 @@
     }
     function containFrameWindow(childWin, frame) {
       if (!childWin) return childWin;
-      // An opaque frame — one the page sandboxed, or one inside an opaque document: its own
-      // origin, not ours to contain (it boots its own prelude, or cannot run a script at all).
+      // Leave opaque-origin frames uninstrumented; they either boot their own prelude or cannot run scripts.
       if (frame && frameHasOpaqueMark(frame)) return childWin;
       try { if (childWin[networkContainmentMarker]) return childWin; } catch { if (instrumentedWindows.has(childWin)) return childWin; }
       instrumentedWindows.add(childWin);
-      // 부모 쪽 `contentWindow.name` 은 iframe 의 name 속성이 초기값이다 —
-      // 자식 realm 의 가상 스토어와는 별개로 부모 측 읽기 경로를 시드한다.
+      // Seed the parent-side virtual window.name store from the iframe's `name` attribute.
       try {
         const fn = frame && Native.getAttribute && Native.getAttribute.call(frame, 'name');
         if (fn) virtualFrameNames.set(childWin, fn);
       } catch {}
-      // Its own prelude contains it, or is about to (ownsMembrane /
-      // bootingProxiedDocument). Everything else is contained — including a
-      // frame whose route is still pending: the old `data-zp-target-url`
-      // exemption left that window, and every later one in the frame, raw.
       if (ownsMembrane(childWin)) return childWin;
       if (bootingProxiedDocument(childWin)) {
-        // 자기 prelude 가 붙기 전 **사이 구간**에 부모가 `iframe.contentWindow
-        // .postMessage(msg, 'https://<타깃>')` 를 쏘면 네이티브가 받는다 —
-        // 수신 창의 실제 오리진이 프록시 오리진이라 타깃 오리진과 안 맞고
-        // 메시지가 **조용히 버려진다**. naver 의 ndp-core 가 광고 슬롯에
-        // 정확히 이걸 한다(로드당 9건). 매핑만은 미리 걸어 둔다.
+        // Install an early postMessage targetOrigin mapper before the child's own prelude finishes booting.
         installEarlyPostMessage(childWin);
         return childWin;
       }
@@ -152,15 +125,10 @@
         try { frame && frame.remove && frame.remove(); } catch {}
         throw e;
       }
-      // 여기가 SW-less 프레임을 발견하는 제자리다. 백스톱 타이머
-      // (500/1500/3000ms)에만 기대면 그 뒤에 만들어지는 광고 프레임을 통째로
-      // 놓친다 — 실측에서 같은 페이지가 로드마다 되기도 하고 안 되기도 했다.
       try { documentIsSWLess(childWin.document); } catch {}
       return childWin;
     }
-    // `frame.sandbox`: the flags the PAGE gave (a frame we rewrote holds one more natively),
-    // as a live DOMTokenList — a real one, on a detached shadow frame; changes made through
-    // it flow back into the frame. A frame whose flags we did not touch keeps the native list.
+    // Expose a live DOMTokenList backed by a detached shadow iframe when the frame's sandbox attribute was rewritten.
     function installFrameSandboxProp(proto) {
       const d = Object.getOwnPropertyDescriptor(proto, 'sandbox');
       if (!d || !d.get || !d.set) return;
@@ -177,11 +145,13 @@
               rec = { shadow, list: d.get.call(shadow) };
               const frame = this;
               try {
-                new MO(() => {
+                const obs = new MO(() => {
                   const now = Native.getAttribute.call(shadow, 'sandbox');
                   if (now === null || sandboxShadows.get(frame) !== rec) return;
                   if (frameSandboxMeta.get(frame) !== now) setFrameSandboxAttribute(frame, now);
-                }).observe(shadow, { attributes: true, attributeFilter: ['sandbox'] });
+                });
+                obs.observe(shadow, { attributes: true, attributeFilter: ['sandbox'] });
+                activeObservers.add(obs);
               } catch {}
               sandboxShadows.set(this, rec);
             }
@@ -216,8 +186,6 @@
           },
           configurable: false
         });
-        // srcdoc 게터를 JS 함수로 갈아끼웠으므로 toString 위장을 같이 건다 —
-        // 안 하면 "게터 소스를 읽어 본다" 는 흔한 검사에 우리만 튄다.
         const installed = Object.getOwnPropertyDescriptor(proto, prop);
         if (installed && typeof installed.get === 'function' && installed.get !== d.get) maskAccessorFn(installed.get, 'get', prop);
         if (installed && typeof installed.set === 'function') maskAccessorFn(installed.set, 'set', prop);
@@ -258,34 +226,16 @@
     }
     return frames;
   }
-  // ── routing a frame's `src` ─────────────────────────────────────────────
-  // A frame's `src` can never hold the target URL — the browser would load it
-  // directly — so it holds a proxy share route, and a route needs an async round
-  // trip (encrypt, register with the service worker). The old code parked the
-  // frame on an `about:blank` placeholder meanwhile, which cost the page one
-  // extra `load` event and, for a frame already showing a document, one extra
-  // joint-history entry per navigation (an inline onload on a parsed
-  // `<iframe src>` ran three times; native: once).
-  //
-  // Now a frame that is attached and already shows a routed document keeps it
-  // until the new route is ready — natively the old page stays until the new
-  // one commits, too. Every other frame gets the placeholder: a detached one
-  // may be inserted before the route is ready and must not load the raw URL,
-  // and the `src` attribute has to EXIST synchronously — attachAttributeNode,
-  // setAttributeNode and friends run the hooked setter and read the attribute
-  // back. The placeholder's `load` is swallowed (swallowPlaceholderLoad).
+  // Route a frame's `src` through an asynchronously activated proxy share path.
+  // Connected frames already showing a routed document keep that document until the new route commits;
+  // other frames use an `about:blank` placeholder whose synthetic `load` event is swallowed.
   function frameShowsRoutedDocument(el, key) {
     let cur = null;
     try { cur = Native.getAttribute.call(el, key); } catch {}
     if (!cur) return false;
     try { const u = new Native.URL(cur, proxyOrigin); return u.origin === proxyOrigin && ZP.isSharePath(u.pathname); } catch { return false; }
   }
-  // The server's rewriter moves a frame's `src` out of the way (data-zp-frame-src) so the browser never
-  // loads the raw URL. The page-side policy pass does the same to a frame in an inert document — markup
-  // parsed into the HTML walker's copy, a template's content — where a route opened for the frame would
-  // stay on that element and never reach the frame the markup becomes. The page's text waits in the
-  // data attribute and `src` holds the blank page a routed frame shows until its route is ready; it
-  // is not removed, so it keeps its place in the element's attribute list, as it does natively.
+  // Park a frame's `src` in `data-zp-frame-src` and set `src="about:blank"` while the element resides in an inert document.
   function parkFrameSrc(el) {
     const src = Native.getAttribute.call(el, 'src');
     if (src === null) return;
@@ -294,14 +244,12 @@
     Native.setAttribute.call(el, 'data-zp-frame-src', src);
     Native.setAttribute.call(el, 'src', 'about:blank');
   }
-  // A frame's own `src` — set by the page, not restored from the parked text — makes that text stale.
   function dropParkedFrameSrc(el) {
     try { Native.removeAttribute.call(el, 'data-zp-frame-src'); } catch {}
   }
   // `keepDocument` is false for the mutation-observer backstop: there the
   // attribute was written without our hook and may hold the raw URL right now.
   function routeFrameSrc(el, key, target, keepDocument) {
-    // Before any document is asked for: the navigation's sandbox flags are fixed when it starts.
     sanitizeFrameSandbox(el);
     dropParkedFrameSrc(el);
     const seq = (frameRouteSeq.get(el) || 0) + 1;
@@ -315,24 +263,17 @@
       Native.setAttribute.call(el, key, u);
       rememberFrameOrigin(el);
     }).catch(() => {
-      // No route, no document. Give the page the `load` it would have had so it
-      // is not left waiting on a frame that stays blank.
       if (frameRouteSeq.get(el) !== seq) return;
       pendingFrameRoutes.delete(el);
       try { el.dispatchEvent(new Event('load')); } catch {}
     });
   }
-  // A later `src` that is not a routed target (about:blank, javascript:) wins
-  // over a route still in flight, as it does natively.
   function cancelFrameRoute(el) {
     frameRouteSeq.set(el, (frameRouteSeq.get(el) || 0) + 1);
     pendingFrameRoutes.delete(el);
     dropParkedFrameSrc(el);
   }
-  // The placeholder page's `load` is not the frame's load. Frames still waiting
-  // for their route — a placeholder set by routeFrameSrc, or a parsed frame
-  // whose `src` htmltx moved to data-zp-frame-src — report a blank document; the
-  // routed document's own load passes and ends the wait.
+  // Suppress the `load` event of the `about:blank` placeholder while a frame's share route is still activating.
   function swallowPlaceholderLoad(ev) {
     const f = ev.target;
     try { if (!f || f.nodeType !== 1 || (f.localName !== 'iframe' && f.localName !== 'frame')) return; } catch { return; }
@@ -344,18 +285,12 @@
     if (blank) ev.stopImmediatePropagation();
     else pendingFrameRoutes.delete(f);
   }
-  // A window of an opaque origin — the browser's, from a sandbox without allow-same-origin
-  // that this membrane has not rewritten — cannot be read from here, and nothing can be
-  // installed in it: containing it is impossible, so it is not allowed to stay. A frame
-  // the membrane DID rewrite is same-origin natively once it navigates; until then its
-  // blank first document is such a window, and holds nothing.
   function windowReachable(win) {
     try { void win.document; return true; } catch { return false; }
   }
   function frameHasOpaqueMark(frame) {
     try { return Native.hasAttribute.call(frame, OPAQUE_FRAME_ATTR); } catch { return false; }
   }
-  // Opaque: the frame was sandboxed without allow-same-origin, or it is inside a document that is.
   function frameIsOpaque(frame) { return opaqueDocument || frameHasOpaqueMark(frame); }
   function windowIsOpaque(win) {
     try { const fe = winGet(win, 'frameElement'); if (fe) return frameIsOpaque(fe); } catch {}
@@ -370,23 +305,12 @@
       const src = Native.getAttribute.call(frame, 'src');
       try { zpTrace('iframe', (src || 'about:blank').slice(0, 160)); } catch {}
       rememberFrameOrigin(frame);
-      // The blank page in front of a pending route is contained too: Chrome
-      // gives the routed document a fresh Window (measured 2026-10-01), so
-      // nothing installed here reaches it — while skipping left the blank page
-      // itself raw (see bootingProxiedDocument).
-      // Parsed, or made by innerHTML: no insertion hook has seen its sandbox yet.
       sanitizeFrameSandbox(frame);
-      // ...nor its srcdoc: the page's text was kept on the walker's inert copy, and what survived the
-      // serialization is a stash. Put it back, or reads show the injected document.
       if (!srcdocMeta.has(frame) && Native.hasAttribute.call(frame, 'srcdoc')) {
         const kept = Native.getAttribute.call(frame, litAttrName('srcdoc'));
         if (kept !== null) srcdocMeta.set(frame, kept);
       }
-      // Inside an opaque document every frame it makes is opaque too (the sandbox's origin flag is
-      // inherited: measured natively, blank and srcdoc frames included).
       if (opaqueDocument && !frameHasOpaqueMark(frame)) { try { Native.setAttribute.call(frame, OPAQUE_FRAME_ATTR, '1'); } catch {} }
-      // An opaque frame has an origin of its own: it is no more ours to contain than a
-      // cross-site one, and nothing of this document can write into it.
       const opaque = frameHasOpaqueMark(frame);
       const blankWin = (!src || /^about:blank$/i.test(src)) && !opaque ? nativeFrameWindow(frame) : null;
       if (blankWin) {
@@ -396,16 +320,7 @@
       installSafeFrameResizeShim(frame);
     } catch { try { frame.remove(); } catch {} }
   }
-  // NAVER GFP simple-bridge SafeFrame-emulation ads: iframe.name carries
-  // {evtType:'sf-init', iFrameId, msgToken, adm, isFluid:true, ...} and the
-  // host (gfp-nda.js handleMsgEvt) waits for {evtType:'sf-resized',
-  // params:{frameHeight}} to apply iframe.style.height. But the non-SafeFrame
-  // branch (forceSafeFrame=false) loads only gfp-bridge.js inside — pure
-  // tracking, no ResizeObserver, no sf-resized sender. Result: ad body
-  // renders inside but iframe stays height:0. Direct parent-side height
-  // mirroring via ResizeObserver+MutationObserver fills the gap without
-  // touching NAVER's message protocol — host's own update path is still
-  // available when SF_RESIZED arrives by any other route.
+  // Mirror child document height onto SafeFrame-emulation ad iframes whose `name` JSON carries `{evtType: 'sf-init'}`.
   function installSafeFrameResizeShim(frame) {
     if (!frame || !frame.style || !Native.getAttribute) return;
     try { zpTrace('sfShim:enter'); } catch {}
@@ -422,8 +337,6 @@
       try {
         const doc = nativeFrameDocument(frame);
         if (!doc || !doc.body) return;
-        // Body in non-SafeFrame iframe wraps a banner ad. Use max of common
-        // height signals — images load late so we want largest stable size.
         const b = doc.body;
         const h = Math.max(b.scrollHeight || 0, b.offsetHeight || 0, doc.documentElement ? (doc.documentElement.scrollHeight || 0) : 0);
         if (h > 0 && h !== lastH) {
@@ -440,13 +353,7 @@
         if (tries++ < 100) try { root.setTimeout(start, 50); } catch {}
         return;
       }
-      // Poll: ResizeObserver across realms is unreliable for image-loaded
-      // reflow in non-SafeFrame ads. Adaptive backoff — height 안 바뀌면
-      // interval 점진 증가 (200→400→800→1600→2000ms cap), 바뀌면 reset.
-      // Per-tick `scrollHeight`/`offsetHeight` 가 layout reflush 강제하므로
-      // backoff 가 cumulative reflow cost 를 크게 줄임 (3-5 SafeFrame iframes
-      // 가 영구 200ms polling 하면 reflow noise 누적). image load event 가
-      // 별도 hook 으로 작동하므로 backoff 가 첫 안정화 후 reflow 누락 없음.
+      // Poll with adaptive backoff (200ms up to 2000ms) so stable ad frames do not force repeated layout flushes.
       try {
         let interval = 200;
         let stableTicks = 0;
@@ -464,7 +371,6 @@
         };
         tick();
       } catch {}
-      // Also hook image load events for instant snap after image arrival.
       try {
         const imgs = qsaOf(doc, 'img');
         for (let i = 0; i < imgs.length; i++) {

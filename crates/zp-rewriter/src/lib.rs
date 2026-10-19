@@ -1,17 +1,16 @@
-//! ZeroProxy JS rewriter — OXC AST-based.
+//! ZeroProxy JS rewriter based on the OXC AST.
 //!
-//! Patch-mode output (plan: 메모리 최적화 원칙 #3): rather than re-emit the
-//! full source, we return a list of (offset, length, replacement) tuples that
-//! the caller applies in place. This keeps unchanged source bytes shared and
-//! avoids the O(n) cost of full codegen on 90%-unchanged scripts.
+//! Patch-mode output returns a list of (offset, length, replacement) tuples that
+//! the caller applies in place rather than re-emitting the full source. This
+//! keeps unchanged source bytes shared and avoids the O(n) cost of full codegen
+//! on mostly unchanged scripts.
 //!
-//! Initial rule set (mirrors web/js-rewriter.js):
-//! - Unresolved global identifier references to a dangerous list
+//! Core rules:
+//! - Unresolved global identifier references to dangerous globals
 //!   (location, window, document, history, top, parent, opener, frames, self,
 //!   globalThis) become `__zp_get(globalThis, '<name>')`.
-//! - Locally bound identifiers with the same name are NOT rewritten
-//!   (scope tracking via OXC semantic later; this initial pass uses a simple
-//!   declaration stack walk).
+//! - Locally bound identifiers with the same name are not rewritten
+//!   (tracked via a declaration stack walk).
 
 use oxc_allocator::Allocator;
 use oxc_ast::ast::*;
@@ -38,10 +37,39 @@ pub enum ScriptKind {
 }
 
 impl ScriptKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ScriptKind::Classic => "classic",
+            ScriptKind::ClassicLocal => "classic-local",
+            ScriptKind::Module => "module",
+            ScriptKind::EventHandler => "event-handler",
+            ScriptKind::Eval => "eval",
+            ScriptKind::Function => "function",
+            ScriptKind::Worker => "worker",
+        }
+    }
+
     fn source_type(self) -> SourceType {
         match self {
             ScriptKind::Module => SourceType::mjs(),
             _ => SourceType::cjs(),
+        }
+    }
+}
+
+impl std::str::FromStr for ScriptKind {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "classic" => Ok(ScriptKind::Classic),
+            "classic-local" => Ok(ScriptKind::ClassicLocal),
+            "module" => Ok(ScriptKind::Module),
+            "event-handler" => Ok(ScriptKind::EventHandler),
+            "eval" => Ok(ScriptKind::Eval),
+            "function" => Ok(ScriptKind::Function),
+            "worker" => Ok(ScriptKind::Worker),
+            other => Err(other.to_string()),
         }
     }
 }
@@ -53,11 +81,10 @@ pub struct RewriteOpts {
     pub strict: bool,
     /// Proxy origin (e.g. `http://proxy.localhost:18080`). Dynamic-import URLs
     /// are emitted absolute against it. A root-relative `/zp/api/script?…`
-    /// resolves against the IMPORTING context's base, which the membrane
-    /// virtualises to the target host — an inline script then imported
-    /// `https://www.naver.com/zp/api/script?…` and received the target site's
-    /// 404 page (NAVER ad SDK never initialised: `initAd is not defined`).
-    /// Empty keeps the legacy root-relative form for host tests.
+    /// resolves against the importing context's base, which the membrane
+    /// virtualises to the target host; an inline script would then import
+    /// `https://www.naver.com/zp/api/script?…` and receive the target site's
+    /// 404 page. Empty keeps the root-relative form for host tests.
     pub proxy_origin: String,
 }
 
@@ -104,23 +131,18 @@ pub(crate) const DANGEROUS_GLOBALS: &[&str] = &[
     "opener",
     "frames",
     // The embedding <iframe>: natively null when the embedder is another origin, but
-    // every proxied frame shares one physical origin, so the real element — and with
-    // it the embedder's whole DOM — is one bare identifier away.
+    // every proxied frame shares one physical origin, so the real element (and with
+    // it the embedder's whole DOM) is one bare identifier away.
     "frameElement",
     "self",
     "globalThis",
     // Navigation API: bare `navigation` resolves to the real Navigation
-    // object — entries()/currentEntry carry real proxy URLs and navigate()
+    // object; entries()/currentEntry carry real proxy URLs and navigate()
     // walks the real session. Route through the membrane facade.
     "navigation",
-    // 2026-06-07 split-bundle (c.1) Step 2.1.5: shadow-compare 가 NAVER
-    // cross-domain-storage 에서 legacy 는 `__zp_get(globalThis,"Function")` 으로
-    // rewrite 하는데 modern (이 crate) 은 raw `Function` 유지하는 divergence
-    // 발견. target site 가 `Function.prototype.constructor` 으로 native Function
-    // 접근 → `new Function('return globalThis')()` 으로 membrane 우회 가능
-    // (PHASE2 "탈출 없는 감옥" 위반). 추가 sibling: 함수 형태로 eval-equivalent
-    // 인 native들 — `eval` 도 이미 함수지만 식별자로 access 되는 경우는 동일
-    // 회로. 둘 다 dangerous 로 분류.
+    // `Function` and `eval` allow dynamic code evaluation (`new Function('return globalThis')()`
+    // or indirect `var f = eval; f(...)`), so unbound identifier references must route
+    // through the membrane.
     "Function",
     "eval",
 ];
@@ -132,6 +154,10 @@ pub(crate) const DANGEROUS_GLOBALS: &[&str] = &[
 /// has been rewritten (e.g., `iframe.contentWindow.location`).
 pub(crate) const DANGEROUS_MEMBERS: &[&str] = &[
     "location",
+    "document",
+    "window",
+    "self",
+    "globalThis",
     "contentWindow",
     "contentDocument",
     "defaultView",
@@ -140,7 +166,7 @@ pub(crate) const DANGEROUS_MEMBERS: &[&str] = &[
     "top",
     "opener",
     "frames",
-    // URL-shape properties — rewriter doesn't know if base is a Location
+    // URL-shape properties: the rewriter doesn't know if base is a Location
     // instance, so wrap on every access. Membrane's Location-base intercept
     // returns virtualURL.* values for true Location instances; falls
     // through to native for unrelated objects (URL instances are
@@ -155,7 +181,7 @@ pub(crate) const DANGEROUS_MEMBERS: &[&str] = &[
     "hash",
     "origin",
     // `frame.navigation` / `w.navigation` member access: same escape as the
-    // bare global — the facade is what pages must see.
+    // bare global; the facade is what pages must see.
     "navigation",
     // `Error.prepareStackTrace` holds the membrane's stack sanitizer, which V8 reads through the real property. A page
     // reads its own view: natively nothing is there until it assigns one (and `delete` must not remove the sanitizer).
@@ -223,10 +249,10 @@ fn is_runtime_helper(name: &str) -> bool {
     RUNTIME_HELPERS.iter().any(|h| *h == name)
 }
 
-/// A name the page may not bind or write: the runtime's (`__zp_*` / `__ZP_*` on the global object — the helpers above,
+/// A name the page may not bind or write: the runtime's (`__zp_*` / `__ZP_*` on the global object: the helpers above,
 /// and the executors code outside the rewriter calls by name, like an `on*` attribute's `__ZP_EXEC_EVENT`). Not the
 /// temps the rewriter declares itself (rewritten code carries them when it is rewritten again), nor the names of the
-/// runtime's own wrappers — parameters and locals read only outside the code they wrap (`with(__zp_scope)`,
+/// runtime's own wrappers (parameters and locals read only outside the code they wrap: `with(__zp_scope)`,
 /// `eval(__zp_src)`, `__zp_inner__.apply(__zp_self, __zp_args)`). A child frame that reuses its `about:blank` window
 /// boots its runtime with the parent's `Function` facade, which rewrites those wrappers too.
 fn is_reserved_name(name: &str) -> bool {
@@ -243,8 +269,8 @@ fn is_reserved_name(name: &str) -> bool {
     !temp
 }
 
-/// `const{__zp_get,…}=(function(){return this})();` — the helpers as block constants, read off the global object
-/// without naming anything: inside a `with` body the code is sloppy, so a plainly called function expression's `this` is
+/// `const{__zp_get,…}=(function(){return this})();`: the helpers as block constants, read off the global object
+/// without naming anything. Inside a `with` body the code is sloppy, so a plainly called function expression's `this` is
 /// the global object of its realm, and no with object can answer for it.
 pub fn with_helper_prefix() -> String {
     format!("const{{{}}}=(function(){{return this}})();", RUNTIME_HELPERS.join(","))
@@ -329,7 +355,7 @@ fn is_helper_prefix_declaration(decl: &VariableDeclaration<'_>) -> bool {
 }
 
 /// What a script that names a reserved helper becomes: it throws before running anything. An error result would not
-/// do — a non-strict caller runs the unrewritten source when the rewrite fails. No braces, so the dynamic-function
+/// do because a non-strict caller runs the unrewritten source when the rewrite fails. No braces, so the dynamic-function
 /// unwrappers (which slice the body out between the first `{` and the last `}`) refuse it as well.
 fn reserved_name_patch(source_len: usize, name: &str) -> Patch {
     Patch {
@@ -351,10 +377,10 @@ fn is_dangerous_method(name: &str) -> bool {
     DANGEROUS_METHODS.iter().any(|m| *m == name)
 }
 
-/// Patch-mode rewrite — returns the patch list without the re-emit cost.
+/// Patch-mode rewrite: returns the patch list without the re-emit cost.
 /// Saves O(n) string-copy when the caller plans to apply patches in place
 /// over its own buffer (typical Service Worker / page-prelude path).
-/// `code` in the returned `RewriteResult` is the original source verbatim;
+/// `code` in the returned `RewriteResult` is empty;
 /// patches carry the offsets + replacements.
 pub fn rewrite_script_patches(
     source: &str,
@@ -383,7 +409,7 @@ pub fn rewrite_script_patches(
     patches.sort_by_key(|p| p.start);
 
     Ok(RewriteResult {
-        // Patch-mode: caller already has the original bytes — don't waste
+        // Patch-mode: caller already has the original bytes; avoid
         // a heap allocation reconstructing them.
         code: String::new(),
         patches,
@@ -391,11 +417,11 @@ pub fn rewrite_script_patches(
     })
 }
 
-/// D2 composer entry point. Re-runs the rewrite pipeline to derive patches,
+/// Re-runs the rewrite pipeline to derive patches,
 /// applies them over the stripped source, and emits a Source Map v3 JSON
 /// pointing each generated position back to its original byte offset.
 ///
-/// `source_url` is what goes into `"sources": [source_url]` — typically the
+/// `source_url` is what goes into `"sources": [source_url]`, typically the
 /// proxy-side target URL of the script. `sourcesContent` embeds the
 /// *stripped* original source so the browser can render the original
 /// listing without a separate round trip.
@@ -426,8 +452,8 @@ pub fn compose_source_map(
 /// alongside the source). The chained map points DevTools directly at
 /// the pre-bundle TypeScript / pre-minify origin instead of stopping at
 /// the bundled `.js`. When `original_map_json` is empty or malformed,
-/// the function silently falls back to the unchained map — a bad
-/// upstream `.map` must never break DevTools entirely.
+/// the function falls back to the unchained map so a bad
+/// upstream `.map` never breaks DevTools.
 pub fn compose_source_map_chained(
     source: &str,
     opts: &RewriteOpts,
@@ -441,18 +467,16 @@ pub fn compose_source_map_chained(
     Ok(chain_with_original_map(&zp_map, original_map_json, source_url))
 }
 
-/// Rewrite a JavaScript source string per the strict-mode policy.
 /// Parse `source` for the requested kind, promoting a `Classic` request to
 /// module semantics when the program has static import/export (or
 /// import.meta). A classic script cannot contain them (natively a
 /// SyntaxError), so module semantics are right whichever way the browser
 /// loads it. The SW asks for `classic` when a module arrives without its
-/// script type (modulepreload → the generic fetch path), and classic-only
-/// emission — the R1 lexical registry — put every module-level const into the
-/// SHARED global registry: two modules reusing a name threw "Identifier 'R'
-/// has already been declared", and naver's main bundle died at line 0
-/// (2026-09-29). Re-parse as a module so module-only grammar (top-level
-/// await) holds. Dynamic `import()` is not module syntax.
+/// script type (modulepreload to the generic fetch path), and classic-only
+/// emission would put every module-level const into the shared global
+/// lexical registry so two modules reusing a name throw "Identifier 'R'
+/// has already been declared". Re-parse as a module so module-only grammar
+/// (top-level await) holds. Dynamic `import()` is not module syntax.
 fn parse_for_kind<'a>(
     allocator: &'a Allocator,
     source: &'a str,
@@ -492,7 +516,7 @@ pub fn rewrite_script(source: &str, opts: &RewriteOpts) -> Result<RewriteResult,
     let mut patches = visitor.patches;
     patches.sort_by_key(|p| p.start);
     let patched = apply_patches(source, &patches);
-    // D2: strip stale `sourceMappingURL` pragma — the original map describes
+    // Strip stale `sourceMappingURL` pragma; the original map describes
     // the un-rewritten source and would misattribute lines in DevTools.
     let code = strip_sourcemap_pragma(&patched);
 
@@ -595,7 +619,7 @@ fn shift_marker_positions(replacement: &str, offset: u32) -> String {
 }
 
 /// `__zp_with_d` accessor chain for write targets inside `with` bodies.
-/// `chain` is the `\u{2}`-joined temp list, outermost first — resolution
+/// `chain` is the `\u{2}`-joined temp list, outermost first; resolution
 /// prefers the innermost with-object, so the chain nests inside-out.
 fn with_d_chain(chain: &str, name: &str) -> String {
     let mut e = "__zp_get.d".to_string();
@@ -605,7 +629,7 @@ fn with_d_chain(chain: &str, name: &str) -> String {
     e
 }
 
-/// Nested `__zp_with_set` — value is threaded through `(v)=>` fallbacks so a
+/// Nested `__zp_with_set`: value is threaded through `(v)=>` fallbacks so a
 /// side-effecting RHS evaluates exactly once regardless of which scope owns
 /// the name.
 fn with_set_chain(chain: &str, name: &str, value: &str) -> String {
@@ -626,7 +650,7 @@ fn with_assign_chain(chain: &str, name: &str, op: &str, value: &str) -> String {
     e
 }
 
-/// Marker field pair → `(rewritten_obj, rewritten_key)` starting at part
+/// Marker field pair for `(rewritten_obj, rewritten_key)` starting at part
 /// index `i`. Returns None when the spans are malformed.
 fn obj_key(
     parts: &[&str],
@@ -706,19 +730,19 @@ pub fn apply_patches(source: &str, patches: &[Patch]) -> String {
     // already wraps the inner receiver text verbatim, including any
     // dangerous identifier the inner pass also flagged.
     let mut sorted: Vec<&Patch> = patches.iter().collect();
-    // 같은 start 의 zero-width 삽입(R3 var 호이스트)은 문 패치보다 먼저 —
-    // 그렇지 않으면 `p.start < last_end` 에 삼켜져 방출되지 않는다.
+    // Zero-width insertions (`var` hoists) at the same `start` sort before
+    // statement patches so `p.start < last_end` does not swallow them.
     sorted.sort_by(|a, b| {
         a.start
             .cmp(&b.start)
             .then_with(|| (b.end == b.start).cmp(&(a.end == a.start))) // insert first
-            .then_with(|| b.end.cmp(&a.end)) // 그 외는 outer first
+            .then_with(|| b.end.cmp(&a.end)) // outer first
     });
     let mut chosen: Vec<&Patch> = Vec::with_capacity(sorted.len());
     let mut last_end: u32 = 0;
     for p in sorted {
         if p.start < last_end {
-            // Overlaps previous chosen — skip (inner contained in outer).
+            // Overlaps previous chosen; skip (inner contained in outer).
             continue;
         }
         chosen.push(p);
@@ -728,15 +752,17 @@ pub fn apply_patches(source: &str, patches: &[Patch]) -> String {
     let mut out = String::with_capacity(source.len());
     let bytes = source.as_bytes();
     let mut cursor: usize = 0;
-    // 패치 emission 시 leading `(` 가 필요한지 결정.
-    // - 직전 byte 가 identifier-continue (영숫자/`_`/`$`) 면 `return` 같은
-    //   keyword 또는 free identifier 와 glue 됨 → paren 필요.
-    // - 직전 non-ws 토큰이 `new` 면 `new MemberExpression Arguments` 문법이
-    //   call 을 capture 함 → paren 으로 격리 필요.
-    // - 그 외 (`(`/`,`/`{`/`}`/`;`/`=`/`\n` + identifier-continue 가 아닌 경우)
-    //   는 paren 미추가 — `var x=1\n(call)` 같은 ASI 위험 회피.
-    // The `0,` a statement-start form begins with must not join the token before it: minified `else(a||b)[k]=v`
-    // became `else0,(…)` — an identifier `else0` (BBC: 300 ReferenceErrors a load).
+    // Decide whether a patch emission requires a leading `(`:
+    // - If the preceding byte is identifier-continue (alphanumeric/`_`/`$`),
+    //   the replacement would glue onto a keyword like `return` or a free
+    //   identifier, so parenthesise it.
+    // - If the preceding non-whitespace token is `new`, `new MemberExpression Arguments`
+    //   would capture the call, so isolate it with parentheses.
+    // - Otherwise (`(`, `,`, `{`, `}`, `;`, `=`, `\n` not preceded by an identifier
+    //   character), omit the leading `(` to avoid ASI continuation hazards such as
+    //   `var x=1\n(call)`.
+    // The `0,` a statement-start form begins with must not join the token before it:
+    // minified `else(a||b)[k]=v` would otherwise become `else0,(…)`, an identifier `else0`.
     let stmt_zero = |start: usize| -> &'static str {
         let joins = start > 0 && {
             let b = bytes[start - 1];
@@ -786,9 +812,9 @@ pub fn apply_patches(source: &str, patches: &[Patch]) -> String {
         out.push_str(&source[cursor..start]);
         // Marker patches need the receiver source text. Helper recursively
         // applies any contained inner patches to a sub-range of source.
-        // CRITICAL: when shifting markers into the sub-range, also shift the
-        // absolute spans embedded inside the marker replacement strings —
-        // those refer to positions in the ORIGINAL source, which become wrong
+        // When shifting markers into the sub-range, also shift the
+        // absolute spans embedded inside the marker replacement strings;
+        // those refer to positions in the original source, which would be wrong
         // once the marker is applied against a sub-string.
         let rewrite_range = |start: usize, end: usize| -> String {
             if start >= end || end > bytes.len() {
@@ -902,7 +928,7 @@ pub fn apply_patches(source: &str, patches: &[Patch]) -> String {
             match rendered {
                 Some(acc) if needs_paren_prefix(start) => out.push_str(&format!("({acc})")),
                 Some(acc) => out.push_str(&acc),
-                // Malformed marker — the per-link rendering is still valid code.
+                // Malformed marker: the per-link rendering is still valid code.
                 None => out.push_str(&rewrite_range(start, end)),
             }
             cursor = end;
@@ -935,15 +961,15 @@ pub fn apply_patches(source: &str, patches: &[Patch]) -> String {
                 let logical = parts[6] == "1";
                 if vs < ve && ve <= bytes.len() {
                     let value = rewrite_range(vs, ve);
-                    // Binary operator without the trailing '=' — emit the
+                    // Binary operator without the trailing '=': emit the
                     // read/modify/write inline so evaluation order stays
-                    // native (get → RHS → set) and `await`/`yield` inside the
+                    // native (get, then RHS, then set) and `await`/`yield` inside the
                     // RHS keeps working (a helper-with-thunk can't cross an
                     // await boundary).
                     let bin = &op[..op.len() - 1];
                     if logical {
-                        // `x ||= rhs` — `??`/`||`/`&&` must be parenthesized:
-                        // `a ?? b || c` is a SyntaxError, and the emitted form
+                        // `x ||= rhs`: `??`/`||`/`&&` must be parenthesized
+                        // because `a ?? b || c` is a SyntaxError and the emitted form
                         // can land next to any neighbour operator.
                         out.push_str(&format!(
                             "(__zp_get(globalThis,{name:?}){bin}__zp_set(globalThis,{name:?},({value})))"
@@ -973,7 +999,7 @@ pub fn apply_patches(source: &str, patches: &[Patch]) -> String {
             }
         } else if p.replacement.starts_with("\u{1}GLOBAL_DESTR\u{1}") {
             // \u{1}GLOBAL_DESTR\u{1}<name>\u{1}[<chain>\u{1}]
-            // Shorthand destructuring target → explicit `key: <settable>` where
+            // Shorthand destructuring target expands to explicit `key: <settable>` where
             // the settable member is the prelude's write-only sink. Inside
             // `with`, the sink prefers each with-object first.
             let parts: Vec<&str> = p.replacement.split('\u{1}').collect();
@@ -991,7 +1017,7 @@ pub fn apply_patches(source: &str, patches: &[Patch]) -> String {
         } else if p.replacement.starts_with("\u{1}SHORTHAND_GLOBAL_GET\u{1}") {
             // \u{1}SHORTHAND_GLOBAL_GET\u{1}<name>\u{1}
             // Inside an object literal, so no `new`-prefix parenthesisation
-            // applies — but the key must be restored or the property is lost.
+            // applies, but the key must be restored or the property is lost.
             let parts: Vec<&str> = p.replacement.split('\u{1}').collect();
             if parts.len() >= 4 {
                 let name = parts[2];
@@ -1013,7 +1039,7 @@ pub fn apply_patches(source: &str, patches: &[Patch]) -> String {
                 continue;
             }
         } else if p.replacement == "\u{1}THIS_MAP\u{1}" {
-            // `new this.C()` must stay `new (…).C()` — a bare call there would become the constructor
+            // `new this.C()` must stay `new (…).C()` because a bare call there would become the constructor
             out.push_str(if needs_paren_prefix(start) { "(__zp_this(this))" } else { "__zp_this(this)" });
             cursor = end;
             continue;
@@ -1084,17 +1110,12 @@ pub fn apply_patches(source: &str, patches: &[Patch]) -> String {
             }
         } else if p.replacement.starts_with("\u{1}MODULE_URL\u{1}") {
             // \u{1}MODULE_URL\u{1}<src_start>\u{1}<src_end>\u{1}<target_url>\u{1}
-            //
-            // 마커여야 하는 이유: 예전엔 zero-width 패치 두 개(여는 것 /
-            // 닫는 것)로 감쌌는데, 여는 패치가 인자 span 의 **첫 바이트**에
-            // 앉는다. 인자 자체가 리라이트 대상(`u.replace(...)`)이면 그
-            // METHOD_CALL 마커의 range 가 같은 바이트에서 시작하므로 여는
-            // 패치가 `rewrite_range` 의 inner 로 빨려 들어가 안팎이 뒤집혔다:
-            //   import(__zp_call(__zp_module_url(u,"replace",[…]), "<ref>"))
-            // 이러면 `__zp_module_url` 이 문자열이 아니라 **메서드 이름**을
-            // 받게 되어 specifier 매핑이 통째로 사라진다. 마커로 만들면
-            // 안쪽 리라이트는 `rewrite_range` 가 재귀로 처리하고 래퍼는
-            // 항상 바깥에 남는다 — MEMBER_GET/METHOD_CALL 과 같은 방식이다.
+            // Emit as a span marker rather than zero-width boundary patches: if
+            // the argument itself is rewritten (`u.replace(...)`), a zero-width
+            // patch at `src_start` would be pulled inside the inner `METHOD_CALL`
+            // range (`__zp_call(__zp_module_url(u,"replace",[…]), "<ref>")`).
+            // Using a span marker recurses on the inner range via `rewrite_range`
+            // while keeping `__zp_module_url` on the outside.
             let parts: Vec<&str> = p.replacement.split('\u{1}').collect();
             if parts.len() >= 6 {
                 let src_start: usize = parts[2].parse().unwrap_or(0);
@@ -1143,7 +1164,7 @@ pub fn apply_patches(source: &str, patches: &[Patch]) -> String {
         {
             // \u{1}VAR_SET\u{1}<tmp>\u{1}<name>\u{1}<vs>\u{1}<ve>\u{1}
             // \u{1}VAR_WSET\u{1}<tmp>\u{1}<name>\u{1}<vs>\u{1}<ve>\u{1}<chain>\u{1}
-            // `var location = x` — the declarator becomes a fresh binding
+            // `var location = x`: the declarator becomes a fresh binding
             // initialised to the membrane write's (void 0) result.
             let parts: Vec<&str> = p.replacement.split('\u{1}').collect();
             if parts.len() >= 7 {
@@ -1158,7 +1179,7 @@ pub fn apply_patches(source: &str, patches: &[Patch]) -> String {
                     } else {
                         format!("__zp_set(globalThis,{name:?},({value}))")
                     };
-                    // Declaration position — never parenthesise.
+                    // Declaration position: never parenthesise.
                     out.push_str(&format!("{tmp}=({write},void 0)"));
                     cursor = end;
                     continue;
@@ -1167,8 +1188,8 @@ pub fn apply_patches(source: &str, patches: &[Patch]) -> String {
         } else if p.replacement.starts_with("\u{1}WTREF\u{1}")
             || p.replacement.starts_with("\u{1}WTREF_STMT\u{1}")
         {
-            // \u{1}WTREF\u{1}<chain>\u{1}<name>\u{1} — write target inside `with`:
-            // `__zp_with_d` accessor whose .v prefers the with-object.
+            // \u{1}WTREF\u{1}<chain>\u{1}<name>\u{1}: write target inside `with`,
+            // emitting a `__zp_with_d` accessor whose `.v` prefers the with-object.
             let parts: Vec<&str> = p.replacement.split('\u{1}').collect();
             if parts.len() >= 5 {
                 let name = parts[3];
@@ -1181,7 +1202,7 @@ pub fn apply_patches(source: &str, patches: &[Patch]) -> String {
                 continue;
             }
         } else if p.replacement.starts_with("\u{1}WITH_OBJ\u{1}") {
-            // \u{1}WITH_OBJ\u{1}<tmp>\u{1}<os>\u{1}<oe>\u{1} — `with (<tmp>=(obj))`.
+            // \u{1}WITH_OBJ\u{1}<tmp>\u{1}<os>\u{1}<oe>\u{1}: `with (<tmp>=(obj))`.
             let parts: Vec<&str> = p.replacement.split('\u{1}').collect();
             if parts.len() >= 6 {
                 let tmp = parts[2];
@@ -1279,7 +1300,7 @@ pub fn apply_patches(source: &str, patches: &[Patch]) -> String {
             || p.replacement.starts_with("\u{1}CASSIGN_STMT\u{1}")
         {
             // \u{1}CASSIGN\u{1}<os>\u{1}<oe>\u{1}<ks>\u{1}<ke>\u{1}<op>\u{1}<vs>\u{1}<ve>\u{1}<logical>\u{1}
-            // Same accessor-adapter Reference as CREF — the key is captured
+            // Same accessor-adapter Reference as CREF: the key is captured
             // once in `b/k` and the engine keeps native ordering.
             let parts: Vec<&str> = p.replacement.split('\u{1}').collect();
             if parts.len() >= 11 {
@@ -1308,9 +1329,9 @@ pub fn apply_patches(source: &str, patches: &[Patch]) -> String {
         } else if p.replacement.starts_with("\u{1}CREF\u{1}")
             || p.replacement.starts_with("\u{1}CREF_STMT\u{1}")
         {
-            // \u{1}CREF\u{1}<os>\u{1}<oe>\u{1}<ks>\u{1}<ke>\u{1} — computed member in
+            // \u{1}CREF\u{1}<os>\u{1}<oe>\u{1}<ks>\u{1}<ke>\u{1}: computed member in
             // a Reference position (`x[k]++`, destructuring / for-of targets).
-            // Same accessor-adapter trick as MEMBER_REF, with a stored key.
+            // Same accessor-adapter pattern as MEMBER_REF, with a stored key.
             let parts: Vec<&str> = p.replacement.split('\u{1}').collect();
             if let Some(((obj, key), _)) = obj_key(&parts, 2, bytes.len(), &rewrite_range) {
                 if parts[1] == "CREF_STMT" {
@@ -1323,8 +1344,8 @@ pub fn apply_patches(source: &str, patches: &[Patch]) -> String {
                 continue;
             }
         } else if p.replacement.starts_with("\u{1}OGET\u{1}") {
-            // \u{1}OGET\u{1}<os>\u{1}<oe>\u{1}L\u{1}<prop>\u{1} — `x?.prop`
-            // \u{1}OGET\u{1}<os>\u{1}<oe>\u{1}E\u{1}<ks>\u{1}<ke>\u{1} — `x?.[k]`
+            // \u{1}OGET\u{1}<os>\u{1}<oe>\u{1}L\u{1}<prop>\u{1}: `x?.prop`
+            // \u{1}OGET\u{1}<os>\u{1}<oe>\u{1}E\u{1}<ks>\u{1}<ke>\u{1}: `x?.[k]`
             let parts: Vec<&str> = p.replacement.split('\u{1}').collect();
             if parts.len() >= 6 {
                 let os: usize = parts[2].parse().unwrap_or(0);
@@ -1410,7 +1431,7 @@ pub fn apply_patches(source: &str, patches: &[Patch]) -> String {
                         // \u{1}CCALL\u{1}…\u{1}<as>\u{1}<ae>\u{1}<group>\u{1}[S\u{1}]
                         let (group, at_stmt) = if optional { (0, false) } else { guard_fields(&parts, ai + 2) };
                         // The arguments appear in both arms (one runs): only short ones, and none holding guards of their
-                        // own — a copy of those would double again at every level.
+                        // own; a copy of those would double again at every level.
                         let guard = guard_temps(group).filter(|_| args.len() <= 512 && !args.contains("__zp_t_"));
                         let e = if optional {
                             format!("__zp_ocall(({obj}),{key},[{args}],{flags})")
@@ -1434,10 +1455,10 @@ pub fn apply_patches(source: &str, patches: &[Patch]) -> String {
             }
         } else if p.replacement.starts_with("\u{1}DEVAL\u{1}") {
             // \u{1}DEVAL\u{1}<as>\u{1}<ae>\u{1}<strict>\u{1}<global-site>\u{1}<desc-object>
-            // R2: `eval(args)` → `__zp_eval.call(this, [args][0], desc, strict[, 1])`.
+            // `eval(args)` becomes `__zp_eval.call(this, [args][0], desc, strict[, 1])`.
             // `[args][0]` evaluates every argument in order (native eager
-            // evaluation) and yields the first — `eval(a,b)` semantics.
-            // A trailing `1` marks a SLOPPY eval in the top level of a classic script: natively its `var` and `function`
+            // evaluation) and yields the first (`eval(a,b)` semantics).
+            // A trailing `1` marks a sloppy eval in the top level of a classic script: natively its `var` and `function`
             // declarations become properties of the global object, which the runtime can only do by running it as global
             // code (inside the helper that gives a direct eval its caller's bindings they stay local to the helper).
             let parts: Vec<&str> = p.replacement.splitn(7, '\u{1}').collect();
@@ -1455,11 +1476,10 @@ pub fn apply_patches(source: &str, patches: &[Patch]) -> String {
                     parts[4].to_string()
                 };
                 let desc = parts[6].trim_end_matches('\u{1}');
-                // `.call(this)` 로 호출자의 this 를 __zp_eval → 헬퍼 → eval
-                // thisEnv 까지 그대로 전달한다 (direct-eval this parity).
-                // callee 를 함께 넘긴다 — `var eval = f` 같이 eval 이름이
-                // 재바인딩된 경우 런타임이 intrinsic 이 아니면 그 함수를
-                // 부른다(네이티브는 eval 바인딩 값을 그대로 호출).
+                // `.call(this)` forwards the caller's `this` through `__zp_eval` to the
+                // eval `thisEnv` (direct-eval `this` parity).
+                // Pass the callee alongside it so if `eval` was rebound (`var eval = f`),
+                // the runtime invokes that function rather than the intrinsic.
                 let e = format!(
                     "__zp_eval.call(this,__zp_get(globalThis,\"eval\"),[{args}],{desc},{strict})"
                 );
@@ -1592,8 +1612,8 @@ pub fn apply_patches(source: &str, patches: &[Patch]) -> String {
             || p.replacement.starts_with("\u{1}MEMBER_A_STMT\u{1}")
         {
             // \u{1}MEMBER_A\u{1}<os>\u{1}<oe>\u{1}<prop>\u{1}<op>\u{1}<vs>\u{1}<ve>\u{1}<logical>\u{1}
-            // Accessor-adapter Reference — same trick as MEMBER_REF: the
-            // engine itself owns get→RHS→set ordering, logical
+            // Accessor-adapter Reference (same pattern as MEMBER_REF): the
+            // engine itself owns get/RHS/set evaluation order, logical
             // short-circuiting, and await/yield in the RHS.
             let parts: Vec<&str> = p.replacement.split('\u{1}').collect();
             if parts.len() >= 10 {
@@ -1623,9 +1643,9 @@ pub fn apply_patches(source: &str, patches: &[Patch]) -> String {
                 }
             }
         } else if p.replacement.starts_with("\u{1}FOR_CAP\u{1}") {
-            // \u{1}FOR_CAP\u{1}<counter>\u{1}<rs>\u{1}<re>\u{1} — splice the
+            // \u{1}FOR_CAP\u{1}<counter>\u{1}<rs>\u{1}<re>\u{1}: splice the
             // counter into the (empty) test slot of `for(init;;update)`.
-            // The covered region is `;…;` between init and update/body —
+            // The covered region is `;…;` between init and update/body;
             // insert right after its first `;`.
             let parts: Vec<&str> = p.replacement.split('\u{1}').collect();
             if parts.len() >= 6 {
@@ -1654,20 +1674,16 @@ pub fn apply_patches(source: &str, patches: &[Patch]) -> String {
     out
 }
 
-/// D2: remove a trailing `sourceMappingURL` pragma. Per source-map spec
-/// it must be on the last non-empty line of the file. We're strict about
-/// LAST occurrence and forgiving about whitespace.
+/// Remove a trailing `sourceMappingURL` pragma. Per the source-map spec
+/// it must be on the last non-empty line of the file. Strict about the
+/// last occurrence and forgiving about whitespace.
 pub fn strip_sourcemap_pragma(src: &str) -> String {
-    // Scan only the tail; pragmas live at the end of the file. 4 KiB
-    // is generous — typical pragmas are < 200 bytes.
+    // Scan only the tail; pragmas live at the end of the file (4 KiB
+    // is generous since typical pragmas are < 200 bytes).
     //
-    // `len() - 4096` is a RAW BYTE offset and routinely lands inside a
-    // multi-byte character, where slicing panics: NAVER's document ends with a
-    // ~200 KB inline `EAGER-DATA` JSON blob full of Korean text, and the cut
-    // fell inside '일' → `start byte index 204945 is not a char boundary` →
-    // wasm trap ("RuntimeError: unreachable") inside `HtmlTxn.write` → the SW
-    // errored the document stream → blank page. Snap back to a boundary; the
-    // few extra bytes scanned are harmless.
+    // `len() - 4096` is a raw byte offset and can land inside a
+    // multi-byte UTF-8 character, where slicing panics. Snap back to a
+    // char boundary before slicing.
     let mut scan_from = src.len().saturating_sub(4096);
     while scan_from > 0 && !src.is_char_boundary(scan_from) {
         scan_from -= 1;
@@ -1699,16 +1715,15 @@ pub fn strip_sourcemap_pragma(src: &str) -> String {
     src[..cut_at].to_string()
 }
 
-/// Persistent rewriter instance — reuses a single bump allocator across
+/// Persistent rewriter instance that reuses a single bump allocator across
 /// calls so warm-path rewrites amortise the arena allocation cost.
 ///
-/// Memory plan (#2): the OXC AST is a bump arena. Allocating a fresh
-/// `Allocator` per call walks `mmap` / `VirtualAlloc` system calls and
-/// reserves new pages every time — for small (≤ 10 KB) scripts the arena
-/// init cost dominates parse cost. We instead own one `Allocator`, run
-/// parse + visit + emit inside a single method scope so the AST never
-/// escapes, then `reset()` the allocator to reclaim the bytes (capacity
-/// stays — the pages are reused on the next call).
+/// The OXC AST is a bump arena. Allocating a fresh `Allocator` per call
+/// walks `mmap` / `VirtualAlloc` system calls and reserves new pages every
+/// time; for small (<= 10 KB) scripts the arena init cost dominates parse
+/// cost. Owning one `Allocator`, running parse + visit + emit inside a
+/// single method scope so the AST never escapes, and calling `reset()`
+/// reclaims the bytes while keeping page capacity for the next call.
 pub struct RewriterInstance {
     allocator: Allocator,
 }
@@ -1759,10 +1774,9 @@ impl RewriterInstance {
         let patched = apply_patches(source, &patches);
         let code = strip_sourcemap_pragma(&patched);
 
-        // CRITICAL: reset must happen AFTER `code` (an owned String) is
-        // built and `patches` (which carry owned `String` replacements)
-        // are detached from the AST nodes. Both are heap-allocated outside
-        // the arena, so the reset is safe.
+        // Reset must happen after `code` (an owned String) is built and
+        // `patches` (which carry owned `String` replacements) are detached
+        // from the AST nodes. Both are heap-allocated outside the arena.
         self.allocator.reset();
 
         Ok(RewriteResult {
@@ -1772,7 +1786,45 @@ impl RewriterInstance {
         })
     }
 
-    /// Explicit reset hook — usually unnecessary (`rewrite` resets at the
+    /// Patch-mode rewrite reusing the persistent bump arena. Returns the
+    /// sorted patch list without allocating or emitting the full output string.
+    pub fn rewrite_patches(
+        &mut self,
+        source: &str,
+        opts: &RewriteOpts,
+    ) -> Result<RewriteResult, RewriteError> {
+        let (ret, kind) = parse_for_kind(&self.allocator, source, opts.kind);
+
+        if !ret.errors.is_empty() && opts.strict {
+            let msg = ret
+                .errors
+                .iter()
+                .map(|e| e.to_string())
+                .collect::<Vec<_>>()
+                .join("; ");
+            self.allocator.reset();
+            return Err(RewriteError::ParseFailed(msg));
+        }
+
+        let mut visitor =
+            RewriteVisitor::new(opts.target_url.clone(), opts.proxy_origin.clone(), kind);
+        visitor.local_this = opts.kind == ScriptKind::ClassicLocal;
+        visitor.visit_program(&ret.program);
+        visitor.refuse_reserved_names(&ret.program, source.len());
+
+        let mut patches = visitor.patches;
+        patches.sort_by_key(|p| p.start);
+
+        self.allocator.reset();
+
+        Ok(RewriteResult {
+            code: String::new(),
+            patches,
+            diagnostics: visitor.diagnostics,
+        })
+    }
+
+    /// Explicit reset hook; usually unnecessary (`rewrite` resets at the
     /// end of each call), but exposed for callers that want to force-drop
     /// arena capacity after a one-off large rewrite.
     pub fn reset(&mut self) {
@@ -1784,9 +1836,9 @@ impl RewriterInstance {
 struct RewriteVisitor {
     patches: Vec<Patch>,
     diagnostics: Vec<String>,
-    /// Inline guards (`guard_claim`): one entry per function being visited — where its temps are declared (the body's
-    /// closing brace; `None` where a `var` cannot go: the top level, an expression-bodied arrow, parameters, a class
-    /// body) and how many temp groups its sites used.
+    /// Inline guards (`guard_claim`): one entry per function being visited, recording where its temps are declared
+    /// (the body's closing brace, or `None` where a `var` cannot go: the top level, an expression-bodied arrow,
+    /// parameters, a class body) and how many temp groups its sites used.
     guard_fns: Vec<(Option<u32>, u32)>,
     /// The highest temp group claimed inside the operands visited since the enclosing site began.
     guard_height: u32,
@@ -1795,26 +1847,27 @@ struct RewriteVisitor {
     /// Stack of lexical scopes; each scope holds names that should NOT be
     /// rewritten because they shadow the dangerous globals.
     scopes: Vec<HashSet<String>>,
-    // R3: (varEnv 의 scopes 인덱스, `var` 삽입 위치) — 함수/화살표 진입 시
-    // push. `eval('var x=1')` 의 var 선언은 sloppy direct eval 에서 호출자
-    // varEnv 에 생기므로, 리터럴 소스의 var 이름을 미리 호이스트해 둔다.
+    // (`varEnv` index in `scopes`, `var` insertion offset), pushed when
+    // entering a function or arrow. `eval('var x=1')` in sloppy direct eval
+    // binds in the caller's `varEnv`, so `var` names from literal eval
+    // strings are hoisted into the enclosing `varEnv`.
     var_env_stack: Vec<(usize, u32)>,
     /// Counts infinite-loop detections so the trap notebook can be
     /// updated with prevalence data after a real-site capture.
     infinite_loop_caps: u32,
-    /// Target page URL — used as base when resolving dynamic
+    /// Target page URL used as base when resolving dynamic
     /// `import("./relative.js")` arguments to an absolute proxy
-    /// route. Empty / unparsable → dynamic import rewriting falls
+    /// route. When empty or unparsable, dynamic import rewriting falls
     /// back to leaving the source alone (the original URL still
     /// passes through the SW fetch path; only relative paths break).
     target_url: String,
-    /// See [`RewriteOpts::proxy_origin`] — makes dynamic-import URLs absolute
+    /// See [`RewriteOpts::proxy_origin`]: makes dynamic-import URLs absolute
     /// so a virtualised document base can't redirect them to the target host.
     proxy_origin: String,
     /// Input script kind. Classic global `var`/`function` declarations for
-    /// browser-unforgeable names (`location`, `document`, …) do NOT create
-    /// bindings, so they must not be recorded as shadowing — but only at
-    /// `fn_depth == 0` of a classic program.
+    /// browser-unforgeable names (`location`, `document`, …) do not create
+    /// bindings, so they must not be recorded as shadowing at `fn_depth == 0`
+    /// of a classic program.
     kind: ScriptKind,
     /// Number of enclosing *function* scopes. Arrows DO count: `var` inside
     /// an arrow body binds to the arrow itself, never the outer program.
@@ -1828,41 +1881,42 @@ struct RewriteVisitor {
     local_this: bool,
     /// >0 while walking an assignment-target subtree (for-of/in left,
     /// destructuring targets, update operands). Dangerous identifiers there
-    /// become `__zp_get.d.<name>` member refs — calls are not valid targets.
+    /// become `__zp_get.d.<name>` member refs because calls are not valid targets.
     in_target: u32,
     /// Fresh-name sequence for `__zp_vdcl_*` / `__zp_dp_*` / `__zp_sk_*` /
     /// `__zp_w_*` temporaries the transform introduces.
     decl_seq: u32,
-    /// Active `with` object temps, outermost → innermost. Dangerous
+    /// Active `with` object temps, outermost to innermost. Dangerous
     /// identifier reads inside a `with` body must resolve against the object
     /// first (`__zp_with_get`), falling back to the next `with`/global.
     with_temps: Vec<String>,
     /// Span starts of the synthetic `ExpressionStatement` OXC wraps an
-    /// expression-bodied arrow's body in — not a statement position.
+    /// expression-bodied arrow's body in (not a statement position).
     arrow_expr_bodies: HashSet<u32>,
     /// Per `for-of`/`for-in` head: (dangerous name, temp it was renamed to)
     /// pairs whose sinks must run once per iteration inside the loop body.
     iter_sinks: Vec<Vec<(String, String)>>,
-    /// True while visiting the `left` of a `for-of`/`for-in` — var
+    /// True while visiting the `left` of a `for-of`/`for-in`: var
     /// declarators there have no initializer, so dangerous bindings rename
     /// to temps and sink inside the body instead of a `var` transform.
     for_iter_head: bool,
     /// >0 while visiting a *bare* statement body (`if(c) stmt`, `while(c)
     /// stmt`, `label: stmt`, …). A `let` inserted in front of such a
-    /// statement is a SyntaxError — capped loops must block-wrap instead.
+    /// statement is a SyntaxError, so capped loops must block-wrap instead.
     unbraced_body: u32,
     /// Label names of the labeled statement(s) whose *direct* body is the
-    /// statement about to be visited. Consumed by loop visitors — a
-    /// block-wrapped capped loop re-binds them on a fresh inner label so
+    /// statement about to be visited. Consumed by loop visitors so a
+    /// block-wrapped capped loop re-binds them on a fresh inner label and
     /// `continue outer` keeps working.
     pending_labels: Vec<String>,
     /// (source label, fresh label) rewrites active for `break`/`continue`
     /// inside a block-wrapped capped loop.
     label_renames: Vec<(String, String)>,
-    /// R4: 현재 탐색 위치가 sloppy 모드인가. Annex B.3.2/B.3.3/B.3.4 —
-    /// sloppy 에서 블록·레이블·단일문 위치의 함수 선언은 enclosing varEnv 에
-    /// var 바인딩을 올리므로 스코프 수집에 var-like 로 등록해야 한다.
-    /// `'use strict'` 지시어를 만나는 program/function/class 경계에서 꺼진다.
+    /// Whether the current traversal position is in sloppy mode. Under
+    /// Annex B.3.2/B.3.3/B.3.4, function declarations in block, labeled, or
+    /// single-statement positions in sloppy mode hoist a `var` binding to the
+    /// enclosing `varEnv` and must be registered as var-like during scope
+    /// collection. Disabled at program/function/class boundaries with `'use strict'`.
     cur_sloppy: bool,
 }
 
@@ -1897,8 +1951,8 @@ impl RewriteVisitor {
         }
     }
 
-    /// Directive prologue 에 `'use strict'` 가 있는지 — sloppy 판정은
-    /// program/function body 의 선두 지시어만 본다(블록 내 문자열은 무관).
+    /// Check whether the directive prologue contains `'use strict'` (only
+    /// leading directives of a program or function body affect strictness).
     fn has_use_strict<'a>(directives: &[Directive<'a>]) -> bool {
         directives.iter().any(|d| d.directive.as_str() == "use strict")
     }
@@ -1916,13 +1970,14 @@ impl RewriteVisitor {
         }
     }
 
-    /// R2: direct-eval call-site 의 스코프 디스크립터 — 현재 가시한 모든
-    /// 선언명을 get/set 접근자로 방출한다. 접근자 본문의 식별자는 방출된
-    /// 텍스트라 리라이트를 거치지 않고 call-site 의 어휘 위치에서 해석된다
-    /// — 중첩 스코프의 같은 이름은 어차피 최내측 바인딩을 가리키므로
-    /// dedupe 만 하면 된다. const 쓰기는 setter 본문 `n=v` 가 네이티브로
-    /// TypeError 를 던진다. `arguments`/`this`/`new.target`/`super` 는
-    /// 스코프 목록에 없고, runner 화살표가 호출자 환경을 그대로 계승한다.
+    /// Scope descriptor for a direct-eval call site: emits get/set accessors
+    /// for all currently visible declared names. Identifiers inside accessor
+    /// bodies are emitted text and resolve at the call site's lexical position
+    /// without rewriting; duplicate names across nested scopes resolve to the
+    /// innermost binding so deduplication suffices. Writes to `const` bindings
+    /// throw a native `TypeError` inside the setter body `n=v`. `arguments`,
+    /// `this`, `new.target`, and `super` are not in the scope list and are
+    /// inherited by the runner arrow from the caller environment.
     fn caller_desc_object(&self) -> String {
         let mut seen = HashSet::new();
         let mut parts: Vec<String> = Vec::new();
@@ -1933,11 +1988,10 @@ impl RewriteVisitor {
                 }
             }
         }
-        // `arguments` 는 묵시적 바인딩이라 스코프 목록에 없다 — shorthand
-        // 데이터 프로퍼티로 호출자의 arguments 객체를 그대로 싣는다(getter
-        // 본문의 `arguments` 는 getter 자신의 것이라 쓸 수 없다). 화살표는
-        // 비함수라 nt_depth 제외. 탑레벨(비함수)에서는 scope 프록시가
-        // undefined 를 돌려 네이티브의 "바인딩 없음" 과 같다.
+        // `arguments` is an implicit binding not present in the scope list;
+        // emit it as a shorthand data property carrying the caller's `arguments`
+        // object (inside a getter body, `arguments` would refer to the getter's
+        // own arguments). Excluded for arrows (`nt_depth == 0` at top level).
         if self.nt_depth > 0 {
             parts.push("arguments".to_string());
         }
@@ -1948,9 +2002,9 @@ impl RewriteVisitor {
         self.scopes.push(HashSet::new());
     }
 
-    /// `var` 호이스트 삽입 위치: 지시어 프롤로그 뒤(그 앞에 `var` 를 넣으면
-    /// `'use strict'` 가 지시어로서 죽어 strict 가 sloppy 로 열화한다).
-    /// 본문이 비었으면 `{` 직후.
+    /// `var` hoist insertion offset: after the directive prologue (inserting
+    /// `var` before `'use strict'` would invalidate the directive), or
+    /// immediately after `{` when the body is empty.
     fn body_insert_pos(body: &FunctionBody) -> u32 {
         if let Some(d) = body.directives.last() {
             return d.span.end;
@@ -1961,23 +2015,22 @@ impl RewriteVisitor {
         body.span.start + 1
     }
 
-    /// R3: sloppy direct eval 의 리터럴 소스가 선언하는 top-level
-    /// `var`/`function` 이름을 둘러싼 varEnv 에 호이스트한다.
-    /// eval'd 소스의 `var x=1` 은 재작성되면 `__zp_set(globalThis,"x",1)`
-    /// 가 되고, set() 의 desc consult 가 desc setter → 호출자 바인딩으로
-    /// 라우팅한다 — 그러려면 호출자 쪽에 바인딩이 미리 존재해야 한다.
-    /// (네이티브 sloppy direct eval 도 var 를 호출자 varEnv 에 만든다.)
-    /// strict eval/프로그램 레벨은 불필요: strict 는 누출 없고, 탑레벨은
-    /// varEnv 자체가 전역이라 `__zp_set` 이 그대로 네이티브 동작.
+    /// Hoist top-level `var`/`function` names declared in a sloppy direct
+    /// `eval` string literal into the enclosing `varEnv`. In the evaluated
+    /// source, `var x=1` rewrites to `__zp_set(globalThis,"x",1)`, which
+    /// consults the scope descriptor setter to route the write to the caller
+    /// binding, requiring that binding to exist in the caller's `varEnv`.
+    /// Unnecessary for strict eval (which does not leak `var`) or top-level
+    /// classic scope (where `varEnv` is already the global object).
     fn hoist_eval_var_decls(&mut self, src: &str) {
         let Some(&(scope_idx, insert_pos)) = self.var_env_stack.last() else { return };
         if insert_pos == u32::MAX {
-            return; // 표현식 본문 화살표 등 삽입 불가 컨텍스트
+            return; // expression-bodied arrow or other non-insertable context
         }
         let alloc = Allocator::new();
         let ret = Parser::new(&alloc, src, SourceType::cjs()).parse();
         if !ret.errors.is_empty() {
-            return; // 런타임이 SyntaxError 를 던진다 — 추측 호이스트 금지
+            return; // runtime will throw SyntaxError; do not speculate on hoists
         }
         let mut names: Vec<String> = Vec::new();
         collect_scope_decl_names(&ret.program.body, true, true, &mut |name, cat| {
@@ -1987,8 +2040,8 @@ impl RewriteVisitor {
         });
         let mut fresh: Vec<String> = Vec::new();
         for n in names {
-            // 이미 같은 varEnv 스코프에 선언된 이름은 삽입 불필요 — desc
-            // 접근자가 기존 바인딩을 그대로 가리킨다.
+            // Names already declared in the same `varEnv` scope need no extra
+            // `var` insertion; the descriptor accessor already targets them.
             if self.scopes[scope_idx].insert(n.clone()) {
                 fresh.push(n);
             }
@@ -2002,14 +2055,15 @@ impl RewriteVisitor {
         }
     }
 
-    /// R1: classic top-level `let`/`const`/`class` 는 스크립트를 넘어 지속되는
-    /// 공유 전역 렉시컬 환경에 산다 — 하지만 각 스크립트가 별도 eval 로
-    /// 실행되면 그 렉시컬 환경은 버려진다. 프로그램 앞에 `__zp_lex_decl` 로
-    /// 이름을 등록(재선언/var 충돌 시 SyntaxError, 비configurable 전역
-    /// 프로퍼티 충돌 포함)하고, 각 선언문 뒤에 `__zp_lex_bind` accessor
-    /// 클로저를 심어 다음 스크립트가 살아있는 바인딩을 읽게 한다.
-    /// `varlikes` 는 같은 프로그램의 top-level var/function 이름 — 같은
-    /// 스크립트 안의 `var x; let x` 충돌도 decl 시점에 잡는다.
+    /// Classic top-level `let`/`const`/`class` bindings live in the shared
+    /// global lexical environment across scripts, whereas separate `eval`
+    /// invocations discard their lexical environment on return. Register
+    /// top-level lexical names up front via `__zp_lex_decl` (detecting
+    /// redeclarations, `var` collisions, and non-configurable global property
+    /// conflicts) and append `__zp_lex_bind` accessor closures after each
+    /// declaration so subsequent scripts read and write the live binding.
+    /// `varlikes` holds top-level `var`/`function` names in the same program
+    /// to catch same-script `var x; let x` collisions at declaration time.
     fn emit_lex_registry<'a>(&mut self, program: &Program<'a>, varlikes: &[String]) {
         let mut lex: Vec<(String, &'static str)> = Vec::new();
         let mut binds: Vec<(u32, String)> = Vec::new();
@@ -2024,10 +2078,10 @@ impl RewriteVisitor {
                     let mut calls = String::new();
                     for n in &names {
                         lex.push((n.clone(), kind));
-                        // const 의 setter 는 throw 하는 클로저 — prelude 쪽
-                        // set=null 분기(TypeError throw)는 throw 사이트가
-                        // prelude 라 에러 filename 을 새므로, eval 코드 안의
-                        // 화살표 함수가 던지게 해 sourceURL 이 잡히게 한다.
+                        // For `const`, emit a throwing setter closure inside the
+                        // evaluated script so the error stack attributes the
+                        // `TypeError` to the script's `sourceURL` rather than
+                        // the prelude.
                         calls += &if kind == "const" {
                             format!("__zp_lex_bind({n:?},()=>{n},v=>{{throw new TypeError('Assignment to constant variable.')}});")
                         } else {
@@ -2049,7 +2103,7 @@ impl RewriteVisitor {
         if lex.is_empty() && varlikes.is_empty() {
             return;
         }
-        // 삽입은 directive 뒤·첫 문 앞 — 'use strict' 지시자가 깨지면 안 된다.
+        // Insert after directives and before the first statement so `'use strict'` stays intact.
         let pos = program
             .directives
             .last()
@@ -2066,10 +2120,9 @@ impl RewriteVisitor {
             .map(|n| format!("{n:?}"))
             .collect::<Vec<_>>()
             .join(",");
-        // throw 는 eval 코드 안에서 일어나야 한다 — prelude 헬퍼가 던지면
-        // 에러 이벤트 filename 이 prelude URL 을 샌다. `__zp_lex_decl` 은
-        // 충돌 이름을 반환하고 방출 코드가 던진다 (네이티브와 같은
-        // "Identifier 'x' has already been declared" 메시지).
+        // Throw inside the evaluated code so error event filenames match the
+        // script rather than the prelude URL. `__zp_lex_decl` returns the
+        // colliding identifier name when a conflict is found.
         self.patches.push(Patch {
             start: pos,
             end: pos,
@@ -2077,10 +2130,9 @@ impl RewriteVisitor {
                 ";{{const __zp_bad=__zp_lex_decl({{{lexmap}}},[{vararr}]);if(__zp_bad!==undefined)throw new SyntaxError(\"Identifier '\"+__zp_bad+\"' has already been declared\");}}"
             ),
         });
-        // 앞의 `;` 는 필수다. 세미콜론이 있는 선언의 span 은 `;` 뒤에서
-        // 끝나지만, ASI 에 기대는 선언(`const a = { x: 1 }` 개행)은 초기화식
-        // 끝에서 끝난다 — 그대로 붙이면 `{ x: 1 }__zp_lex_bind(` 로 스크립트
-        // 전체가 SyntaxError 가 된다. 이미 `;` 가 있으면 빈 문이라 무해하다.
+        // A leading `;` is required: semicolon-terminated declarations include
+        // `;` in their span, but ASI declarations (`const a = { x: 1 }\n`) end
+        // at the initializer and would otherwise glue onto `__zp_lex_bind(`.
         for (pos, calls) in binds {
             self.patches.push(Patch {
                 start: pos,
@@ -2094,11 +2146,11 @@ impl RewriteVisitor {
         self.scopes.pop();
     }
 
-    // ── Inline guards ──
-    // Every computed member read, write and call goes through a helper (`__zp_get(o,k)`, `__zp_set`, `__zp_call`). That
+    // Inline guards:
+    // Every computed member read, write, and call goes through a helper (`__zp_get(o,k)`, `__zp_set`, `__zp_call`). That
     // is one access site in the runtime for every access the page makes: V8's inline cache there sees every shape and
-    // stays megamorphic, and a call allocates its argument array — Turnstile's VM spent 3.2 s of 15 in the three.
-    // An array, a string, a typed array or a function is never a window, document, Location or facade, so for those the
+    // stays megamorphic, and a call allocates its argument array.
+    // An array, a string, a typed array, or a function is never a window, document, Location, or facade, so for those the
     // native access is the membrane's answer too (the helpers' own fast path, `__zp_fast` / `__zp_fastset`). The site
     // keeps it behind that guard, its operands in temps so each is evaluated once, in native order; anything else takes
     // the helper. Temps are `var`s of the enclosing function (declared at its end), in groups of three: a site's group
@@ -2112,8 +2164,8 @@ impl RewriteVisitor {
         self.guard_height = self.guard_height.max(saved);
     }
 
-    /// The temp group for the site whose operands were just visited — 0 where no `var` can hold them, and inside a page
-    /// `with`, whose object answers for every name first.
+    /// The temp group for the site whose operands were just visited (0 where no `var` can hold them, and inside a page
+    /// `with`, whose object answers for every name first).
     fn guard_claim(&mut self) -> u32 {
         if !self.with_temps.is_empty() {
             return 0;
@@ -2170,19 +2222,14 @@ impl RewriteVisitor {
     /// Rewrite one module specifier string literal to a proxy-routed URL.
     ///
     /// Shared by dynamic `import()` and every static form (`import … from`,
-    /// bare `import 'x'`, `export … from`, `export * from`). Static module
-    /// syntax used to be skipped entirely — only `visit_import_expression`
-    /// rewrote specifiers. Because we serve modules from
-    /// `<proxy>/zp/api/script?u=<target>&kind=module`, a relative specifier
-    /// left alone resolves against `/zp/api/`; the browser then requests
-    /// `<proxy>/zp/api/<name>`, which the SW maps onto the target host and the
-    /// target answers 404. That is exactly the long-standing
-    /// `/zp/api/gfp-display-sdk.js` 404 on NAVER.
+    /// bare `import 'x'`, `export … from`, `export * from`). Because modules are
+    /// served from `<proxy>/zp/api/script?u=<target>&kind=module`, an unrewritten
+    /// relative specifier resolves against `/zp/api/` and requests
+    /// `<proxy>/zp/api/<name>`, which the SW maps onto the target host and 404s.
     fn rewrite_module_specifier(&mut self, lit: &StringLiteral<'_>) {
         let raw = lit.value.as_str();
-        // Skip schemes the SW can't proxy and bare specifiers (bare specs are
-        // package-manager names with no URL semantics — they never round-trip
-        // through fetch).
+        // Skip schemes the SW cannot proxy and bare specifiers (package-manager
+        // names with no URL semantics that never round-trip through fetch).
         let lower = raw.trim_start().to_ascii_lowercase();
         if lower.starts_with("data:")
             || lower.starts_with("blob:")
@@ -2199,7 +2246,7 @@ impl RewriteVisitor {
         let Some(proxied) = proxied_module_url(raw, &self.target_url, &self.proxy_origin) else {
             return;
         };
-        // The span covers the *literal* node including its quotes. Re-quote
+        // The span covers the literal node including its quotes. Re-quote
         // with single quotes; the proxied URL never contains one (the query
         // string is percent-encoded).
         self.patches.push(Patch {
@@ -2210,10 +2257,10 @@ impl RewriteVisitor {
     }
 
     /// Shorthand object property whose value is a dangerous global. The single
-    /// identifier is BOTH the key and the value, so the plain GLOBAL_GET patch
-    /// would turn `{ window }` into `{__zp_get(globalThis,"window")}` — a
-    /// syntax error that kills the entire script file. Emit the expanded
-    /// `window: __zp_get(globalThis,"window")` form instead.
+    /// identifier is both the key and the value, so the plain GLOBAL_GET patch
+    /// would turn `{ window }` into `{__zp_get(globalThis,"window")}`, a
+    /// syntax error. Emit the expanded `window: __zp_get(globalThis,"window")`
+    /// form instead.
     fn emit_shorthand_global_get(&mut self, span: Span, name: &str) {
         self.patches.push(Patch {
             start: span.start,
@@ -2223,7 +2270,7 @@ impl RewriteVisitor {
     }
 
     fn emit_global_get(&mut self, span: Span, name: &str) {
-        // 괄호는 contextual 로 apply_patches 에서 결정. 여기서는 marker 로 emission.
+        // Parenthesization is decided contextually in apply_patches; emit a marker here.
         self.patches.push(Patch {
             start: span.start,
             end: span.end,
@@ -2238,12 +2285,12 @@ impl RewriteVisitor {
         self.infinite_loop_caps
     }
 
-    /// `await`/`yield` in a loop body means each iteration can suspend —
+    /// `await`/`yield` in a loop body means each iteration can suspend;
     /// an infinite async poll loop is a legitimate pattern (not a V8
     /// wedge vector), so those loops keep native uncapped semantics.
-    /// Nested functions are a different async context — their `await`
-    /// does not yield the outer loop — so the walk stops at function
-    /// boundaries. (R7)
+    /// Nested functions are a different async context (their `await`
+    /// does not yield the outer loop), so the walk stops at function
+    /// boundaries.
     fn body_yields<'b>(body: &Statement<'b>) -> bool {
         struct Y { hit: bool }
         impl<'b> Visit<'b> for Y {
@@ -2261,8 +2308,7 @@ impl RewriteVisitor {
         y.hit
     }
 
-    /// Cap-trip is observable now — silent death at 10M was a pinned
-    /// divergence (T5-2). Warn once, then exit the loop.
+    /// Warn once when the iteration cap is reached, then exit the loop.
     fn cap_test(counter: &str) -> String {
         format!("{counter}++<10000000||(console.warn('[ZeroProxy] infinite-loop cap reached'),false)")
     }
@@ -2275,7 +2321,7 @@ impl RewriteVisitor {
         format!("__zp_{tag}_{}", self.decl_seq)
     }
 
-    /// Classic top-level program scope — where `var`/`function` declarations
+    /// Classic top-level program scope, where `var`/`function` declarations
     /// for browser-unforgeable names silently fail to bind.
     fn global_classic(&self) -> bool {
         self.kind == ScriptKind::Classic && self.fn_depth == 0
@@ -2291,9 +2337,9 @@ impl RewriteVisitor {
         e
     }
 
-    /// Direct text for a dangerous identifier used as an assignment TARGET
-    /// (for-of/in left, destructuring element). Member-expression form —
-    /// `__zp_get.d.location` — whose set lands on the prelude write sink.
+    /// Direct text for a dangerous identifier used as an assignment target
+    /// (for-of/in left, destructuring element). Member-expression form
+    /// (`__zp_get.d.location`) whose set lands on the prelude write sink.
     fn emit_target_ident(&mut self, span: Span, name: &str) {
         if self.with_temps.is_empty() {
             self.patches.push(Patch {
@@ -2314,7 +2360,7 @@ impl RewriteVisitor {
         }
     }
 
-    /// Direct text for a dangerous identifier READ inside a `with` body:
+    /// Direct text for a dangerous identifier read inside a `with` body:
     /// object-first resolution, then fall through to the next `with` or the
     /// membrane global.
     fn with_get_chain(&self, name: &str) -> String {
@@ -2371,7 +2417,7 @@ impl RewriteVisitor {
             BindingPattern::ObjectPattern(obj) => {
                 for prop in &obj.properties {
                     if prop.shorthand {
-                        // `{location}` / `{location = 1}` — one identifier is
+                        // `{location}` / `{location = 1}`: one identifier is
                         // both key and binding; expand to `location: <tmp>`
                         // so the rename keeps the property key.
                         if let Some((id, _)) = shorthand_binding(&prop.value) {
@@ -2411,16 +2457,16 @@ impl RewriteVisitor {
     }
 
     /// One declarator of a classic global `var` statement. Dangerous names
-    /// cannot bind (`var location` is silently ignored by the engine — the
+    /// cannot bind (`var location` is silently ignored by the engine and the
     /// identifier keeps resolving to the real global), so they are either
-    /// left untouched (no init → harmless no-op) or rewritten into a
+    /// left untouched (no init, a harmless no-op) or rewritten into a
     /// membrane-set expression for the initializer.
     fn global_var_declarator<'a>(&mut self, d: &VariableDeclarator<'a>) {
         if let BindingPattern::BindingIdentifier(id) = &d.id {
             let name = id.name.as_str();
             if is_dangerous_global(name) {
                 if self.for_iter_head {
-                    // `for (var location of xs)` — no init allowed; bind a
+                    // `for (var location of xs)`: no init allowed; bind a
                     // temp per iteration and sink it inside the body.
                     let tmp = self.fresh("dp");
                     self.patches.push(Patch {
@@ -2432,8 +2478,8 @@ impl RewriteVisitor {
                         top.push((name.to_string(), tmp));
                     }
                 } else if let Some(init) = &d.init {
-                    // `var location = x` → `__zp_vdcl_N = (set(globalThis,
-                    // "location", (x)), void 0)` — the write lands on the
+                    // `var location = x` becomes `__zp_vdcl_N = (set(globalThis,
+                    // "location", (x)), void 0)` so the write lands on the
                     // virtual location, mirroring native `location = x`.
                     let tmp = self.fresh("vdcl");
                     let ispan = init.span();
@@ -2458,8 +2504,8 @@ impl RewriteVisitor {
                         replacement,
                     });
                 }
-                // `var location` (no init): silently ignored by the engine —
-                // leave the text and simply do not declare the name.
+                // `var location` (no init): silently ignored by the engine;
+                // leave the text and do not declare the name.
                 return;
             }
             self.declare(name);
@@ -2468,7 +2514,7 @@ impl RewriteVisitor {
             }
             return;
         }
-        // Destructuring `var` — rename dangerous bindings to temps, then
+        // Destructuring `var`: rename dangerous bindings to temps, then
         // sink each into the membrane once the pattern has been assigned.
         let mut sinks: Vec<(String, String)> = Vec::new();
         let mut declares: Vec<String> = Vec::new();
@@ -2570,11 +2616,13 @@ enum BindCat {
 /// - `fn_like` marks program/function bodies, where a top-level function
 ///   declaration is var-like; block-level function declarations are treated
 ///   as lexical (strict semantics; sloppy Annex B stays jail-safe).
-/// - `sloppy` (R4): sloppy 모드에서 중첩 블록·레이블·단일문 위치의 함수
-///   선언은 Annex B.3.2/3.3/3.4 에 따라 enclosing varEnv 에도 var 바인딩을
-///   올린다. 수집 스코프(함수/프로그램)에 VarLike 로 등록해야 블록 밖 참조가
-///   가상 전역으로 새지 않는다. 방출 코드 자체는 그대로라 실제 엔진이
-///   호이스트를 수행한다 — 우리는 참조 해석에만 개입한다.
+/// - `sloppy`: in sloppy mode, function declarations inside nested blocks,
+///   labeled statements, or single-statement positions also hoist a `var`
+///   binding into the enclosing `varEnv` per Annex B.3.2/3.3/3.4. Registering
+///   them as `VarLike` on the collecting function/program scope prevents
+///   references outside the block from leaking to the virtual global. The
+///   emitted declaration stays in place so the JS engine performs the actual
+///   hoisting while the rewriter only adjusts reference resolution.
 fn collect_scope_decl_names<'a>(
     stmts: &'a [Statement<'a>],
     fn_like: bool,
@@ -2607,8 +2655,9 @@ fn collect_scope_decl_names<'a>(
                         out(id.name.as_str(), if fn_like { BindCat::VarLike } else { BindCat::Lexical });
                     }
                 } else if sloppy {
-                    // Annex B — 블록/레이블/단일문 위치 함수 선언의 var 측면.
-                    // 블록 내부의 lexical 바인딩은 그 블록의 수집이 따로 잡는다.
+                    // Annex B: var-side binding of a function declaration inside a
+                    // block, label, or single-statement position. The block-local
+                    // lexical binding is collected separately when visiting the block.
                     if let Some(id) = &f.id {
                         out(id.name.as_str(), BindCat::VarLike);
                     }
@@ -2734,18 +2783,16 @@ fn collect_scope_decl_names<'a>(
     }
 }
 
-/// Resolve `raw` against `base` per RFC 3986 §5.3 — minimal subset
-/// that covers the dynamic-import use cases (relative path / abs
-/// path / abs URL). Restricted to http(s) ASCII inputs; punycode /
-/// IDN handling is deliberately out of scope (pulling the full
-/// `url` crate would add ~250 KB to the page bundle via ICU).
-/// Returns `None` for unparsable or non-http(s) inputs.
+/// Resolve `raw` against `base` per RFC 3986 §5.3, covering relative path,
+/// absolute path, and absolute URL module specifiers. Restricted to http(s)
+/// ASCII inputs; punycode / IDN handling is omitted to avoid pulling the full
+/// `url` crate (~250 KB in the page bundle via ICU). Returns `None` for
+/// unparsable or non-http(s) inputs.
 pub(crate) fn resolve_module_base(raw: &str, base: &str) -> Option<String> {
     let raw = raw.trim();
-    // 1. raw is already an absolute URL → return as-is (after scheme check).
+    // 1. raw is already an absolute URL: return as-is (after scheme check).
     if raw.starts_with("http://") || raw.starts_with("https://") {
-        // Guard against unprintable bytes — anything outside ASCII
-        // visible is rejected to keep the encoder predictable.
+        // Reject bytes outside printable ASCII to keep the encoder predictable.
         if raw.bytes().any(|b| !(0x21..=0x7e).contains(&b)) {
             return None;
         }
@@ -2765,15 +2812,15 @@ pub(crate) fn resolve_module_base(raw: &str, base: &str) -> Option<String> {
         return None;
     }
     let base_path_with_q = &rest[auth_end..];
-    // Strip query + fragment from base path — RFC 3986 §5.3 R 3.
+    // Strip query and fragment from base path per RFC 3986 §5.3.
     let path_end = base_path_with_q.find(['?', '#']).unwrap_or(base_path_with_q.len());
     let base_path = if path_end == 0 { "/" } else { &base_path_with_q[..path_end] };
 
-    // 2. raw is host-absolute → keep authority, replace path.
+    // 2. raw is host-absolute: keep authority, replace path.
     if let Some(after_slash) = raw.strip_prefix('/') {
         return Some(format!("{scheme}://{authority}/{after_slash}"));
     }
-    // 3. raw is relative — resolve against base_path's directory.
+    // 3. raw is relative: resolve against base_path's directory.
     // Take everything up to the last '/' in base_path (the "directory").
     let dir_end = base_path.rfind('/').map(|i| i + 1).unwrap_or(0);
     let dir = &base_path[..dir_end];
@@ -2800,17 +2847,6 @@ pub(crate) fn resolve_module_base(raw: &str, base: &str) -> Option<String> {
     Some(format!("{scheme}://{authority}{out}"))
 }
 
-/// Build the proxied form of a module URL the dynamic import handler
-/// observed in source. `raw` is the literal as-written (e.g.
-/// `"./mod.js"`, `"/abs/path"`, `"https://cdn/x.js"`). `target_url`
-/// is the page's location URL — empty / unparsable returns None and
-/// the call site leaves the import alone.
-///
-/// Returned shape: `/zp/api/script?u=<percent-encoded-absolute>&kind=module`.
-/// The SW intercepts `/zp/api/script?u=…` and routes the actual
-/// fetch through the proxy transport, returning a rewritten ES
-/// module response. `kind=module` ensures the SW parses the body
-/// as an ES module (dynamic `import()` always loads a module).
 /// Escape a string for embedding inside a double-quoted JS literal. Only the
 /// two characters that can terminate or escape the literal need handling; the
 /// values we embed are URLs, which never contain raw newlines.
@@ -2865,15 +2901,14 @@ fn proxied_module_url(raw: &str, target_url: &str, proxy_origin: &str) -> Option
     Some(format!("{}/zp/api/script?u={encoded}&kind=module", proxy_origin.trim_end_matches('/')))
 }
 
-/// Detect a `true`-equivalent constant expression — `true` literal, `1`
-/// numeric literal (the two NAVER probe shapes we've seen). Strings /
-/// objects / etc. could also be truthy but the rewriter is conservative
-/// and only caps the unambiguous infinite forms.
+/// Detect a `true`-equivalent constant expression (`true` literal or non-zero
+/// numeric literal). Strings, objects, and other truthy forms are left alone
+/// so only unambiguous infinite loop forms are capped.
 fn is_truthy_constant(expr: &Expression) -> bool {
     match expr {
         Expression::BooleanLiteral(b) => b.value,
         Expression::NumericLiteral(n) => n.value != 0.0,
-        // Parenthesised — peer through.
+        // Parenthesised: peer through.
         Expression::ParenthesizedExpression(p) => is_truthy_constant(&p.expression),
         _ => false,
     }
@@ -2890,23 +2925,22 @@ impl RewriteVisitor {
         // patched normally. Then check if this is a dangerous method call.
         walk::walk_call_expression(self, expr);
 
-        // R2: unshadowed direct `eval(args)` — caller-scope parity.
-        // Emitted form: `__zp_eval.call(this, [args][0], desc, strict)` —
-        // the runtime turns it back into a real direct eval whose env chain
+        // Unshadowed direct `eval(args)`: caller-scope parity.
+        // Emitted form: `__zp_eval.call(this, [args][0], desc, strict)`.
+        // The runtime turns it back into a real direct eval whose env chain
         // is the helper's, while `with(desc)` (accessors evaluated in the
         // caller's lexical position) exposes every in-scope binding and
         // `.call(this)` forwards the caller's thisEnv. Literal strings take
-        // the same path — `__zp_eval` rewrites the source at runtime, so
-        // the old literal pre-rewrite (which silently became indirect via
-        // dynamicEval) is subsumed. `eval?.()` / `(0,eval)` / shadowed
-        // `eval` stay indirect — native gives those no caller scope either.
+        // the same path because `__zp_eval` rewrites the source at runtime.
+        // `eval?.()`, `(0,eval)`, and shadowed `eval` stay indirect because
+        // native gives those no caller scope either.
         if !expr.optional {
             if let Expression::Identifier(callee) = &expr.callee {
                 if callee.name.as_str() == "eval" && !self.is_shadowed("eval") {
-                    // R3: sloppy 리터럴 eval 의 `var`/`function` 선언을
-                    // 호출자 varEnv 에 호이스트 — desc 접근자가 그 바인딩을
-                    // 가리키고 eval'd `__zp_set` 가 desc consult 를 통해
-                    // 도달한다. desc 보다 먼저 호출해야 새 이름이 포함된다.
+                    // Hoist `var`/`function` declarations from a sloppy literal
+                    // `eval` into the caller's `varEnv` before building `desc`
+                    // so `desc` accessors bind those names and evaluated
+                    // `__zp_set` calls reach them through `desc`.
                     if self.cur_sloppy {
                         if let Some(Argument::StringLiteral(lit)) = expr.arguments.first() {
                             self.hoist_eval_var_decls(&lit.value);
@@ -2917,9 +2951,10 @@ impl RewriteVisitor {
                     self.patches.push(Patch {
                         start: expr.span.start,
                         end: expr.span.end,
-                        // <strict> 는 call-site 의 strict 여부 — strict
-                        // 호출자의 eval 은 strict eval 이라 `with` 래퍼가
-                        // 불법 → 런타임이 raw 경로를 선택한다.
+                        // `<strict>` records whether the call site is strict. A
+                        // strict caller's `eval` is a strict `eval` where a
+                        // `with` wrapper is illegal, so the runtime takes the
+                        // raw path.
                         replacement: format!(
                             "\u{1}DEVAL\u{1}{}\u{1}{}\u{1}{}\u{1}{}\u{1}{}\u{1}",
                             as_, ae, !self.cur_sloppy as u8, self.global_classic() as u8, desc
@@ -2930,7 +2965,7 @@ impl RewriteVisitor {
             }
         }
 
-        // Computed callee `x[k](args)` — the callee's CGET patch stays
+        // Computed callee `x[k](args)`: the callee's CGET patch stays
         // inside the outer span and is dropped; the resolver rewrites
         // object/key/args via rewrite_range.
         if let Expression::ComputedMemberExpression(member) = &expr.callee {
@@ -2942,7 +2977,7 @@ impl RewriteVisitor {
                 let marker = if expr.optional || member.optional {
                     // Bit0: the CALL is optional (`?.()`), bit1: the BASE
                     // access is optional (`x?.[k]`). `x[k]?.()` must still
-                    // throw when x is null — only the call is guarded.
+                    // throw when x is null; only the call is guarded.
                     let flags = (member.optional as u8) * 2 + expr.optional as u8;
                     format!(
                         "\u{1}OCALL\u{1}{}\u{1}{}\u{1}{}\u{1}E\u{1}{}\u{1}{}\u{1}{}\u{1}{}\u{1}",
@@ -2978,14 +3013,13 @@ impl RewriteVisitor {
                     use oxc_span::GetSpan;
                     if recv_name == "Reflect" && (method == "get" || method == "set") {
                         // `Reflect.get`/`Reflect.set` on a dangerous name goes through `__zp_rget`/`__zp_rset` like a
-                        // computed key does: they keep Reflect's own contract — a non-object throws, `set` answers `true`,
-                        // the receiver argument is honoured — which a member read or write would not.
-                        // Computed/dynamic property: `Reflect.get(doc, k)`,
-                        // `Reflect.set(doc, k, v)` — route through the
+                        // computed key does: they keep Reflect's own contract (a non-object throws, `set` answers `true`,
+                        // and the receiver argument is honoured), which a member read or write would not.
+                        // Computed/dynamic property (`Reflect.get(doc, k)`,
+                        // `Reflect.set(doc, k, v)`) routes through the
                         // membrane helpers, which fall through to native
-                        // Reflect for unrelated names. A static SAFE prop
-                        // keeps the native call — `__zp_rget(obj,'foo')`
-                        // would be identical but adds an avoidable hop.
+                        // Reflect for unrelated names. A static safe prop
+                        // keeps the native call to avoid an extra hop.
                         let static_prop = static_string_arg(&expr.arguments, 1);
                         let needs_mediation = match static_prop {
                             Some(p) => is_dangerous_member(p) || is_dangerous_global(p),
@@ -3128,21 +3162,16 @@ impl RewriteVisitor {
             }
 
             // Same reason as visit_static_member_expression / assignment:
-            // `super.method(...)` must stay literal — wrapping it strips the
+            // `super.method(...)` must stay literal; wrapping it strips the
             // class context and triggers "'super' keyword unexpected here".
             if matches!(member.object, Expression::Super(_)) {
                 return;
             }
             // A dangerous PROP in callee position is a method call, not a get.
-            // `s.search(re)` rewritten as `__zp_get(s,"search")(re)` drops the
-            // receiver, and `String.prototype.search` then throws "called on
-            // null or undefined" — NAVER's ad creative does exactly
-            // `navigator.userAgent.search("Trident")`, and `indexOf` on the same
-            // expression works, which is the fingerprint of an intercepted name
-            // rather than a broken member chain. `search` is in DANGEROUS_PROPS
-            // for `location.search`, so every string's `.search()` was hit.
-            // `__zp_call` keeps the receiver and falls through to native for
-            // unrelated objects.
+            // Rewriting `s.search(re)` as `__zp_get(s,"search")(re)` drops the
+            // receiver so `String.prototype.search` throws "called on null or
+            // undefined". `__zp_call` keeps the receiver and falls through to
+            // native for unrelated objects.
             if is_dangerous_method(method) || is_dangerous_member(method) {
                 use oxc_span::GetSpan;
                 // Drop the callee's own MEMBER_GET patch first: it spans
@@ -3177,13 +3206,11 @@ impl RewriteVisitor {
     }
 
     fn assignment_site<'a>(&mut self, expr: &AssignmentExpression<'a>) {
-        // A bare dangerous global as the assignment TARGET (`location = url`).
+        // A bare dangerous global as the assignment target (`location = url`).
         // The identifier visitor patches it to `__zp_get(globalThis,"location")`,
-        // which is not a valid assignment target: V8 accepts the parse but
-        // throws `ReferenceError: Invalid left-hand side in assignment` when the
-        // statement runs, so `location = url` navigation silently died. Route
-        // the write through the membrane setter instead — the same helpers the
-        // member path uses, and the ones the prelude already exposes.
+        // which is not a valid assignment target (`ReferenceError: Invalid
+        // left-hand side in assignment` at runtime). Route the write through
+        // the membrane setter instead.
         if let AssignmentTarget::AssignmentTargetIdentifier(ident) = &expr.left {
             let name = ident.name.as_str();
             if is_dangerous_global(name) && !self.is_shadowed(name) {
@@ -3192,7 +3219,7 @@ impl RewriteVisitor {
                 let value_span = expr.right.span();
                 let op = expr.operator;
                 if !self.with_temps.is_empty() {
-                    // `with(o){ location = x }` — object-first write, global
+                    // `with(o){ location = x }`: object-first write, global
                     // membrane fallback.
                     let replacement = if op == oxc_syntax::operator::AssignmentOperator::Assign {
                         format!(
@@ -3230,9 +3257,9 @@ impl RewriteVisitor {
                     )
                 } else {
                     // `__zp_assign` mirrors every compound operator, including
-                    // the short-circuiting logical forms — which is why those
-                    // take the value as a THUNK (it must not be evaluated when
-                    // the assignment is skipped).
+                    // the short-circuiting logical forms, which take the value
+                    // as a thunk so it is not evaluated when the assignment is
+                    // skipped.
                     let Some(op_str) = assignment_operator_str(op) else {
                         return;
                     };
@@ -3252,7 +3279,7 @@ impl RewriteVisitor {
                 });
                 return;
             }
-            // Non-dangerous identifier target — walk both sides normally.
+            // Non-dangerous identifier target: walk both sides normally.
             self.visit_assignment_target(&expr.left);
             self.visit_expression(&expr.right);
             return;
@@ -3297,7 +3324,7 @@ impl RewriteVisitor {
             return;
         }
         if let AssignmentTarget::StaticMemberExpression(target) = &expr.left {
-            // `super.x = v` — same reason as reads: keep literal.
+            // `super.x = v`: keep literal for the same reason as reads.
             if matches!(target.object, Expression::Super(_)) {
                 walk::walk_assignment_expression(self, expr);
                 return;
@@ -3316,10 +3343,8 @@ impl RewriteVisitor {
                         obj_span.start, obj_span.end, prop, value_span.start, value_span.end
                     )
                 } else {
-                    // `x.location += v` — compound member writes used to emit
-                    // nothing, leaving `__zp_get(...) += v`, a SyntaxError
-                    // that took the whole script. `__zp_assign` preserves
-                    // op + logical short-circuit.
+                    // `x.location += v`: `__zp_assign` preserves operator and
+                    // logical short-circuit semantics.
                     let Some(op_str) = assignment_operator_str(op) else {
                         return;
                     };
@@ -3337,11 +3362,11 @@ impl RewriteVisitor {
                 });
                 return;
             }
-            // Non-dangerous member — normal walk (receiver reads rewrite).
+            // Non-dangerous member: normal walk (receiver reads rewrite).
             walk::walk_assignment_expression(self, expr);
             return;
         }
-        // Destructuring / rest / default targets — identifiers inside are
+        // Destructuring / rest / default targets: identifiers inside are
         // write targets, not reads.
         self.in_target += 1;
         self.visit_assignment_target(&expr.left);
@@ -3350,11 +3375,9 @@ impl RewriteVisitor {
     }
 
     fn computed_member_site<'a>(&mut self, expr: &ComputedMemberExpression<'a>) {
-        // Computed member reads were entirely unmediated — `this['location']`
-        // / `document['location']` / `frames[0]` sailed through and produced
-        // real natives. Route every non-literal or dangerous-literal access
+        // Route every non-literal or dangerous-literal computed member access
         // through `__zp_cget`, which falls back to plain `x[k]` for unrelated
-        // names (and preserves the nullish TypeError).
+        // names and preserves the nullish TypeError.
         walk::walk_computed_member_expression(self, expr);
         if matches!(expr.object, Expression::Super(_)) {
             return;
@@ -3394,24 +3417,21 @@ impl RewriteVisitor {
 
 impl<'a> Visit<'a> for RewriteVisitor {
     fn visit_program(&mut self, program: &Program<'a>) {
-        // Hoist-aware pre-collection: the sequential walk used to declare
-        // names as it met them, so `f(){ location; var location; }` read the
-        // *virtual* location where the engine sees a hoisted local
-        // (undefined → TypeError). Collect every binding that this scope
-        // level owns before walking the body.
+        // Hoist-aware pre-collection: collect every binding that this scope
+        // level owns before walking the body so hoisted locals (`f(){ location;
+        // var location; }`) shadow before their declaration text.
         //
         // Classic top level only: `var`/`function` declarations for
-        // unforgeable browser globals DO NOT create bindings — `var location`
+        // unforgeable browser globals do not create bindings (`var location`
         // is silently ignored and `location` still resolves to the real
-        // window.location. Recording them as shadowed emitted bare
-        // references that bypassed the membrane entirely. Lexical/module/
-        // function-local declarations shadow normally.
+        // window.location). Lexical, module, and function-local declarations
+        // shadow normally.
         self.cur_sloppy = self.kind != ScriptKind::Module && !Self::has_use_strict(&program.directives);
         let mut top_varlikes: Vec<String> = Vec::new();
         collect_scope_decl_names(&program.body, true, self.cur_sloppy, &mut |name, cat| {
-            // `__zp_dynamic__` 같은 내부 래퍼 함수명은 checkvar 대상이 아니다 —
-            // 방출된 접두가 래퍼 앞에 붙어 rewriteDynamicFunctionBody 의
-            // slice 가 decl 중간을 잘라내는 사고가 있었다.
+            // Internal wrapper function names such as `__zp_dynamic__` are not
+            // subject to `checkvar`. Emitting a prefix before the wrapper would
+            // cause `rewriteDynamicFunctionBody` to slice through the declaration.
             if cat == BindCat::VarLike
                 && !name.starts_with("__zp_")
                 && !name.starts_with("__ZP_")
@@ -3423,10 +3443,11 @@ impl<'a> Visit<'a> for RewriteVisitor {
                 self.declare(name);
             }
         });
-        // R1: classic top-level let/const/class 는 스크립트를 넘어 공유되는
-        // 전역 렉시컬 환경에 산다. eval 의 렉시컬 환경은 버려지므로, 이름을
-        // `__zp_lex` 레지스트리에 등록하고 각 선언 뒤에 accessor 클로저를
-        // 심어 다음 스크립트가 살아있는 바인딩을 읽게 한다.
+        // Classic top-level `let`/`const`/`class` bindings live in the shared
+        // global lexical environment across scripts. Because `eval` discards its
+        // lexical environment, register those names in `__zp_lex` and plant
+        // accessor closures after each declaration so subsequent scripts read
+        // the live binding.
         if self.kind == ScriptKind::Classic {
             self.emit_lex_registry(program, &top_varlikes);
         }
@@ -3466,7 +3487,7 @@ impl<'a> Visit<'a> for RewriteVisitor {
 
     fn visit_arrow_function_expression(&mut self, arrow: &ArrowFunctionExpression<'a>) {
         self.push_scope();
-        // 표현식 본문 화살표(`() => expr`)에는 `var` 를 삽입할 수 없다.
+        // `var` declarations cannot be inserted into an expression-body arrow (`() => expr`).
         self.var_env_stack.push(if arrow.expression {
             (self.scopes.len() - 1, u32::MAX)
         } else {
@@ -3477,10 +3498,10 @@ impl<'a> Visit<'a> for RewriteVisitor {
         }
         let prev_sloppy = self.cur_sloppy;
         self.cur_sloppy = prev_sloppy && !Self::has_use_strict(&arrow.body.directives);
-        // `x => expr` 의 본문은 OXC 가 합성한 ExpressionStatement 다. 문
-        // 위치가 아니므로 `_STMT` 형(ASI 가드 `0,`)을 붙이면 안 된다 —
-        // `(e,t)=>t[e]??=[]` 가 `(e,t)=>0,(…).v??=…` 가 되어 선언 전체가
-        // SyntaxError 였다(CNN 의 Permutive SDK, 2026-09-29).
+        // OXC synthesizes an `ExpressionStatement` for the body of `x => expr`.
+        // Because it is not in statement position, emitting the `_STMT` form
+        // (with ASI guard `0,`) would turn `(e,t)=>t[e]??=[]` into
+        // `(e,t)=>0,(…).v??=…` and cause a SyntaxError.
         if arrow.expression {
             if let Some(Statement::ExpressionStatement(s)) = arrow.body.statements.first() {
                 self.arrow_expr_bodies.insert(s.span.start);
@@ -3489,9 +3510,9 @@ impl<'a> Visit<'a> for RewriteVisitor {
         collect_scope_decl_names(&arrow.body.statements, true, self.cur_sloppy, &mut |name, _cat| {
             self.declare(name);
         });
-        // Arrow bodies are real function scopes for `var` — the counter
+        // Arrow bodies are real function scopes for `var`; the counter
         // keeps `var location` inside `() => {}` out of the global transform.
-        // `nt_depth` is NOT bumped: an arrow's new.target is the enclosing
+        // `nt_depth` is not bumped: an arrow's new.target is the enclosing
         // real function's, so dynamic-body mapping still applies.
         self.fn_depth += 1;
         let guards = self.guard_fn_enter(if arrow.expression { None } else { Some(arrow.body.span.end - 1) });
@@ -3513,8 +3534,8 @@ impl<'a> Visit<'a> for RewriteVisitor {
     fn visit_block_statement(&mut self, block: &BlockStatement<'a>) {
         self.push_scope();
         // Block-level pre-collection: `let`/`const`/`class` are TDZ'd, so a
-        // reference *before* the declaration text must still be treated as
-        // shadowed (the engine throws ReferenceError — emitting __zp_get
+        // reference before the declaration text must still be treated as
+        // shadowed (the engine throws ReferenceError; emitting __zp_get
         // would silently return a value). `var` names hoist past the block;
         // the fn_depth==0 classic filter drops the unforgeable ones.
         collect_scope_decl_names(&block.body, false, self.cur_sloppy, &mut |name, cat| {
@@ -3533,7 +3554,7 @@ impl<'a> Visit<'a> for RewriteVisitor {
         if let Some(id) = &class.id {
             self.declare(id.name.as_str());
         }
-        // R4: 클래스 본문·메서드는 선언 없이도 항상 strict — Annex B 불가.
+        // Class bodies and methods are always strict even without a directive, so Annex B never applies.
         let prev_sloppy = self.cur_sloppy;
         self.cur_sloppy = false;
         self.class_depth += 1;
@@ -3546,18 +3567,9 @@ impl<'a> Visit<'a> for RewriteVisitor {
         self.pop_scope();
     }
 
-    /// `this` in the top level of a classic script is the global object — natively `this === window`. The page's `window` is
-    /// the membrane's facade, never the real global, so the real one used to arrive through `this` (a script's top level, a
-    /// string eval): `this === window` was false, `var self = this; self.location = …` skipped the facade, and a bot-management
-    /// VM that checks `eval('this') === window` stopped. It reads the same thing `window` does.
-    ///
-    /// Everywhere else in sloppy code `this` is the caller's receiver — except that a plain call (`f()`, `Function('return
-    /// this')()`, `[].map(f)`) gets the real global from the engine, where natively it is the window. That one value is
-    /// mapped at runtime (`__zp_this`), every other receiver passes through. Strict code and class bodies get `undefined`
-    /// for a plain call, so they are left alone, and so is module code. A classic worker script is the same with `self`
-    /// for `window`: the worker's helper maps its real global to the worker's facade.
-    /// `'prepareStackTrace' in Error` — the presence test of the one routed member a page checks with `in` (the membrane's
-    /// sanitizer is there, natively nothing is). Other `in` tests stay native.
+    /// `'prepareStackTrace' in Error`: presence test of the one routed member
+    /// a page checks with `in` (the membrane's sanitizer is installed there,
+    /// whereas natively nothing is). Other `in` tests stay native.
     fn visit_binary_expression(&mut self, expr: &BinaryExpression<'a>) {
         if expr.operator == BinaryOperator::In {
             if let Expression::StringLiteral(s) = &expr.left {
@@ -3574,6 +3586,13 @@ impl<'a> Visit<'a> for RewriteVisitor {
         walk::walk_binary_expression(self, expr);
     }
 
+    /// `this` in the top level of a classic script is the global object (`this === window`).
+    /// Because the page's `window` is the membrane facade rather than the real global,
+    /// top-level `this` reads the same facade as `window` (`self` in a classic worker).
+    /// Everywhere else in sloppy non-module code outside class bodies, `this` is mapped
+    /// at runtime via `__zp_this` so plain calls (`f()`, `Function('return this')()`,
+    /// `[].map(f)`) receive the facade instead of the real global, while other receivers
+    /// pass through.
     fn visit_this_expression(&mut self, expr: &ThisExpression) {
         let top = !self.local_this && self.nt_depth == 0 && self.class_depth == 0;
         if self.kind == ScriptKind::Classic && top {
@@ -3619,9 +3638,9 @@ impl<'a> Visit<'a> for RewriteVisitor {
     }
 
     fn visit_statement(&mut self, stmt: &Statement<'a>) {
-        // `pending_labels` only describes the *immediate* child of a labeled
+        // `pending_labels` only describes the immediate child of a labeled
         // statement. Any other statement shape arriving here consumed the
-        // slot, so stale names can't leak into a deeper loop.
+        // slot, so stale names cannot leak into a deeper loop.
         if !matches!(
             stmt,
             Statement::ForStatement(_)
@@ -3630,7 +3649,7 @@ impl<'a> Visit<'a> for RewriteVisitor {
         ) {
             self.pending_labels.clear();
         }
-        // Classic top-level `function location(){}` — like `var location`,
+        // Classic top-level `function location(){}`: like `var location`,
         // the binding cannot overwrite the unforgeable global. Keep the
         // declaration (hoisting shape, arity) but rename it to a temp so the
         // emitted code never assigns the real global slot.
@@ -3673,12 +3692,10 @@ impl<'a> Visit<'a> for RewriteVisitor {
     }
 
     fn visit_object_property(&mut self, prop: &ObjectProperty<'a>) {
-        // `{ window, document, navigator }` — shorthand properties reuse one
-        // identifier as key AND value, so patching it as a plain reference
-        // produces `{__zp_get(globalThis,"window"), ...}` which fails to parse
-        // and takes the whole file down (observed on NAVER's
-        // ntm.pstatic.net/scripts/ntm_*.js: `this.dom = { window, document,
-        // navigator }`). Expand to the explicit `key: value` form.
+        // `{ window, document, navigator }`: shorthand properties reuse one
+        // identifier as key and value, so patching it as a plain reference
+        // produces invalid syntax `{__zp_get(globalThis,"window"), ...}`.
+        // Expand to the explicit `key: value` form.
         if prop.shorthand {
             if let Expression::Identifier(ident) = &prop.value {
                 let name = ident.name.as_str();
@@ -3686,7 +3703,7 @@ impl<'a> Visit<'a> for RewriteVisitor {
                     if self.with_temps.is_empty() {
                         self.emit_shorthand_global_get(ident.span, name);
                     } else {
-                        // `{location}` inside `with` — value resolves against
+                        // `{location}` inside `with`: value resolves against
                         // the with-object first, then the membrane global.
                         let value = self.with_get_chain(name);
                         self.patches.push(Patch {
@@ -3695,9 +3712,9 @@ impl<'a> Visit<'a> for RewriteVisitor {
                             replacement: format!("{name}: {value}"),
                         });
                     }
-                    // Do not walk the value — it would re-emit the broken
-                    // plain patch over the same span. The key is an
-                    // IdentifierName and is never rewritten.
+                    // Do not walk the value; it would re-emit the plain patch
+                    // over the same span. The key is an IdentifierName and is
+                    // never rewritten.
                     return;
                 }
             }
@@ -3706,23 +3723,13 @@ impl<'a> Visit<'a> for RewriteVisitor {
     }
 
     fn visit_import_expression(&mut self, expr: &ImportExpression<'a>) {
-        // Computed sources (variable / template / concatenation) can't be
-        // resolved at rewrite time, so wrap them in the runtime helper — it
-        // performs the same target→proxy mapping on the evaluated value.
+        // Computed sources (variable, template, concatenation) cannot be
+        // resolved at rewrite time, so wrap them in `__zp_module_url` via the
+        // MODULE_URL marker. Leaving them alone resolves the specifier against
+        // the importing script's proxy URL (`<proxy>/zp/api/script?…`).
         //
-        // Leaving them alone is not neutral: the specifier resolves against
-        // the *importing script's own* URL, which for us is
-        // `<proxy>/zp/api/script?…`, so `"./x.js"` became a request for
-        // `/zp/api/x.js` → 404. That is how NAVER's ad SDK failed
-        // (`/zp/api/gfp-display-sdk.js`, then `initAd is not defined`).
-        // 래퍼는 MODULE_URL **마커**로 emit 한다 (resolver 주석 참조) —
-        // zero-width 패치 두 개로 감싸면 인자가 리라이트 대상일 때 안팎이
-        // 뒤집힌다.
-        //
-        // `data:`/`blob:` **리터럴**도 런타임 경로로 보낸다 — 런타임이 모듈을
-        // 읽어 재작성한 blob 으로 다시 import 한다(computed 와 같은 길). 그대로
-        // 두면 리라이터를 통째로 건너뛰었다: CSP 만이 막았고, 크롬에서 되는
-        // 정상 `import('data:…')` 는 깨졌다. ERRATA §E, 2026-09-29.
+        // `data:` and `blob:` literals also take the runtime path so the
+        // runtime fetches, rewrites, and re-imports the module via blob URL.
         let runtime_literal = match &expr.source {
             Expression::StringLiteral(lit) => {
                 let l = lit.value.as_str().trim_start().to_ascii_lowercase();
@@ -3737,11 +3744,10 @@ impl<'a> Visit<'a> for RewriteVisitor {
         let Some(lit) = static_literal else {
             let span = expr.source.span();
             if !self.target_url.is_empty() {
-                // **walk 보다 먼저 push 한다.** apply_patches 의 정렬은 stable
-                // 이라, 같은 range 를 갖는 안쪽 마커(인자 전체가 하나의 호출인
-                // `import(u.replace(…))` 가 정확히 이 경우)와 tie 가 나면
-                // **먼저 들어간 쪽이 바깥**이 된다. 뒤에 push 하면 안쪽
-                // METHOD_CALL 이 이기고 래퍼가 인자 안으로 들어간다.
+                // Push before walking children. Because `apply_patches` uses a
+                // stable sort, pushing first ensures this marker wraps outside
+                // any inner marker that shares the exact same span (e.g., when
+                // the entire argument is a call like `import(u.replace(…))`).
                 self.patches.push(Patch {
                     start: span.start,
                     end: span.end,
@@ -3753,9 +3759,8 @@ impl<'a> Visit<'a> for RewriteVisitor {
                     ),
                 });
             }
-            // Recurse so any dangerous-global identifiers inside the argument
-            // expression still get patched (e.g. `import(window.__cdn +
-            // '/mod.js')` — `window` here still routes through __zp_get).
+            // Recurse so dangerous-global identifiers inside the argument
+            // expression still get patched (e.g. `import(window.__cdn + '/mod.js')`).
             walk::walk_import_expression(self, expr);
             return;
         };
@@ -3789,11 +3794,8 @@ impl<'a> Visit<'a> for RewriteVisitor {
 
     fn visit_with_statement(&mut self, stmt: &WithStatement<'a>) {
         // `with(obj){...}` resolves free identifiers against obj first.
-        // Statically routing dangerous names to the membrane broke object
-        // precedence (`with({location:fake}) location` returned the virtual
-        // location, not `fake`). Bind the object to a temp once — reusing the
-        // expression per reference would re-run its side effects — then
-        // emit `__zp_with_*` resolvers inside the body.
+        // Bind the object to a temp once so side effects are not re-evaluated
+        // per reference, then emit `__zp_with_*` resolvers inside the body.
         let tmp = self.fresh("w");
         self.patches.push(Patch {
             start: stmt.span.start,
@@ -3840,8 +3842,8 @@ impl<'a> Visit<'a> for RewriteVisitor {
         self.with_temps.pop();
     }
 
-    /// `label: stmt` — collect the whole label chain (a label's body may be
-    /// another labeled statement) and expose it to the *final* body via
+    /// `label: stmt`: collect the whole label chain (a label's body may be
+    /// another labeled statement) and expose it to the final body via
     /// `pending_labels`. The final body is a bare statement position.
     fn visit_labeled_statement(&mut self, stmt: &LabeledStatement<'a>) {
         let mut names = vec![stmt.label.name.to_string()];
@@ -3855,8 +3857,8 @@ impl<'a> Visit<'a> for RewriteVisitor {
         self.pending_labels = saved;
     }
 
-    /// `if/else` arms are bare statement positions — a `let`-prefixing
-    /// transform (loop caps) must know.
+    /// `if/else` arms are bare statement positions so `let`-prefixing
+    /// transforms (loop caps) block-wrap when needed.
     fn visit_if_statement(&mut self, stmt: &IfStatement<'a>) {
         self.visit_expression(&stmt.test);
         self.visit_body_statement(&stmt.consequent);
@@ -3865,7 +3867,7 @@ impl<'a> Visit<'a> for RewriteVisitor {
         }
     }
 
-    /// `break outer` / `continue outer` inside a block-wrapped capped loop —
+    /// `break outer` / `continue outer` inside a block-wrapped capped loop:
     /// the loop re-bound its labels on a fresh inner name (`__zp_lbl_N`), so
     /// references to the source label must follow it.
     fn visit_continue_statement(&mut self, it: &ContinueStatement<'a>) {
@@ -3946,8 +3948,8 @@ impl<'a> Visit<'a> for RewriteVisitor {
             return;
         }
         // Only the outermost patch at the statement's start is emitted there; one inside it is emitted inside its
-        // operand (`e.ports[0].postMessage(x)` — the guard is the base argument of `__zp_call(…)`, where a `0,` is an
-        // argument of its own).
+        // operand (`e.ports[0].postMessage(x)`: the guard is the base argument of `__zp_call(…)`, where `0,` would be
+        // a separate argument).
         let outer_end = self.patches[first_patch..]
             .iter()
             .filter(|p| p.start == stmt.span.start)
@@ -3983,7 +3985,7 @@ impl<'a> Visit<'a> for RewriteVisitor {
     fn visit_simple_assignment_target(&mut self, target: &SimpleAssignmentTarget<'a>) {
         if let SimpleAssignmentTarget::AssignmentTargetIdentifier(ident) = target {
             // Dangerous identifier in a write position (`for (location of x)`,
-            // `[location] = a`, `({p: location} = o)`) — a call is not a
+            // `[location] = a`, `({p: location} = o)`): a call is not a
             // valid target, so emit the `__zp_get.d.<name>` member ref whose
             // write lands on the prelude's membrane sink.
             let name = ident.name.as_str();
@@ -3993,7 +3995,7 @@ impl<'a> Visit<'a> for RewriteVisitor {
             return;
         }
         if let SimpleAssignmentTarget::ComputedMemberExpression(member) = target {
-            // `x[k]++`, `for (x[k] of y)`, `({a: x[k]} = o)` — keep a real
+            // `x[k]++`, `for (x[k] of y)`, `({a: x[k]} = o)`: keep a real
             // Reference through the accessor adapter, same as MEMBER_REF.
             if !matches!(member.object, Expression::Super(_)) {
                 self.visit_read(&member.object);
@@ -4042,14 +4044,11 @@ impl<'a> Visit<'a> for RewriteVisitor {
         &mut self,
         prop: &AssignmentTargetPropertyIdentifier<'a>,
     ) {
-        // `({ location } = obj)` — shorthand destructuring TARGET. One
+        // `({ location } = obj)`: shorthand destructuring target. One
         // identifier is both the key and the write target, and a target must be
-        // a settable reference, so `__zp_set(...)` (a call) cannot go here:
-        // patching it as a plain reference produced
-        // `({ __zp_get(globalThis,"location") } = obj)`, a SyntaxError that took
-        // the whole file down. Expand to `location: __zp_get.d.location`, whose
-        // write lands on the prelude's write-only sink and routes through the
-        // membrane setter — valid syntax with no escape.
+        // a settable reference, so `__zp_set(...)` (a call) cannot go here.
+        // Expand to `location: __zp_get.d.location`, whose write lands on the
+        // prelude's write-only sink and routes through the membrane setter.
         //
         // Only the binding is replaced, so a default (`{ location = 1 }`)
         // survives as `location: __zp_get.d.location = 1`.
@@ -4058,7 +4057,7 @@ impl<'a> Visit<'a> for RewriteVisitor {
             let replacement = if self.with_temps.is_empty() {
                 format!("\u{1}GLOBAL_DESTR\u{1}{}\u{1}", name)
             } else {
-                // `with(o){ ({location} = x) }` — the write must prefer o's
+                // `with(o){ ({location} = x) }`: the write must prefer o's
                 // own `location` before falling back to the membrane sink.
                 format!(
                     "\u{1}GLOBAL_DESTR\u{1}{}\u{1}{}\u{1}",
@@ -4071,8 +4070,8 @@ impl<'a> Visit<'a> for RewriteVisitor {
                 end: prop.binding.span.end,
                 replacement,
             });
-            // Walk only the default expression — walking the binding would
-            // re-emit the broken plain patch over the same span.
+            // Walk only the default expression; walking the binding would
+            // re-emit the plain patch over the same span.
             if let Some(init) = &prop.init {
                 self.visit_read(init);
             }
@@ -4087,21 +4086,16 @@ impl<'a> Visit<'a> for RewriteVisitor {
     fn visit_static_member_expression(&mut self, expr: &StaticMemberExpression<'a>) {
         // Walk children first (so receiver is rewritten before we wrap).
         walk::walk_static_member_expression(self, expr);
-        // `super.x` is only legal as part of a class method's body — `super`
+        // `super.x` is only legal as part of a class method's body; `super`
         // is a keyword and cannot appear as an identifier expression, so
         // `__zp_get(super, "x")` is a SyntaxError. Leave super member access
-        // untouched (it's already restricted to its class context).
+        // untouched (it is already restricted to its class context).
         if matches!(expr.object, Expression::Super(_)) {
             return;
         }
-        // `import.meta.url` — 모듈이 **자기 위치**를 읽는 자리. 리라이트하지
-        // 않으면 실제로 받아진 프록시 URL(`<proxy>/zp/api/script?…`)이 그대로
-        // 노출된다. 번들러(webpack / Vite / Rollup 공통)는 이 값의 디렉터리로
-        // publicPath 를 유도하므로 이후 청크가 `<proxy>/zp/api/<chunk>` 로
-        // 요청되고, 그게 다시 프록시를 타면서 타깃 자리에 프록시 오리진이
-        // 들어가 **이중 프록시**가 된다 → 502. github.com 에서 CSS 청크 13개가
-        // 정확히 이 경로로 죽었다. `script.src` 는 이미 타깃으로 마스킹돼
-        // 있는데 import.meta.url 만 빠져 있었다.
+        // `import.meta.url`: exposes the module's own URL. Without rewriting,
+        // the proxy URL (`<proxy>/zp/api/script?…`) leaks and bundler-derived
+        // `publicPath` values request `<proxy>/zp/api/<chunk>`.
         if let Expression::MetaProperty(meta) = &expr.object {
             if meta.meta.name == "import"
                 && meta.property.name == "meta"
@@ -4115,11 +4109,9 @@ impl<'a> Visit<'a> for RewriteVisitor {
                 });
                 return;
             }
-            // `import.meta.resolve(spec)` — 네이티브는 모듈의 **실제 URL**(프록시
-            // `/zp/api/script?…`)을 base 로 해석한다. 성공하면 프록시 오리진이
-            // 새고, blob/non-hierarchical base 에서는 TypeError 로 죽는다(실측).
-            // 가상 타깃 URL 기준 해석으로 바꾼다. import-map bare specifier 는
-            // 여기서 못 푼다 — URL 상대해석까지만 보장하고 맵 조회는 미지원.
+            // `import.meta.resolve(spec)`: native resolves against the module's
+            // proxy URL, so replace it with a resolver anchored at the virtual
+            // target URL.
             if meta.meta.name == "import"
                 && meta.property.name == "meta"
                 && expr.property.name == "resolve"
@@ -4136,45 +4128,20 @@ impl<'a> Visit<'a> for RewriteVisitor {
                 return;
             }
         }
-        // If the receiver is a bare identifier that's bound in the current
-        // lexical scope (function param, destructured param, var/let/const,
-        // catch parameter), the access is *local* and the membrane rewrite
-        // would change semantics. `function f(location){ return location.href; }`
-        // must remain `location.href`, not `__zp_get(location, "href")` —
-        // the param shadows the global. The visit_identifier_reference path
-        // already honours `is_shadowed` for the receiver; mirror that here
-        // so the dangerous-member detection doesn't override the shadowing.
-        // ★수신자 **이름 자체가 위험 전역인데 가려진** 경우에만 건드리지 않는다.
-        // 예전에는 **모든 지역 수신자**에서 건너뛰었다. 그러면 별칭 한 번만
-        // 거쳐도 멤브레인이 통째로 꺼진다 — `var u = n.location; u.protocol`,
-        // 즉 옵셔널 체이닝 디슈가(`n.location?.protocol`)가 정확히 그 모양이다.
-        // CNN 실측(2026-08-25): 벤더의 `loadScriptFromUrl` 이
-        // `((u = n.location) == null ? void 0 : u.protocol) === "https:"` 로
-        // 스킴을 고르는데, `u` 가 지역이라 리라이트가 꺼지고 **진짜 Location 의
-        // own(unforgeable) 접근자**가 프록시 스킴 `http:` 를 그대로 줬다 →
-        // `http://www.ugdturner.com/xd.sjs` 502 → `turner_getGuid` 부재 →
-        // FAVE/APS 광고 체인 중단.
-        // 지역 이름이라도 감싸는 것은 의미상 안전하다 — 멤브레인 트랩은
-        // window/Location/document 가 아닌 base 는 Reflect 로 그대로 흘린다.
         let prop = expr.property.name.as_str();
-        // ★가려진 지역 수신자에서 무엇을 감쌀 것인가.
-        //
-        // 예전에는 지역 수신자면 **전부** 건너뛰었고, 그래서 별칭 한 번이면
-        // (`var u = n.location; u.protocol`) 멤브레인이 꺼졌다 — 프록시 스킴이
-        // 새어 CNN 광고 체인이 끊긴 원인이다.
-        //
-        // 그렇다고 전부 감싸면 **창 사슬**(top/parent/frames/opener/
-        // contentWindow/…)까지 지역 별칭에서 프록시를 타는데, 그 자리는 광고/
-        // 동의(CMP) 코드의 상승 루프가 도는 뜨거운 경로다(2026-08-24 에 여기서
-        // 렌더러가 굳었다). 실측으로도 CNN 이 간헐 정지했다.
-        //
-        // 그래서 **URL 성분만** 지역 별칭에서도 감싼다. 창 사슬은 예전 규칙을
-        // 유지한다 — 그쪽은 `window` 식별자가 이미 스코프 프록시를 돌려주므로
-        // (`var w = window; w.parent` 는 프록시의 get 트랩을 탄다) 별칭 우회가
-        // 성립하지 않는다. 즉 이 좁힘은 구멍을 남기지 않는다.
+        // If the receiver is a shadowed local identifier:
+        // - When the receiver name itself is a shadowed dangerous global
+        //   (`function f(location){ return location.href; }`), keep it unmediated
+        //   because the parameter shadows the global.
+        // - Otherwise, wrap `URL_SHAPE_MEMBERS` even on local receivers so
+        //   single-hop local aliases (`var u = n.location; u.protocol`, such as
+        //   desugared optional chains `n.location?.protocol`) still route
+        //   through the membrane.
         const URL_SHAPE_MEMBERS: &[&str] = &[
             "href", "protocol", "host", "hostname", "port", "pathname", "search", "hash",
-            "origin", "location",
+            "origin", "location", "top", "parent", "opener", "frameElement",
+            "window", "self", "globalThis", "frames", "document", "defaultView",
+            "contentWindow", "contentDocument",
         ];
         if let Expression::Identifier(recv) = &expr.object {
             let recv_name = recv.name.as_str();
@@ -4186,27 +4153,13 @@ impl<'a> Visit<'a> for RewriteVisitor {
             }
         }
         if is_dangerous_member(prop) {
-            // Note: we intentionally keep the inner identifier patch that
-            // visit_identifier_reference may have emitted for the receiver.
-            // `apply_patches` sorts overlapping patches outer-first into
-            // `chosen` and drops the inner one from the apply set, but the
-            // `MEMBER_GET` marker resolver re-runs `rewrite_range` over the
-            // receiver substring — that step picks the inner identifier
-            // patch back up so a `location.href` read renders as
-            // `__zp_get(__zp_get(globalThis,"location"),"href")` and an
-            // `obj.href = v` assignment uses the rewritten receiver inside
-            // the `__zp_set` call. Draining the inner patch here would strip
-            // the receiver back to the bare source slice and break the
-            // `javascript_url_anchor_routed` contract in zp-htmltx.
-            // Record the textual span of the object so we can splice it as the
-            // first arg to __zp_get(obj, 'name'). We don't have the source
-            // string here; we record the object span and the visitor's caller
-            // (the apply_patches step) will use source[obj.start..obj.end].
-            // To do that we emit a patch whose replacement references a
-            // placeholder we resolve below via the source string.
-            // Implementation: we just emit (start..end of full member expr)
-            // with replacement built from source slice in a post-walk pass.
-            // For now we use a Patch with the textual span and store a marker.
+            // Keep the inner identifier patch that visit_identifier_reference
+            // may have emitted for the receiver. `apply_patches` sorts
+            // overlapping patches outer-first into `chosen` and drops the inner
+            // one from the top-level apply set, while the `MEMBER_GET` marker
+            // resolver re-runs `rewrite_range` over the receiver substring so
+            // `location.href` renders as
+            // `__zp_get(__zp_get(globalThis,"location"),"href")`.
             self.patches.push(Patch {
                 start: expr.span.start,
                 end: expr.span.end,
@@ -4229,21 +4182,20 @@ impl<'a> Visit<'a> for RewriteVisitor {
         }
     }
 
-    /// Optional chains whose rewritten links straddle a `?.` (2026-09-29).
+    /// Optional chains whose rewritten links straddle a `?.`.
     ///
     /// Links are rewritten one by one into helper calls (`__zp_oget(o,k)`,
     /// `__zp_get(o,k)`, `__zp_call(o,k,[a])`), and a helper call evaluates
     /// its arguments eagerly and returns into the rest of the chain. Native
     /// `?.` does neither: `e.poster?.[!e.poster.mobile ? …]` never evaluates
     /// the key when `e.poster` is nullish, and `a?.[k].b` short-circuits the
-    /// whole chain. GitHub's landing page died on exactly the first form
-    /// (image items carry no `poster`) and drew its error page.
+    /// whole chain.
     ///
     /// Each split becomes a continuation that only runs on a non-nullish
     /// base: `__zp_ochain(a, __zp_oc => <rest with a := __zp_oc>)`. Inside,
-    /// the existing link patches are correct as they are — their base is
-    /// known non-nullish. Optional calls on a member callee keep their
-    /// receiver through `__zp_ocallv(obj, key)`.
+    /// the existing link patches remain valid because their base is known
+    /// non-nullish. Optional calls on a member callee keep their receiver
+    /// through `__zp_ocallv(obj, key)`.
     fn visit_chain_expression(&mut self, chain: &ChainExpression<'a>) {
         let before = self.patches.len();
         walk::walk_chain_expression(self, chain);
@@ -4274,10 +4226,9 @@ impl<'a> Visit<'a> for RewriteVisitor {
             return;
         }
         // The optional call itself renders as `__zp_oc?.(args)` inside its
-        // continuation, so its call patch must go — but only the generic
-        // call markers. `Reflect.get?.(o,'location')` style special forms
-        // carry the mediation themselves; dropping them would hand out the
-        // real Reflect.get, so such chains keep the per-link emission.
+        // continuation, so its generic call patch is removed. Special forms
+        // such as `Reflect.get?.(o,'location')` carry mediation themselves and
+        // keep per-link emission.
         let calls: Vec<(u32, u32)> = splits
             .iter()
             .filter_map(|s| match s {
@@ -4324,16 +4275,9 @@ impl<'a> Visit<'a> for RewriteVisitor {
         self.guard_leave(saved);
     }
 
-    /// `for (;;) body` — unbounded loop. The classic anti-bot probe
-    /// shape uses this to detect membrane instrumentation: the probe
-    /// runs a tight loop while inspecting a global accessor, and if the
-    /// loop never yields, the page wedges V8. Cap with a fresh counter
-    /// so the loop terminates after a generous 10 M iterations.
-    ///
-    /// `for (init;;update)` with a missing or constant-true test gets the
-    /// same cap: `let __zp_lc_N=0;` is inserted before the statement and the
-    /// (possibly empty) test slot is rewritten to `__zp_lc_N++<10000000`.
-    /// `const` inits work too — the counter lives in its own `let`.
+    /// Cap unbounded `for` loops (`for (;;)` or `for (init;;update)` with a
+    /// missing or constant-true test) at 10M iterations using a fresh counter
+    /// variable so tight anti-bot probe loops cannot wedge V8.
     fn visit_for_statement(&mut self, stmt: &ForStatement<'a>) {
         use oxc_span::GetSpan;
         let empty_loop =
@@ -4346,9 +4290,9 @@ impl<'a> Visit<'a> for RewriteVisitor {
         let needs_cap =
             (empty_loop || (truthy && !(stmt.init.is_none() && stmt.update.is_none())))
                 && !Self::body_yields(&stmt.body);
-        // `for(;;)` rewrites the header only — still a single statement —
-        // but the `let counter` prefix forms must block-wrap in bare
-        // position (`if(c) for…`, `outer: for…`).
+        // `for(;;)` rewrites the header only (still a single statement),
+        // whereas `let counter` prefix forms must block-wrap in bare
+        // statement positions (`if(c) for…`, `outer: for…`).
         let needs_wrap = needs_cap && !empty_loop && self.unbraced_body > 0;
         let labels = std::mem::take(&mut self.pending_labels);
         let inner_lbl = if needs_wrap && !labels.is_empty() {
@@ -4396,7 +4340,7 @@ impl<'a> Visit<'a> for RewriteVisitor {
         let counter = format!("__zp_lc_{id}");
         let prefix = if needs_wrap {
             match &inner_lbl {
-                // `outer:{let c=0;__zp_lbl_N:for(…)}` — the inner label keeps
+                // `outer:{let c=0;__zp_lbl_N:for(…)}`: the inner label keeps
                 // `continue outer`/`break outer` aimed at the loop itself.
                 Some(l) => format!("{{let {counter}=0;{l}:"),
                 None => format!("{{let {counter}=0;"),
@@ -4417,8 +4361,7 @@ impl<'a> Visit<'a> for RewriteVisitor {
             });
         }
         if let Some(test) = &stmt.test {
-            // `for(i=0;true;i++)` — the constant test would run forever;
-            // replace it with the counter.
+            // `for(i=0;true;i++)`: replace the constant test with the counter.
             let ts = test.span();
             self.patches.push(Patch {
                 start: ts.start,
@@ -4426,14 +4369,11 @@ impl<'a> Visit<'a> for RewriteVisitor {
                 replacement: Self::cap_test(&counter),
             });
         } else {
-            // Empty test slot — the FOR_CAP marker covers `;;` (or `for(;;`
-            // when there is no init); the resolver injects the counter after
-            // the first `;`.
-            // With no init the region starts after the `for` keyword, not at the
-            // statement: the `let counter` prefix is a patch AT the statement's
-            // start, and a marker that began there swallowed it — its first `;`
-            // was the prefix's, and `for(;;e++)` came out as
-            // `let c=0;let c=0;c++<…for(;;e++)` (NYT's hls.js did not parse).
+            // Empty test slot: the FOR_CAP marker covers `;;` (or `(;;` when
+            // there is no init) and the resolver injects the counter after the
+            // first `;`. With no init the region starts after the `for` keyword
+            // (`stmt.span.start + 3`) so it does not overlap the `let counter`
+            // prefix patch at `stmt.span.start`.
             let rs = stmt
                 .init
                 .as_ref()
@@ -4452,9 +4392,8 @@ impl<'a> Visit<'a> for RewriteVisitor {
         }
     }
 
-    /// `while(true) body` / `while(1) body` — same probe shape. The header
-    /// rewrite stays a single statement, so bare bodies and labels need no
-    /// extra handling — `outer:` keeps labeling the rewritten `for`.
+    /// `while(true) body` / `while(1) body`: the header rewrite stays a single
+    /// statement, so bare bodies and labels need no extra wrapping.
     fn visit_while_statement(&mut self, stmt: &WhileStatement<'a>) {
         let needs_cap = is_truthy_constant(&stmt.test) && !Self::body_yields(&stmt.body);
         self.pending_labels.clear();
@@ -4474,12 +4413,10 @@ impl<'a> Visit<'a> for RewriteVisitor {
         }
     }
 
-    /// `do body while(true);` / `do body while(1);`. The header
-    /// rewrite trick doesn't fit because `do` requires a trailing
-    /// `while(test);`. Patch the test expression itself with a
-    /// post-increment counter; declare the counter immediately before
-    /// the `do` so its scope covers the test. Bare positions block-wrap
-    /// (with the same inner-label trick as `for`).
+    /// `do body while(true);` / `do body while(1);`. Because `do` requires a
+    /// trailing `while(test);`, patch the test expression itself with a
+    /// post-increment counter and declare the counter immediately before the
+    /// `do` (block-wrapping bare statement positions).
     fn visit_do_while_statement(&mut self, stmt: &DoWhileStatement<'a>) {
         use oxc_span::GetSpan;
         let needs_cap = is_truthy_constant(&stmt.test) && !Self::body_yields(&stmt.body);
@@ -4531,10 +4468,8 @@ impl<'a> Visit<'a> for RewriteVisitor {
         }
     }
 
-    /// `delete` — `delete x.prop` used to emit `delete __zp_get(...)` which
-    /// deletes nothing and always returns true. `__zp_delete` preserves
-    /// Reflect.deleteProperty semantics; the optional flag keeps
-    /// `delete x?.y`'s nullish short-circuit.
+    /// `delete`: `__zp_delete` preserves `Reflect.deleteProperty` semantics,
+    /// and the optional flag keeps `delete x?.y`'s nullish short-circuit.
     fn visit_unary_expression(&mut self, expr: &UnaryExpression<'a>) {
         if expr.operator != oxc_syntax::operator::UnaryOperator::Delete {
             walk::walk_unary_expression(self, expr);
@@ -4543,7 +4478,7 @@ impl<'a> Visit<'a> for RewriteVisitor {
         use oxc_span::GetSpan;
         match &expr.argument {
             Expression::ChainExpression(c) => match &c.expression {
-                // `delete obj?.location` — optional member inside the chain.
+                // `delete obj?.location`: optional member inside the chain.
                 ChainElement::StaticMemberExpression(member) => {
                     let prop = member.property.name.as_str();
                     if !matches!(member.object, Expression::Super(_))
@@ -4638,7 +4573,7 @@ impl<'a> Visit<'a> for RewriteVisitor {
         walk::walk_unary_expression(self, expr);
     }
 
-    /// `for (location of xs)` / `for (location in xs)` — the loop-variable
+    /// `for (location of xs)` / `for (location in xs)`: the loop-variable
     /// position is a write target, not a read; and `for (var location of …)`
     /// at classic top level needs the per-iteration sink.
     fn visit_for_of_statement(&mut self, stmt: &ForOfStatement<'a>) {
@@ -4649,7 +4584,7 @@ impl<'a> Visit<'a> for RewriteVisitor {
         self.visit_for_iter(&stmt.left, &stmt.right, &stmt.body);
     }
 
-    /// `{a: TARGET = default}` — the default is an expression (reads), the
+    /// `{a: TARGET = default}`: the default is an expression (reads), the
     /// binding is a write target.
     fn visit_assignment_target_with_default(&mut self, it: &AssignmentTargetWithDefault<'a>) {
         self.in_target += 1;
@@ -4658,7 +4593,7 @@ impl<'a> Visit<'a> for RewriteVisitor {
         self.visit_read(&it.init);
     }
 
-    /// `{key: TARGET}` — a computed key is evaluated as an expression; the
+    /// `{key: TARGET}`: a computed key is evaluated as an expression; the
     /// binding position is a write target.
     fn visit_assignment_target_property_property(
         &mut self,
@@ -4682,12 +4617,10 @@ impl<'a> Visit<'a> for RewriteVisitor {
 }
 
 impl RewriteVisitor {
-    /// An expression nested in an assignment target — a member's receiver or
-    /// computed key, a default value, a computed pattern key — is *read*, even
-    /// though the pattern around it is written. Only the identifier that is
-    /// itself the target takes the write-only sink (`__zp_get.d.<name>`); a
-    /// read through that sink always yields `undefined`, so `[window.a.b] = x`
-    /// became `undefined.a` and threw (BBC's ad script died on exactly that).
+    /// An expression nested in an assignment target (a member's receiver or
+    /// computed key, a default value, or a computed pattern key) is read even
+    /// though the enclosing pattern is written. Only the identifier that is
+    /// itself the target takes the write-only sink (`__zp_get.d.<name>`).
     fn visit_read<'a>(&mut self, expr: &Expression<'a>) {
         let saved = std::mem::replace(&mut self.in_target, 0);
         self.visit_expression(expr);
@@ -4704,7 +4637,7 @@ impl RewriteVisitor {
         body: &Statement<'a>,
     ) {
         // for-in/of are never capped, but a label may still sit directly on
-        // them — consume it so a deeper capped loop can't see it.
+        // them; consume it so a deeper capped loop cannot see it.
         self.pending_labels.clear();
         match left {
             ForStatementLeft::VariableDeclaration(decl) => {
@@ -4736,13 +4669,13 @@ impl RewriteVisitor {
 
 /// A `?.` along an optional chain's object/callee spine (see
 /// `visit_chain_expression`). Every split's base is the source prefix
-/// `[chain_start, base_end)` — chain links nest leftward.
+/// `[chain_start, base_end)` as chain links nest leftward.
 enum ChainSplit {
     /// `base?.p` / `base?.[k]` / `base?.#p`.
     Member { base_end: u32 },
-    /// `callee?.(args)` with a non-member callee — `this` is undefined anyway.
+    /// `callee?.(args)` with a non-member callee (`this` is undefined anyway).
     Plain { callee_end: u32 },
-    /// `obj.p?.(args)` / `obj[k]?.(args)` — the callee is read and bound to
+    /// `obj.p?.(args)` / `obj[k]?.(args)`: the callee is read and bound to
     /// `obj` by `__zp_ocallv`, so the continuation keeps the receiver.
     Method { obj_end: u32, key: ChainKey, callee_end: u32, call: (u32, u32) },
 }
@@ -4776,8 +4709,8 @@ impl ChainSplit {
 }
 
 /// Optional links of a chain, innermost (leftmost) first. `None` when a `?.`
-/// cannot be split without losing semantics — `super.m?.()`, `o.#m?.()` and a
-/// parenthesized member callee cannot hand their receiver to `__zp_ocallv`.
+/// cannot be split without losing semantics (`super.m?.()`, `o.#m?.()`, and a
+/// parenthesized member callee cannot hand their receiver to `__zp_ocallv`).
 fn chain_splits<'a>(chain: &ChainExpression<'a>) -> Option<Vec<ChainSplit>> {
     fn call<'a>(c: &CallExpression<'a>, out: &mut Vec<ChainSplit>) -> Option<()> {
         if !c.optional {
@@ -4900,8 +4833,8 @@ fn chain_suspends_after<'a>(chain: &ChainExpression<'a>, from: u32) -> bool {
     s.hit
 }
 
-/// First..last argument span for a call — the resolver splices them into
-/// `[args]`; `(0,0)` when the call has no arguments.
+/// First..last argument span for a call (the resolver splices them into
+/// `[args]`), or `(0,0)` when the call has no arguments.
 fn call_args_span<'a>(expr: &CallExpression<'a>) -> (u32, u32) {
     if expr.arguments.is_empty() {
         return (0, 0);
@@ -4912,15 +4845,12 @@ fn call_args_span<'a>(expr: &CallExpression<'a>) -> (u32, u32) {
     )
 }
 
-/// Helper: object span of a static member expression `obj.prop` ranges from
-/// the start of `obj` to before the `.`.
+/// Object span of a static member expression `obj.prop`.
 trait StaticMemberExt {
     fn object_span(&self) -> Span;
 }
 impl<'a> StaticMemberExt for StaticMemberExpression<'a> {
     fn object_span(&self) -> Span {
-        // Use the receiver expression's span. Helper enum: Expression has a
-        // GetSpan impl; we use the trait to extract it.
         use oxc_span::GetSpan;
         self.object.span()
     }
@@ -4941,7 +4871,7 @@ fn static_string_arg<'a>(
 }
 
 /// Walk a BindingPattern (destructuring, etc.) and call `out` for each
-/// declared name. v0.133: BindingPattern is a direct enum.
+/// declared name.
 fn collect_binding_pattern<'a, F: FnMut(&'a str)>(pat: &'a BindingPattern<'a>, out: &mut F) {
     match pat {
         BindingPattern::BindingIdentifier(id) => out(id.name.as_str()),
@@ -4982,54 +4912,41 @@ mod tests {
         }
     }
 
-    // Pin: the sourcemap-pragma tail scan starts at a RAW BYTE offset
-    // (`len() - 4096`). Landing inside a multi-byte character used to panic
-    // ("start byte index N is not a char boundary"), which in wasm is a bare
-    // `RuntimeError: unreachable` that killed the SW's document stream and
-    // rendered NAVER as a blank page — its trailing inline JSON is full of
-    // Korean text. Build sources whose 4 KiB cut lands on every possible
-    // offset inside a 3-byte character.
-    // Pin: a COMPUTED dynamic import must be wrapped in the runtime helper.
-    // Left alone, the specifier resolves against the importing script's own
-    // proxy URL (`<proxy>/zp/api/script?…`), so "./x.js" was requested as
-    // /zp/api/x.js and 404'd — NAVER's ad SDK died exactly this way
-    // (`/zp/api/gfp-display-sdk.js`, then `initAd is not defined`).
-    // 2026-08-25 — **별칭 한 번으로 멤브레인이 꺼지면 안 된다.**
-    // 예전 규칙은 수신자가 지역 식별자이기만 하면 위험 멤버 래핑을 통째로
-    // 건너뛰었다. 그러면 `var u = n.location; u.protocol` 한 줄이면 우회다 —
-    // 옵셔널 체이닝 디슈가(`n.location?.protocol`)가 정확히 그 모양이고,
-    // CNN 벤더 코드가 그걸로 스킴을 골랐다. 진짜 Location 의 접근자는 own +
-    // non-configurable(unforgeable) 이라 마스킹으로는 막을 수 없어서, 프록시
-    // 스킴 `http:` 가 그대로 새고 `http://www.ugdturner.com/xd.sjs` 가 502 나며
-    // `turner_getGuid` 가 정의되지 않아 광고 체인이 끊겼다.
+    // The sourcemap-pragma tail scan starts at a raw byte offset (`len() - 4096`).
+    // Landing inside a multi-byte character must not panic on a non-char boundary.
+    // Computed dynamic imports must also be wrapped in the runtime helper so the
+    // specifier resolves against the virtual target URL rather than `/zp/api/script`.
+    // Local receiver aliasing (`var u = n.location; u.protocol`) must still route
+    // URL-shape members through `__zp_get` because `Location` accessors are own
+    // non-configurable properties that cannot be masked on the prototype.
     #[test]
     fn dangerous_member_survives_local_aliasing() {
         let o = opts();
-        // ① 지역 수신자여도 감싼다(안팎 모두).
+        // Local receivers are wrapped on both inner and outer accesses.
         let out = rewrite_script("function f(n){ return n.location.protocol; }", &o).unwrap();
         assert!(
             out.code.contains("__zp_get(n,\"location\")"),
-            "지역 수신자의 .location 도 감싸야 한다: {}",
+            "local receiver .location must be wrapped: {}",
             out.code
         );
         assert!(
             out.code.contains("\"protocol\")"),
-            "바깥 URL 성분도 감싸야 한다: {}",
+            "outer URL component must also be wrapped: {}",
             out.code
         );
-        // ② 별칭 변수를 거친 읽기(옵셔널 체이닝 디슈가 모양).
+        // Reading through an alias variable still routes through the membrane.
         let aliased =
             rewrite_script("function f(n){ var u = n.location; return u.protocol; }", &o).unwrap();
         assert!(
             aliased.code.contains("__zp_get(u,\"protocol\")"),
-            "별칭을 거쳐도 멤브레인을 타야 한다: {}",
+            "access through an alias variable must route through the membrane: {}",
             aliased.code
         );
-        // ③ 수신자 **이름 자체**가 가려진 위험 전역이면 그건 지역 값이므로 그대로.
+        // When the receiver identifier itself is a shadowed dangerous global, keep the local binding.
         let shadowed = rewrite_script("function f(location){ return location.href; }", &o).unwrap();
         assert!(
             !shadowed.code.contains("__zp_get(location,"),
-            "가려진 전역 이름은 지역 값이다 — 건드리면 의미가 바뀐다: {}",
+            "shadowed global name is a local binding and must not be wrapped: {}",
             shadowed.code
         );
     }
@@ -5056,32 +4973,10 @@ mod tests {
         );
     }
 
-    // Pin: specifier 가 **그 자체로 리라이트 대상**일 때의 중첩 순서.
-    //
-    // 위 테스트는 `base + '/mod.js'` (이항식) 이라 specifier 시작 오프셋에
-    // 다른 패치가 겹치지 않아, 안팎이 뒤집혀도 통과했다. 메서드 호출처럼
-    // 시작 오프셋을 공유하는 형태라야 잡힌다:
-    //
-    //   import(u.replace('.png','.js'))
-    //   뒤집히면 → import(__zp_call(__zp_module_url(u,"replace",[…]), "<ref>"))
-    //
-    // referrer 자리에 `"replace"` 가 들어가 `new URL(spec,"replace")` 가
-    // `Invalid base URL` 로 throw 한다. 실사이트에서는 번들러의 청크 로딩
-    // (`import(chunkPath(id))`) 이 통째로 죽는 증상으로 나온다.
-    //
-    // ── 미해결(2026-08-14). 이 테스트는 **현재 실패한다** ──────────────────
-    // 원인: 래퍼가 인자 span 의 **시작 오프셋에 zero-width 패치**로 붙는데,
-    // 호출 리라이트(`__zp_call` 마커)는 apply 시점에 `rewrite_range(obj_start,
-    // obj_end)` 로 객체 범위를 **재귀 렌더링**한다. 래퍼 패치가 그 범위의 첫
-    // 바이트에 앉아 있어 안쪽 렌더링에 빨려 들어간다. push 순서를 바꿔도(시도해
-    // 봤다) 결과는 같다 — 순서 문제가 아니라 **앵커 위치** 문제다.
-    //
-    // 고치려면 앵커를 인자 span 밖으로 빼야 한다. `import` 키워드 자체를
-    // `[expr.span.start, +6]` 패치로 `__zp_import` 로 바꾸고 referrer 는 닫는
-    // 괄호 `[expr.span.end-1, end]` 에 붙이는 방식이면 두 패치가 모두 인자
-    // 밖이라 충돌하지 않는다. 대신 프렐류드에 `__zp_import` 전역이 하나 늘고,
-    // 자식 realm 위임 목록(installNetworkContainment)과 E1 escape matrix 교차
-    // 검증이 필요하다. 그래서 별도 작업으로 남긴다.
+    // Nesting order when the dynamic import specifier is itself rewritten (such as a
+    // method call sharing the same start offset). If the outer `__zp_module_url` wrapper
+    // is absorbed into the inner receiver span, the method name lands in the referrer
+    // slot and `new URL(spec, referrer)` throws `Invalid base URL`.
     #[test]
     fn computed_dynamic_import_wraps_outside_nested_rewrite() {
         let o = RewriteOpts {
@@ -5096,17 +4991,14 @@ mod tests {
         let m = out
             .find("__zp_module_url(")
             .unwrap_or_else(|| panic!("computed import must be wrapped: {out}"));
-        // 안쪽 리라이트가 실제로 일어난 경우에만 중첩 순서를 검사한다
-        // (리라이터 정책이 바뀌어 wrap 이 사라지면 이 검사는 조용히 무의미해지므로,
-        //  referrer 검사를 아래에 따로 둔다).
+        // Verify nesting order when the inner call is rewritten.
         if let Some(inner) = out.find("__zp_call(") {
             assert!(
                 m < inner,
-                "__zp_module_url 이 안쪽 리라이트보다 바깥이어야 한다: {out}"
+                "__zp_module_url must wrap outside the inner rewrite: {out}"
             );
         }
-        // referrer 는 module_url 의 **두 번째 인자**여야 한다. 뒤집히면 메서드
-        // 이름이 그 자리에 온다.
+        // The referrer must remain the second argument of `__zp_module_url`.
         assert!(
             out.contains(",\"https://cdn.example.com/a/b.js\")")
                 || out.contains(", \"https://cdn.example.com/a/b.js\")"),
@@ -5114,11 +5006,11 @@ mod tests {
         );
         assert!(
             !out.contains("__zp_module_url(u,\"replace\""),
-            "referrer 자리에 메서드 이름이 오면 안 된다: {out}"
+            "method name must not land in the referrer slot: {out}"
         );
     }
 
-    // Literal imports stay statically resolved — no runtime helper needed.
+    // Literal imports stay statically resolved without the runtime helper.
     #[test]
     fn literal_dynamic_import_stays_static() {
         let o = RewriteOpts {
@@ -5141,30 +5033,25 @@ mod tests {
     #[test]
     fn strip_sourcemap_pragma_survives_multibyte_tail() {
         for pad in 0..8usize {
-            // 'ㅏ'/'일' are 3 bytes each; varying the ASCII padding walks the
+            // `\u{AC00}` is 3 bytes in UTF-8; varying the ASCII padding walks the
             // cut point across all three byte positions of a character.
-            let src = format!("var x=1;{}{}", "a".repeat(pad), "일".repeat(2000));
+            let src = format!("var x=1;{}{}", "a".repeat(pad), "\u{AC00}".repeat(2000));
             let out = strip_sourcemap_pragma(&src);
             assert_eq!(out, src, "pad={pad} must be returned unchanged");
         }
         // And it still strips a real pragma when one is present after CJK text.
-        let src = format!("var x=1;{}\n//# sourceMappingURL=app.js.map", "일".repeat(2000));
+        let src = format!("var x=1;{}\n//# sourceMappingURL=app.js.map", "\u{AC00}".repeat(2000));
         let out = strip_sourcemap_pragma(&src);
         assert!(!out.contains("sourceMappingURL"), "pragma must be stripped: {out}");
     }
 
     #[test]
     fn html_body_must_parse_error_under_strict_mode() {
-        // 2026-06-07 split-bundle (c.1) Step 2a aborted: NAVER's anti-bot
-        // occasionally returns a 404 HTML body for script subresources
-        // (ssl.pstatic.net/.../ndp-loader.js). Strict-mode parse rejection
-        // is the contract the SW's fail-closed posture relies on — if it
-        // ever regresses, the browser will execute raw HTML and surface a
-        // SyntaxError instead of a clean POLICY_BLOCKED stub. Pin both a
-        // minimal HTML body and the real NAVER 404 shape.
+        // Strict-mode parse rejection is required for the SW's fail-closed posture
+        // when an upstream returns an HTML error page for a script subresource.
         for html in &[
             "<!DOCTYPE html\n<html><head><title>404</title></head><body><h1>not found</h1></body></html>",
-            "<!DOCTYPE html\n    PUBLIC \"-//W3C//DTD XHTML 1.0 Transitional//EN\" \"http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd\">\n<html xmlns=\"http://www.w3.org/1999/xhtml\">\n<head>\n<title>네이버</title>\n<script type=text/javascript>\nif (!['/', '/index.html'].includes(window.location.pathname)) { window.location.href = '/'; }\n</script>\n</head>\n<body><h1>not found</h1></body>\n</html>",
+            "<!DOCTYPE html\n    PUBLIC \"-//W3C//DTD XHTML 1.0 Transitional//EN\" \"http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd\">\n<html xmlns=\"http://www.w3.org/1999/xhtml\">\n<head>\n<title>Not Found</title>\n<script type=text/javascript>\nif (!['/', '/index.html'].includes(window.location.pathname)) { window.location.href = '/'; }\n</script>\n</head>\n<body><h1>not found</h1></body>\n</html>",
         ] {
             let r = rewrite_script(html, &opts());
             assert!(
@@ -5183,11 +5070,8 @@ mod tests {
 
     #[test]
     fn function_global_is_rewritten_to_membrane() {
-        // 2026-06-07 split-bundle (c.1) Step 2.1.5: shadow-compare 가 NAVER
-        // cross-domain-storage 에서 발견한 escape vector. `Function.prototype`
-        // 으로 native Function constructor 접근 → eval-equivalent. legacy
-        // rewriter-rs 는 `Function` 을 dangerous global 로 분류 — modern 도
-        // 동일하게 처리해야 NAVER (그리고 PHASE2 strict mode) 회귀 방지.
+        // Accessing `Function.prototype` or `new Function(...)` reaches the native
+        // Function constructor unless `Function` is classified as a dangerous global.
         let src = "var i = Function.prototype; return new Function('return globalThis')();";
         let r = rewrite_script(src, &opts()).unwrap();
         assert!(
@@ -5199,9 +5083,7 @@ mod tests {
 
     #[test]
     fn eval_global_is_rewritten_to_membrane() {
-        // `eval` 도 native escape vector — `eval("...")` 으로 임의 코드 실행.
-        // identifier reference 로 접근될 때 (e.g. `var f = eval; f("...")`)
-        // dangerous 로 분류 의무.
+        // Indirect `eval` references (`var f = eval; f("...")`) must route through the membrane.
         let src = "var f = eval; f('return globalThis');";
         let r = rewrite_script(src, &opts()).unwrap();
         assert!(
@@ -5211,10 +5093,8 @@ mod tests {
         );
     }
 
-    // ── R4: sloppy Annex B 블록/레이블/단일문 함수의 varEnv 호이스트 ──
-    // 방출 코드는 그대로 두고(실제 호이스트는 엔진이 한다) 참조 해석만
-    // 고친다 — 블록 밖의 dangerous 이름이 지역 바인딩이어야 `__zp_get` 이
-    // 가상 전역으로 새지 않는다.
+    // Sloppy Annex B block, labeled, and single-statement functions hoist to varEnv.
+    // The emitted declaration stays in place while outer references resolve to the local binding.
     #[test]
     fn sloppy_block_function_binds_dangerous_name_in_fn_scope() {
         let src = "function g(){ { function location(){ return 1; } } return location(); }";
@@ -5239,7 +5119,7 @@ mod tests {
 
     #[test]
     fn sloppy_labeled_function_binds_dangerous_name() {
-        // Annex B.3.3 — `l: function document(){}` 도 varEnv 에 올라간다.
+        // Annex B.3.3: `l: function document(){}` hoists to varEnv in sloppy mode.
         let src = "function g(){ l: function document(){ return 1; } return document(); }";
         let r = rewrite_script(src, &opts()).unwrap();
         assert!(
@@ -5251,7 +5131,7 @@ mod tests {
 
     #[test]
     fn sloppy_single_statement_function_binds() {
-        // Annex B.3.4 — `if (c) function f(){}` 단일문 위치.
+        // Annex B.3.4: `if (c) function f(){}` single-statement function declaration.
         let src = "function g(){ if (x) function history(){ return 1; } return history; }";
         let r = rewrite_script(src, &opts()).unwrap();
         assert!(
@@ -5263,8 +5143,8 @@ mod tests {
 
     #[test]
     fn toplevel_sloppy_block_unforgeable_stays_virtual() {
-        // 전역 varEnv 의 unforgeable 이름은 Annex B 호이스트도 무시된다 —
-        // `var location` 과 같은 규칙으로 가상화 유지.
+        // Unforgeable names in the global varEnv ignore Annex B hoisting,
+        // keeping virtualization active just like top-level `var location`.
         let src = "{ function location(){ return 1; } } location;";
         let r = rewrite_script(src, &opts()).unwrap();
         assert!(
@@ -5289,8 +5169,7 @@ mod tests {
 
     #[test]
     fn class_method_body_is_strict_for_annex_b() {
-        // 클래스 메서드 본문은 'use strict' 없이도 strict — 블록 함수가
-        // 호이스트되지 않아 밖의 참조는 가상 전역을 본다.
+        // Class method bodies are always strict, so block functions do not hoist.
         let src = "class C { m(){ { function location(){ return 1; } } return location; } }";
         let r = rewrite_script(src, &opts()).unwrap();
         assert!(
@@ -5302,15 +5181,9 @@ mod tests {
 
     #[test]
     fn naver_ndp_loader_round_trips_as_valid_js() {
-        // 2026-06-07 split-bundle (c.1) Step 2a investigation: NAVER's
-        // ssl.pstatic.net/tveta/libs/ndpsdk/prod/ndp-loader.js is the
-        // smallest real-site canary for the OXC 0.133 patch-mode emit.
-        // Pin both code paths the SW rewrite calls into:
-        //  (1) `rewrite_script` (full re-emit)
-        //  (2) `rewrite_script_patches` + `apply_patches` (patch envelope)
-        // Both must produce syntactically valid JS, and the two outputs
-        // must match byte-for-byte (modulo the pragma strip — ndp-loader
-        // has no sourceMappingURL pragma).
+        // Verify that both `rewrite_script` (full re-emit) and `rewrite_script_patches`
+        // + `apply_patches` (patch envelope) produce identical, syntactically valid JS
+        // on the real-world `ndp-loader-fixture.js` bundle.
         let src = include_str!("ndp-loader-fixture.js");
         let alloc1 = oxc_allocator::Allocator::default();
         let st = oxc_span::SourceType::cjs();
@@ -5337,14 +5210,12 @@ mod tests {
 
     #[test]
     fn super_constructor_with_extends_globalthis_member() {
-        // Real-world pattern from kw-owner: class extends a rewritten global,
-        // constructor calls super(args). Rewriter must keep super() in place
-        // and the class context valid.
+        // Class extends a rewritten global and constructor calls `super(args)`.
         let src =
             "class A extends globalThis.X { constructor(p) { super(p); this.location = p; } }";
         let r = rewrite_script(src, &opts()).unwrap();
         assert!(r.code.contains("super(p)"), "super(p) gone: {}", r.code);
-        // Make sure we didn't accidentally rewrite super.location to __zp_set(super,...)
+        // Do not rewrite `super.location` to `__zp_set(super, ...)`.
         assert!(
             !r.code.contains("__zp_set(super"),
             "super target wrapped: {}",
@@ -5354,9 +5225,7 @@ mod tests {
 
     #[test]
     fn super_method_call_not_rewritten() {
-        // `super.write(...)` (or any other dangerous-method name) must NOT be
-        // wrapped in __zp_call(super, ...) — that's the actual failure mode
-        // we see on comic.naver.com's kw-owner bundle.
+        // `super.write(...)` must not be wrapped in `__zp_call(super, ...)`.
         let src = "class C extends B { m() { super.write('x'); } }";
         let r = rewrite_script(src, &opts()).unwrap();
         assert!(
@@ -5373,8 +5242,7 @@ mod tests {
 
     #[test]
     fn super_call_not_rewritten() {
-        // `super(...)` in a constructor must stay literal — wrapping would
-        // strip class context and trigger "'super' keyword unexpected".
+        // `super(...)` in a constructor must stay literal so class context is preserved.
         let src = "class C extends B { constructor() { super(); this.x = 1; } }";
         let r = rewrite_script(src, &opts()).unwrap();
         assert!(
@@ -5386,11 +5254,8 @@ mod tests {
 
     #[test]
     fn super_member_access_not_rewritten() {
-        // `super.foo` and `super.foo = v` must be left untouched even when
-        // `foo` is on the dangerous-member list — `__zp_get(super, "foo")`
-        // is a SyntaxError outside class context. Observed on comic.naver.com
-        // (webtoon) bundles where the entire React init fails because one
-        // vendor script throws SyntaxError: 'super' keyword unexpected here.
+        // `super.foo` and `super.foo = v` must stay untouched even when `foo` is on the
+        // dangerous-member list because `__zp_get(super, "foo")` is a SyntaxError.
         let src = "class C extends B { m() { return super.location; } }";
         let r = rewrite_script(src, &opts()).unwrap();
         assert!(
@@ -5407,12 +5272,9 @@ mod tests {
         );
     }
 
-    // Shorthand object properties reuse ONE identifier as both key and value.
-    // Patching it as a plain reference emitted
-    // `{__zp_get(globalThis,"window"), ...}` — invalid JS that made the whole
-    // script file fail to parse, taking every unrelated symbol in it down.
-    // Observed on NAVER's ntm.pstatic.net/scripts/ntm_*.js:
-    // `this.dom = { window, document, navigator }`.
+    // Shorthand object properties reuse one identifier as both key and value.
+    // Patching it as a plain reference would emit `{__zp_get(globalThis,"window"), ...}`,
+    // which is a SyntaxError.
     #[test]
     fn expands_shorthand_object_property_for_dangerous_globals() {
         let r = rewrite_script("var a = { window, document, navigator };", &opts()).unwrap();
@@ -5439,7 +5301,7 @@ mod tests {
 
     #[test]
     fn shorthand_expansion_respects_shadowing_and_non_shorthand_forms() {
-        // A shadowed `window` is a local binding — must stay shorthand.
+        // A shadowed `window` is a local binding and must stay shorthand.
         let shadowed =
             rewrite_script("(function(window){ return { window }; })();", &opts()).unwrap();
         assert!(
@@ -5447,8 +5309,7 @@ mod tests {
             "shadowed shorthand must stay untouched, got: {}",
             shadowed.code
         );
-        // Methods / getters merely NAMED after a global are keys, not
-        // references — they must not be rewritten at all.
+        // Methods and getters named after a global are property keys, not references.
         let method = rewrite_script("f({ window() { return 1; } });", &opts()).unwrap();
         assert!(
             !method.code.contains("__zp_get"),
@@ -5490,13 +5351,8 @@ mod tests {
         );
     }
 
-    // Static module syntax was never rewritten — only dynamic `import()` was.
-    // We serve modules from `<proxy>/zp/api/script?u=<target>&kind=module`, so
-    // a relative specifier left alone resolves against `/zp/api/`; the browser
-    // requests `<proxy>/zp/api/<name>`, the SW maps that onto the target host,
-    // and the target answers 404. That was the long-standing
-    // `/zp/api/gfp-display-sdk.js` 404 on NAVER (the ad SDK module statically
-    // imports `./gfp-display-*.js` siblings).
+    // Modules are served from `<proxy>/zp/api/script?u=<target>&kind=module`, so
+    // relative static specifiers must be resolved against `target_url` rather than `/zp/api/`.
     #[test]
     fn rewrites_static_module_specifiers() {
         let opts = RewriteOpts {
@@ -5558,18 +5414,17 @@ mod tests {
             strict: true,
             proxy_origin: "http://proxy.localhost:18080".to_string(),
         };
-        // 번들러는 이 값의 디렉터리로 publicPath 를 유도한다. 프록시 URL 이
-        // 새어 나가면 이후 청크가 `<proxy>/zp/api/<chunk>` 로 요청되고 그게
-        // 다시 프록시를 타 타깃 자리에 프록시 오리진이 들어간다 → 502.
+        // Bundlers derive `publicPath` from `import.meta.url`. If the proxy URL leaks,
+        // subsequent chunks are requested under `<proxy>/zp/api/<chunk>` and fail with 502.
         let r = rewrite_script("const p = import.meta.url;", &opts).unwrap();
         assert!(
             r.code.contains("\"https://github.githubassets.com/assets/app-runtime.js\""),
-            "import.meta.url 이 타깃 URL 로 안 바뀌었다: {}",
+            "import.meta.url was not rewritten to the target URL: {}",
             r.code
         );
-        assert!(!r.code.contains("import.meta.url"), "원본이 남았다: {}", r.code);
+        assert!(!r.code.contains("import.meta.url"), "original import.meta.url survived: {}", r.code);
 
-        // 상대 해석 관용구도 같은 자리를 쓴다.
+        // Relative URL resolution against `import.meta.url` uses the same replacement.
         let r2 = rewrite_script("new URL('./chunk.css', import.meta.url)", &opts).unwrap();
         assert!(
             r2.code.contains("\"https://github.githubassets.com/assets/app-runtime.js\""),
@@ -5577,8 +5432,7 @@ mod tests {
             r2.code
         );
 
-        // target_url 이 없으면(호스트 테스트) 건드리지 않는다 — 빈 문자열을
-        // 박으면 상대 해석이 문서 base 로 떨어져 더 나빠진다.
+        // Leave `import.meta.url` untouched when `target_url` is empty in host tests.
         let bare = RewriteOpts {
             kind: ScriptKind::Module,
             target_url: String::new(),
@@ -5597,18 +5451,18 @@ mod tests {
             strict: true,
             proxy_origin: "http://proxy.localhost:18080".to_string(),
         };
-        // 네이티브 resolve 는 모듈의 실제 URL(/zp/api/script?…)을 base 로 쓴다 —
-        // 성공하면 프록시 오리진이 새고, blob/non-hierarchical base 에서는
-        // TypeError. 가상 타깃 기준 해석 함수로 치환한다.
+        // Native `import.meta.resolve` resolves against the module's physical URL
+        // (`/zp/api/script?...`), leaking the proxy origin or throwing on non-hierarchical
+        // bases. Replace it with a resolver anchored at the virtual target URL.
         let r = rewrite_script("const u = import.meta.resolve('./x');", &opts).unwrap();
         assert!(
             r.code.contains("new URL(s,\"https://example.com/dir/app.js\").href"),
-            "resolve 치환이 없다: {}",
+            "import.meta.resolve replacement missing: {}",
             r.code
         );
-        assert!(!r.code.contains("import.meta.resolve"), "원본이 남았다: {}", r.code);
+        assert!(!r.code.contains("import.meta.resolve"), "original import.meta.resolve survived: {}", r.code);
 
-        // target_url 없으면 건드리지 않는다.
+        // Leave `import.meta.resolve` untouched when `target_url` is empty.
         let bare = RewriteOpts {
             kind: ScriptKind::Module,
             target_url: String::new(),
@@ -5651,12 +5505,9 @@ mod tests {
         );
     }
 
-    // A bare dangerous global used as an assignment TARGET. The identifier
-    // visitor turned `location = url` into
-    // `__zp_get(globalThis,"location") = url`, which V8 parses but rejects at
-    // run time (`ReferenceError: Invalid left-hand side in assignment`), so this
-    // extremely common navigation idiom silently died. Compound and update
-    // forms had the same broken target.
+    // Bare dangerous globals used as assignment targets (`location = url`,
+    // `location += '#x'`, `location++`) must route through `__zp_set` / `__zp_update`
+    // rather than emitting an invalid call expression on the left-hand side.
     #[test]
     fn routes_bare_global_writes_through_the_membrane() {
         let plain = rewrite_script("location = url;", &opts()).unwrap();
@@ -5673,8 +5524,8 @@ mod tests {
             "compound assignment must emit get+op+set, got: {}",
             compound.code
         );
-        // Logical compound assignments short-circuit inline — no thunk, so
-        // await/yield in the RHS survive.
+        // Logical compound assignments short-circuit inline without a thunk so
+        // `await` and `yield` in the RHS remain valid.
         let logical = rewrite_script("location ||= url;", &opts()).unwrap();
         assert!(
             logical
@@ -5710,11 +5561,8 @@ mod tests {
         }
     }
 
-    // `({ location } = obj)` — shorthand destructuring TARGET. A target must be
-    // a settable reference, so `__zp_set(...)` cannot go there; patching it as a
-    // plain reference emitted `({ __zp_get(globalThis,"location") } = obj)`, a
-    // SyntaxError that took the whole file down. The prelude's write-only sink
-    // (`__zp_get.d`) gives us a settable member with no read surface.
+    // Shorthand destructuring targets (`({ location } = obj)`) require a settable
+    // reference, so they expand to the prelude's write-only sink (`__zp_get.d.location`).
     #[test]
     fn routes_destructured_global_writes_through_the_write_only_sink() {
         let simple = rewrite_script("({ location } = obj);", &opts()).unwrap();
@@ -5766,11 +5614,9 @@ mod tests {
         }
     }
 
-    // The sink is *write-only*: a read through it is `undefined`. So a dangerous
-    // global that is only read inside a target — a member's receiver
-    // (`[window.a.b] = x`), a computed key, a default value — must take the
-    // ordinary read path. BBC's ad script died on `[,,,window.dotcom.d.k] = v`,
-    // rewritten to `__zp_get.d.window.dotcom…` = `undefined.dotcom`.
+    // Because `__zp_get.d` is write-only (reading it yields `undefined`), a dangerous
+    // global that is only read inside an assignment target (such as a member's receiver
+    // `[window.a.b] = x`, a computed key, or a default value) must use the normal read path.
     #[test]
     fn globals_read_inside_assignment_targets_are_not_sunk() {
         for src in [
@@ -5819,11 +5665,10 @@ mod tests {
 
     #[test]
     fn shadowed_globals_keep_native_write_semantics() {
-        // A local binding named after a global is not the global — neither the
-        // setter helpers nor the sink may appear. Note: classic TOP-LEVEL
-        // `var location` is NOT a shadow (the engine ignores the redeclaration
-        // of the unforgeable global) — so these cases use function scope,
-        // where `var`/`let`/params genuinely bind.
+        // A local binding named after a global is not the global, so neither the
+        // setter helpers nor the sink may appear. Classic top-level `var location`
+        // is not a shadow because `location` is unforgeable on `Window`, so these
+        // cases use function scope where `var`, `let`, and parameters bind locally.
         for src in [
             "function f(){ var location = 2; location = 3; }",
             "(function(location){ location = 1; })();",
@@ -5884,7 +5729,7 @@ mod tests {
 
     #[test]
     fn does_not_rewrite_var_decl_with_same_name() {
-        // Function-scoped `var location` genuinely shadows — no mediation.
+        // Function-scoped `var location` shadows the global and needs no mediation.
         let src = "function f(){ var location = 'x'; use(location); }";
         let r = rewrite_script(src, &opts()).unwrap();
         assert!(
@@ -5896,9 +5741,8 @@ mod tests {
 
     #[test]
     fn classic_toplevel_var_dangerous_is_not_a_shadow() {
-        // The escape vector from the ERRATA A-series: at classic top level,
-        // `var location` silently fails to redeclare the unforgeable global,
-        // so reads must still flow through the membrane.
+        // At classic top level, `var location` does not redeclare the unforgeable
+        // global, so reads and initializers must still route through the membrane.
         for (src, needle) in [
             ("var location; location.href;", "__zp_get(globalThis,\"location\")"),
             ("var document; document.title;", "__zp_get(globalThis,\"document\")"),
@@ -5912,10 +5756,8 @@ mod tests {
                 "{src:?} must still mediate the global, got: {}",
                 r.code
             );
-            // A bare `var location;` (no init) is a silent no-op natively and
-            // stays a no-op here — what must not survive is a dangerous
-            // INITIALIZER or function declaration that reads/writes the real
-            // global. References are always mediated.
+            // A bare `var location;` (no init) is a no-op natively; initializers
+            // and function declarations that touch the real global must be mediated.
             assert!(
                 !r.code.contains("var location =") && !r.code.contains("function location"),
                 "{src:?} left a dangerous declaration that escapes: {}",
@@ -5926,8 +5768,8 @@ mod tests {
 
     #[test]
     fn classic_toplevel_var_dangerous_patterns_sink() {
-        // `var {location} = o` / `var [location] = a` — the pattern binds to a
-        // temp and the value forwards into the membrane.
+        // Top-level `var {location} = o` and `var [location] = a` bind to a temporary
+        // and forward the value into the membrane.
         for src in [
             "var {location} = o;",
             "var [location] = a;",
@@ -5949,8 +5791,7 @@ mod tests {
 
     #[test]
     fn classic_toplevel_let_still_shadows() {
-        // `let`/`const`/`class` at top level DO create real lexical bindings —
-        // these remain normal shadows.
+        // Top-level `let`, `const`, and `class` create lexical bindings that shadow globals.
         for src in [
             "let location = 'x'; location;",
             "const location = 'x'; use(location);",
@@ -5965,14 +5806,8 @@ mod tests {
         }
     }
 
-    // 2026-06-09 NAVER dynamic import fix: literal-URL `import("./mod")`
-    // calls are resolved against `target_url` and rewritten to a
-    // `/zp/api/script?u=<percent-encoded-abs>` so the SW transports
-    // them through the proxy. NAVER's `gfp-core.js` does
-    // `import('./gfp-display-glog-logger.js')` from its origin —
-    // before this fix the SW had no transport hook because the path
-    // resolved against `proxy.localhost` (page realm sees that as
-    // the base) and 404'd.
+    // Literal-URL `import("./mod")` calls resolve against `target_url` and rewrite
+    // to `/zp/api/script?u=<percent-encoded-abs>` so the SW transports them.
     #[test]
     fn dynamic_import_relative_literal_routes_through_proxy() {
         let mut o = opts();
@@ -6025,8 +5860,7 @@ mod tests {
     fn dynamic_import_bare_specifier_left_alone() {
         let mut o = opts();
         o.kind = ScriptKind::Module;
-        // Bare specifiers (`react`, `lodash/find`) have no URL semantics
-        // — they're resolved by an import-map / bundler, not fetch.
+        // Bare specifiers (`react`, `lodash/find`) are resolved by an import map or bundler.
         let src = "import('lodash').then(use);";
         let r = rewrite_script(src, &o).unwrap();
         assert!(
@@ -6040,9 +5874,8 @@ mod tests {
     fn dynamic_import_computed_left_alone_but_inner_globals_still_rewritten() {
         let mut o = opts();
         o.kind = ScriptKind::Module;
-        // Computed source — can't statically resolve, so the import call
-        // itself stays as-written. But `location.href` inside MUST still
-        // go through the membrane (visit_identifier_reference fires).
+        // Computed specifiers cannot be resolved statically, but inner global
+        // references (`location.href`) must still route through the membrane.
         let src = "import(location.href + 'mod.js').then(use);";
         let r = rewrite_script(src, &o).unwrap();
         assert!(
@@ -6197,12 +6030,9 @@ mod tests {
         }
         src.push_str("var u = location.href;\n");
         let r = rewrite_script(&src, &opts()).unwrap();
-        // The changed region needs two patches — the bare `location`
-        // identifier (global-get patch, recursively applied inside the
-        // receiver substring by apply_patches' `rewrite_range`) and the
-        // outer `location.href` member access (MEMBER_GET marker) — plus
-        // one R1 `__zp_lex_decl` checkvar prefix covering the top-level
-        // `function a`/`var u` declarations (deduped to a single patch).
+        // The changed region needs two patches (the bare `location` identifier
+        // and the outer `location.href` member access), plus one `__zp_lex_decl`
+        // prefix covering the top-level declarations.
         assert_eq!(
             r.patches.len(),
             3,
@@ -6215,7 +6045,6 @@ mod tests {
     fn location_assign_call_routed() {
         let src = "location.assign('https://example.com/');";
         let r = rewrite_script(src, &opts()).unwrap();
-        // location is dangerous global -> __zp_get; .assign is dangerous method -> __zp_call.
         assert!(
             r.code
                 .contains("__zp_call(__zp_get(globalThis,\"location\"),\"assign\","),
@@ -6224,11 +6053,9 @@ mod tests {
         );
     }
 
-    // Regression (2026-07-31): `search` is in DANGEROUS_PROPS for
-    // `location.search`, so EVERY string's `.search()` was rewritten as
-    // `__zp_get(s,"search")(re)` — receiver dropped, and String.prototype.search
-    // throws "called on null or undefined". NAVER's ad creative does
-    // `navigator.userAgent.search("Trident")`.
+    // `search` is in `DANGEROUS_PROPS` for `location.search`, so a `.search(re)` call
+    // on a string must route through `__zp_call` to preserve its receiver rather than
+    // being wrapped as `__zp_get(s, "search")(re)`.
     #[test]
     fn dangerous_prop_in_callee_position_keeps_its_receiver() {
         let r = rewrite_script("navigator.userAgent.search('Trident');", &opts()).unwrap();
@@ -6653,10 +6480,11 @@ mod tests {
 
     #[test]
     fn does_not_cap_for_with_nonconst_test() {
-        // T5-1 정책: `for(i=0;x();i++)` 같은 비상수 test 는 의도적으로
-        // uncapped. 네이티브도 test 가 거짓이 될 때까지 도는 게 맞고,
-        // 캡을 끼우면 합법적인 장루프(poller/스캐너)가 10M에서 조용히
-        // 죽는다. 캡은 상수-진 infinite form(while(true), for(;;))에만.
+        // Non-constant loop tests such as `for(i=0;x();i++)` are intentionally
+        // left uncapped. Native execution runs until the test evaluates to
+        // false, and injecting a cap would silently terminate legitimate
+        // long-running loops (pollers or scanners) at 10M iterations. Caps
+        // apply only to constant-truthy infinite forms (`while(true)`, `for(;;)`).
         let src = "for(let i=0;keepGoing();i++){ step() }";
         let r = rewrite_script(src, &opts()).unwrap();
         assert!(
@@ -6676,6 +6504,37 @@ mod tests {
         assert!(
             r.code.contains("__zp_lc_1") && r.code.contains("__zp_lc_2"),
             "nested loops must have distinct counters: {}",
+            r.code
+        );
+    }
+
+    #[test]
+    fn local_alias_window_chain_members_route_through_membrane() {
+        let src = "function g(w, d, f) { return [w.top, w.parent, w.opener, w.frameElement, w.document, w.window, w.self, w.globalThis, w.frames, f.contentWindow, f.contentDocument, d.defaultView]; }";
+        let r = rewrite_script(src, &opts()).unwrap();
+        for prop in [
+            "top",
+            "parent",
+            "opener",
+            "frameElement",
+            "document",
+            "window",
+            "self",
+            "globalThis",
+            "frames",
+        ] {
+            let needle = format!("__zp_get(w,\"{prop}\")");
+            assert!(
+                r.code.contains(&needle),
+                "local alias w.{prop} must route through __zp_get, got: {}",
+                r.code
+            );
+        }
+        assert!(
+            r.code.contains("__zp_get(f,\"contentWindow\")")
+                && r.code.contains("__zp_get(f,\"contentDocument\")")
+                && r.code.contains("__zp_get(d,\"defaultView\")"),
+            "local alias f.contentWindow/contentDocument and d.defaultView must route through __zp_get, got: {}",
             r.code
         );
     }
@@ -6727,11 +6586,10 @@ mod naver_js_perf {
 #[cfg(test)]
 mod dynamic_import_probe {
     use super::*;
-    // Does a RELATIVE dynamic import get routed through the script-proxy URL
-    // in both classic and module scripts? If not, the browser resolves the
-    // specifier against the script's own proxy URL (/zp/api/script?…) and
-    // requests /zp/api/<name>.js — exactly the NAVER ad-SDK 404.
-    // (이전에는 #[ignore] 진단 — 실동작이 확인돼 회귀 어서션으로 승격.)
+    // Relative dynamic imports must route through the script-proxy URL in both
+    // classic and module scripts; otherwise the browser resolves the specifier
+    // against the script's own proxy URL (`/zp/api/script?...`) and requests
+    // `/zp/api/<name>.js` (resulting in a 404).
     #[test]
     fn relative_dynamic_import_resolves_to_proxy_url() {
         for kind in [ScriptKind::Classic, ScriptKind::Module] {

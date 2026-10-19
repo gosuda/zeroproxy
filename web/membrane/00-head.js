@@ -2,15 +2,14 @@
   'use strict';
   const root = window;
   const nativeOwnKeys = Reflect.ownKeys;
-  // The browser's own, taken before any page script ran. A bare `encodeURIComponent` would be the page's: it can wrap the global
-  // and so sees every URL, tab id and entry id the membrane encodes (a canary on it recorded them).
+  // Capture native encodeURIComponent before page scripts run so page wrappers
+  // cannot observe URLs, tab IDs, or entry IDs encoded by the membrane.
   const nativeEncodeURIComponent = encodeURIComponent;
-  // The membrane's own tables. A table is a real Map/Set/WeakMap/WeakSet whose prototype is a copy of the built-in's,
-  // taken before any page script ran: `table.get(key)` finds the copy's native method, never `Map.prototype.get` as the
-  // page has since left it. A page that wraps those methods otherwise sees every key, value and result the membrane keeps
-  // there — real windows, elements, proxy URLs among them — and a wrapper that reads a global variable recursed without
-  // end (the free-name lookup of an inline script runs through a table: `with(__zp_lex_scope)`). The copies are reachable
-  // only from here: no table is ever handed to a page.
+  // Internal collections use a null-rooted copy of the built-in prototype
+  // descriptors captured before page scripts run. Calling table.get(key)
+  // invokes the sealed native method rather than a page-patched
+  // Map.prototype.get, preventing leaks of internal handles and infinite
+  // recursion during with(__zp_lex_scope) free-variable lookups.
   const sealProtoOf = proto => Object.create(null, Object.getOwnPropertyDescriptors(proto));
   const SEALED_MAP = sealProtoOf(Map.prototype);
   const SEALED_SET = sealProtoOf(Set.prototype);
@@ -29,15 +28,30 @@
   };
   const newWeakMap = () => sealedSetProto(new WeakMap(), SEALED_WEAKMAP);
   const newWeakSet = () => sealedSetProto(new WeakSet(), SEALED_WEAKSET);
-  // A window's own accessors as the browser installed them, read before any page script. `parent`, `frameElement`,
-  // `opener`, `length`… are configurable own properties of every window: a plain `w.frameElement` in the membrane runs
-  // whatever getter a page put there — with the real window as `this` (a native `Object.prototype.valueOf` as the getter
-  // handed it back to the page) and with the page's answer (a sandboxed frame calling itself unsandboxed). The membrane
-  // reads windows only through these; they check the receiver's brand, not its realm, so they read any window.
+  // Capture native Window accessors (parent, frameElement, opener, length, etc.)
+  // before page scripts run. Reading w.frameElement directly would invoke
+  // page-defined getters with the raw Window as `this`. These native getters
+  // perform WebIDL brand checks independent of realm.
   const nativeApply = Reflect.apply;
+  const nativeReflectGet = Reflect.get;
+  const nativeReflectSet = Reflect.set;
+  const nativeReflectHas = Reflect.has;
+  const nativeReflectGOPD = Reflect.getOwnPropertyDescriptor;
+  const nativeReflectDefineProperty = Reflect.defineProperty;
+  const nativeReflectDeleteProperty = Reflect.deleteProperty;
+  const nativeReflectGetPrototypeOf = Reflect.getPrototypeOf;
+  const nativeReflectConstruct = Reflect.construct;
+  const nativeHasOwn = Object.prototype.hasOwnProperty;
+  const nativeFnToString = Function.prototype.toString;
+  const nativeRegExpExec = RegExp.prototype.exec;
+  const sealRegExp = re => {
+    nativeReflectDefineProperty(re, 'exec', { value: nativeRegExpExec, writable: false, enumerable: false, configurable: false });
+    nativeReflectDefineProperty(re, 'test', { value: s => nativeApply(nativeRegExpExec, re, [s]) !== null, writable: false, enumerable: false, configurable: false });
+    return re;
+  };
   const WINDOW_ACCESSORS = Object.create(null);
   for (const name of ['parent', 'top', 'opener', 'frameElement', 'self', 'frames', 'name', 'length', 'closed', 'history', 'navigation']) {
-    const d = Reflect.getOwnPropertyDescriptor(root, name);
+    const d = nativeReflectGOPD(root, name);
     if (d && (d.get || d.set)) WINDOW_ACCESSORS[name] = d;
   }
   function winGet(w, name) {
@@ -48,86 +62,51 @@
     const d = WINDOW_ACCESSORS[name];
     if (d && d.set) nativeApply(d.set, w, [value]); else w[name] = value;
   }
-  // Description-less Symbol so getOwnPropertySymbols(window) leaks no
-  // "zeroproxy.*" tells. `Symbol.for` re-keys cross-realm, but each
-  // realm gets its own prelude run anyway, so dropping the registry
-  // is free. `marker.description === undefined` after this swap.
+  // Use an undescribed Symbol so Object.getOwnPropertySymbols(window) exposes
+  // no identifying description string.
   const marker = Symbol();
   if (root[marker]) return;
   Object.defineProperty(root, marker, { value: true, enumerable: false, configurable: false });
 
-  // Fingerprint hardening: capture the ZeroProxy runtime helpers into
-  // closure-local bindings, then DELETE the named globals so a target
-  // script's `Object.getOwnPropertyNames(window)` enumeration can't see
-  // them. The named properties are the obvious tells — `window.ZP`,
-  // `window.ZeroProxyRT` — that anti-bot probes (e.g. NAVER's warm-
-  // session V8 wedge) check before deciding whether to enter their
-  // probe-defense tight loop. The install-already-ran marker above is
-  // a Symbol() (no description, not registered with Symbol.for) so
-  // getOwnPropertySymbols(window) returns [Symbol()] — opaque noise
-  // without a "zeroproxy.*" prefix anti-bot probes could match on.
+  // Capture ZeroProxy runtime helpers into closure bindings and delete the
+  // global properties so Object.getOwnPropertyNames(window) cannot enumerate
+  // them.
   const ZP = globalThis.ZP;
   const ZeroProxyRTGlobal = globalThis.ZeroProxyRT;
   try { delete globalThis.ZP; } catch {}
   try { delete globalThis.ZeroProxyRT; } catch {}
 
-  // Fingerprint hardening (2026-08-02). The rewriter emits BARE calls to
-  // `__zp_get` / `__zp_call` / `__ZP_EXEC_INLINE_SCRIPT` …, so unlike `ZP`
-  // above these must stay resolvable as globals — capture-and-delete is not an
-  // option. They were therefore still fully visible to
-  // `Object.getOwnPropertyNames(window)`: 25 names, measured 2026-08-02, on top
-  // of a 1298-name baseline. That is precisely the enumeration the 2026-06-05
-  // note identified as NAVER's anti-bot tell, and the WTM bundle
-  // (wtm.pstatic.net/fce46da/*.js) still busy-loops the renderer when it is
-  // allowed to run — see the ZP_TRACKER_BLOCKED block in web/sw.js.
-  //
-  // Since the bindings cannot go away, hide them from the enumeration surfaces
-  // instead. `enumerable: false` does NOT help here: getOwnPropertyNames and
-  // Reflect.ownKeys report non-enumerable own properties by spec.
-  const ZP_HIDDEN_RE = /^(?:__zp_|__ZP_|ZPBundle$|ZPPageBundleWBG$|ZeroProxyRT$|ZP$)/;
-  // The runtime's names on the global object: the page's window does not take a write of one (07-membrane.js
-  // scopeTraps) — rewritten calls and event attributes hand our helpers the real global object, so whoever replaced one
-  // would receive it. Same rule as the rewriter's refusal of page bindings and bare writes (zp-rewriter
-  // is_reserved_name): every `__zp_*` / `__ZP_*` name but the temps rewritten code declares itself (an eval's `var`
-  // stores them through the window like any other name) and our wrappers' own parameters.
-  const ZP_RESERVED_NAME_RE = /^(?:__ZP_|__zp_(?!(?:(?:w|lc|lbl|vdcl|dp|sk|t)_\d+|bad|oc|dynamic__|dyn__|inner__|scope|args|self|env|src)$))/;
-  // The helpers rewritten code calls by name — zp-rewriter `RUNTIME_HELPERS`, same order (static-policy compares). Every
-  // `with` we run code in starts by binding them as block constants: inside `with(o)` a free name is looked up in `o`
-  // first, at run time, on every evaluation — through a Proxy trap for our with objects (15 M lookups a second VM, 5 s
-  // measured), and through whatever the page made of `o` for its own. The block resolves first, statically. The value
-  // comes off the global object with nothing named: a plainly called sloppy function's `this`.
+  // Rewritten code emits bare calls to __zp_* and __ZP_* helpers, so those
+  // bindings must remain on the global object. Scrub them from
+  // Object.getOwnPropertyNames, Object.keys, and Reflect.ownKeys instead;
+  // setting enumerable: false alone does not hide own properties from
+  // getOwnPropertyNames or Reflect.ownKeys.
+  const ZP_HIDDEN_RE = sealRegExp(/^(?:__zp_|__ZP_|ZPBundle$|ZPPageBundleWBG$|ZeroProxyRT$|ZP$)/);
+  // Reserved runtime global names rejected on page writes (matching
+  // zp-rewriter is_reserved_name). Rewritten call sites pass the real global
+  // object to these helpers, so page overwrites would leak the raw window.
+  // Excludes compiler temporaries and wrapper parameter names.
+  const ZP_RESERVED_NAME_RE = sealRegExp(/^(?:__ZP_|__zp_(?!(?:(?:w|lc|lbl|vdcl|dp|sk|t)_\d+|bad|oc|dynamic__|dyn__|inner__|scope|args|self|env|src)$))/);
+  // Runtime helpers bound as block constants at the top of every `with` block
+  // (matching zp-rewriter RUNTIME_HELPERS order). Binding them in a lexical
+  // block resolves helper identifiers statically instead of triggering the
+  // `with` proxy trap on every helper call.
   const ZP_WITH_HELPERS = ['__zp_get', '__zp_set', '__zp_call', '__zp_this', '__zp_assign', '__zp_update', '__zp_delete',
     '__zp_eval', '__zp_has', '__zp_oget', '__zp_ocall', '__zp_ocallv', '__zp_ochain', '__zp_odelete', '__zp_okeys',
     '__zp_rget', '__zp_rset', '__zp_ownKeys', '__zp_getOwnPropertyDescriptor', '__zp_getOwnPropertyDescriptors',
     '__zp_getOwnPropertyNames', '__zp_module_url', '__zp_with_get', '__zp_with_set', '__zp_with_assign',
     '__zp_with_update', '__zp_with_delete', '__zp_with_d', '__zp_lex_decl', '__zp_lex_bind', '__zp_fast', '__zp_fastset'];
   const ZP_WITH_PROLOGUE = 'const{' + ZP_WITH_HELPERS.join(',') + '}=(function(){return this})();';
-  // An `on*` attribute's body runs as `<this head>"source")`, and `<body onload>`'s `this` is the real window. The
-  // executor is read off the global object with nothing named: the browser compiles an element's handler with the
-  // element, its form and the document in front of the global scope, where any expando would answer for a name.
+  // Prefix for inline on* event attribute bodies. Reads __ZP_EXEC_EVENT off a
+  // sloppy function's default `this` (the raw window) so element, form, or
+  // document expandos in the event handler scope chain cannot shadow it.
   const ZP_EVENT_CALL_HEAD = '(function(){return this})().__ZP_EXEC_EVENT(';
-  // The page's own view of `Error.prepareStackTrace` (the stack sanitizer, 06-install.js): V8 reads the sanitizer through
-  // the real accessor, page code reads this through the routed member helpers (07-membrane.js) and the key lists below.
-  // Natively the property is not there until the page assigns it. Declared up here: the key-list patches run from now on.
+  // Page-facing state for Error.prepareStackTrace (see 06-install.js). V8 invokes
+  // the membrane's stack sanitizer via the native accessor while page code
+  // reads and writes this record through routed member helpers.
   const pageStackHook = { ctor: null, exists: false, value: undefined, forget: null };
-  // ...but `for (k in window)` is a THIRD enumeration surface, and it is the one
-  // the scrubbing above cannot reach: for-in is a language construct, not a
-  // method we can wrap. It walks enumerable own+inherited keys directly.
-  // 측정 당시: `for (k in window)` 가 ZPPageBundleWBG / __zp_diagnostics /
-  // __zp_trace / __zp_trace_clear 를 그대로 내놨다 — 맨 `root.x = y` 대입은
-  // ENUMERABLE 속성을 만들어 `define()` 도 스크럽도 안 탔기 때문이다.
-  // enumerable:false 는 이 표면에만 맞는 도구이고(다른 둘에는 무용지물),
-  // 그래서 두 장치는 대안이 아니라 보완이다.
-  //
-  // ★2026-08-22 정정 — 여기 원래 "getOwnPropertyNames(window) was correctly
-  // clean" 이라고 적혀 있었다. **그 측정이 틀린 자리에서 이뤄졌다.** 리라이트를
-  // 안 거친 프로브(devtools/exec-js)로 재면 깨끗한데, 리라이트된 타깃 코드가
-  // 받는 것은 **가상 window(스코프 프록시)** 라 `isGlobalObj` 에 안 걸려
-  // 스크럽이 통째로 비껴갔다. 실측: 같은 코드가 `eval()` 안에서 24개를 봤다.
-  // 아래 isGlobalObj 의 오리 검사(`o.window === o`)가 그 구멍을 막는다.
-  //
-  // 그러니 이 근처의 "clean" 이라는 문장을 다시 쓰게 되거든, **어느 시점에서
-  // 잰 clean 인지**를 같이 적을 것. 틀린 안심은 없는 방어보다 비싸다.
+  // Mark __zp_* globals non-enumerable so `for (const k in window)` cannot
+  // observe them; `for..in` is a language construct that bypasses method wrappers.
   const hideZPGlobalsFromForIn = () => {
     try {
       for (const name of Object.getOwnPropertyNames(root)) {
@@ -138,26 +117,13 @@
       }
     } catch {}
   };
-  // zp-core.js and zp-page-bundle.js both load BEFORE this prelude, so their
-  // globals already exist and this first pass catches them.
+  // Hide globals installed by zp-core.js and zp-page-bundle.js prior to prelude boot.
   hideZPGlobalsFromForIn();
   try {
-    // ★"전역 객체" 판정에 **가상 window 도** 포함해야 한다.
-    //
-    // 예전에는 `globalThis`/`root`/`self` 만 봤다. 그런데 리라이트된 타깃 코드가
-    // 받는 `window` 는 **그 셋 중 무엇도 아니다** — 멤브레인이 주는 스코프
-    // 프록시다. 그래서 스크러빙이 안 걸렸고, 실측(2026-08-22):
-    //
-    //   exec-js 로 그냥 실행 : getOwnPropertyNames(window) 에 __zp_* 0개
-    //   eval 로 리라이트 경유 : 같은 코드가 **24개**
-    //
-    // 즉 방어는 **적이 서지 않는 자리**에 있었다. 원래 이 스크러버를 넣을 때
-    // "measured clean" 이라고 적었는데, 그 측정이 리라이트를 안 거친 프로브였다.
-    // 타깃 코드는 예외 없이 리라이트를 거치므로 사실상 아무도 못 막고 있었다.
-    //
-    // 스코프 프록시는 이 블록보다 **나중에** 만들어지므로 이름으로 참조할 수 없다.
-    // 멤브레인 자신이 쓰는 오리 검사(`o.window === o`)를 쓴다 — 진짜 window 와
-    // 가상 window 둘 다 이 성질을 만족하고, 다른 객체는 거의 만족하지 않는다.
+    // Treat both the raw global object and the membrane's window scope proxy as
+    // global objects during key enumeration scrubbing. Because the scope proxy is
+    // constructed later in boot, identify it via the self-referential `o.window === o`
+    // invariant.
     const isGlobalObj = o => {
       try {
         if (o === globalThis || o === root) return true;
@@ -165,13 +131,9 @@
         return !!o && typeof o === 'object' && o.window === o;
       } catch { return false; }
     };
-    // Real Chrome exposes exactly `["constructor"]` on Location.prototype — every
-    // Location member is an own, non-configurable property of the `location`
-    // INSTANCE. Our virtual accessors therefore never fire (the own properties
-    // shadow them; verified 2026-08-02: un-rewritten `location.href` still reads
-    // the raw proxy URL) — they are pure fingerprint: 14 names vs 1. Rather than
-    // delete membrane code late, hide them from enumeration; behaviour is
-    // untouched because nothing ever reached them.
+    // Chrome exposes only ["constructor"] on Location.prototype; all other
+    // Location members are unforgeable own properties on the location instance.
+    // Hide membrane accessors installed on Location.prototype from enumeration.
     const LOC_PROTO_OK = newSet(['constructor']);
     const isLocProto = o => { try { return typeof Location === 'function' && o === Location.prototype; } catch { return false; } };
     const scrub = (list, target) => list.filter(n => {
@@ -188,8 +150,7 @@
         if (target === pageStackHook.ctor && target != null && !pageStackHook.exists) return out.filter(n => n !== 'prepareStackTrace');
         return (isGlobalObj(target) || isLocProto(target)) ? scrub(out, target) : out;
       };
-      // Keep `fn.toString()` / `fn.name` / `fn.length` indistinguishable from
-      // native — a probe that diffs those would otherwise see the wrapper.
+      // Preserve native fn.toString(), fn.name, and fn.length on wrapped methods.
       try {
         Object.defineProperty(patched, 'name', { value: name, configurable: true });
         Object.defineProperty(patched, 'length', { value: orig.length, configurable: true });
@@ -211,11 +172,7 @@
     hideFrom(Object, 'getOwnPropertyNames');
     hideFrom(Object, 'keys');
     hideFrom(Reflect, 'ownKeys');
-    // A real `window` carries no own symbols (measured 2026-08-02: direct load
-    // 0, proxied 4 — our install marker plus wasm-bindgen's). The count alone
-    // is a one-line proxy check, so drop ours from the symbol surface too.
-    // Only symbols we could have created are removed: no description at all
-    // (the `Symbol()` install marker) or an explicitly ZeroProxy-ish one.
+    // Filter undescribed and internal symbols from Object.getOwnPropertySymbols(window).
     const ours = s => { const d = s && s.description; return d === undefined || ZP_HIDDEN_RE.test(String(d)); };
     const origSyms = Object.getOwnPropertySymbols;
     const patchedSyms = function (target) {
@@ -232,62 +189,33 @@
 
   const boot = Object.assign({ tabId: '', entryId: '', targetUrl: location.href, documentCookie: '' }, readBootConfig());
   const runtimeToken = String(boot.runtimeToken || '');
-  // Single source of truth lives in zp-core (web/zp-core.js); the SW smuggles
-  // the same UA via X-ZP-User-Agent so navigator.userAgent and outgoing HTTP
-  // headers stay consistent and target servers can't fingerprint the mismatch.
+  // Read the canonical User-Agent from zp-core so navigator.userAgent matches
+  // outgoing HTTP headers injected by the service worker.
   const TARGET_USER_AGENT = ZP.TARGET_USER_AGENT;
   const TARGET_APP_VERSION = TARGET_USER_AGENT.replace(/^Mozilla\//, '');
   const TARGET_PLATFORM = 'Win32';
-  // ★여기 있어야 한다 — `targetBrandList()` 아래가 아니라(2026-08-24).
-  //
-  // `defineOnProto` 는 설치 직후 **그 게터를 읽어** 프로토타입 설치가 먹었는지
-  // 확인한다(`instance[key] === get.call(instance)`). 그래서
-  // `installNavigatorIdentity` 가 `userAgentData` 를 설치하는 순간
-  // `virtualUserAgentData` → `targetBrandList()` 가 즉시 불린다. 이 선언이
-  // 함수 옆(모듈 본문 뒤쪽)에 있으면 그 시점엔 아직 초기화 전이라 **TDZ**
-  // (`ReferenceError: Cannot access ... before initialization`)가 난다.
-  //
-  // `try/catch` 가 그 예외를 삼켜서 조용히 폴백으로 빠졌고, 그 결과
-  // `userAgentData` 만 **navigator 인스턴스에도** 정의됐다. 실측(대조군 대비):
-  //   Object.getOwnPropertyNames(navigator).includes('userAgentData')
-  //     직접 로드 false / 프록시 true   ← 한 줄짜리 탐지기
-  // 같은 블록의 userAgent·appVersion·platform·languages 는 전부 정상이었다.
-  // 던지는 게터 하나가 그 속성만 다른 경로로 보낸 것이다.
+  // Declare cachedUADataBrands before captureNative and prototype installation
+  // so early calls to targetBrandList() do not hit a temporal dead zone.
   let cachedUADataBrands = null;
   clearBootConfig();
   const Native = captureNative(root);
-  // prelude 내부의 `new URL(...)` 은 항상 네이티브여야 한다 — 페이지-facing
-  // `root.URL` 은 ZPURL 래퍼(installStorageFacades)로 교체되는데, 그 래퍼는
-  // `/zp/p/<share>` 같은 우리 라우팅 어휘를 타깃으로 풀어 돌려준다. 그대로
-  // 타면 `proxyAbsoluteURL(sharePath)` 조차 타깃 URL 이 된다(2026-09-22,
-  // e2e `history.pushState` SecurityError 실측).
+  // Bind the native URL constructor before installStorageFacades replaces
+  // root.URL with the virtualizing ZPURL wrapper.
   const URL = Native.URL || root.URL;
   let decodeFetchResponse;
 
 
-  // ★2026-08-22 — `new URL(location.href).origin` 을 그냥 쓰면 **`about:srcdoc`
-  // / `about:blank` 프레임에서 문자열 `"null"` 이 된다**(불투명 오리진). 그
-  // 프레임에도 프렐류드가 주입되므로(injectSrcdoc) 거기서 만든 프록시 URL 이
-  // 전부 `null/zp/api/fetch?url=…` 이라는 **상대 경로**가 됐고, 문서 base 가
-  // 가상 base(=타깃)라 `http://<target>/null/zp/api/fetch?…` 로 풀렸다.
-  // 게다가 `cssProxyURL` 의 "이미 프록시 URL 이면 건드리지 않는다" 판정이
-  // `startsWith(proxyOrigin)` 이라 `"null"` 로는 절대 안 맞아 **이중 프록시**까지
-  // 났다(g6-realm-imageset 테이프에서 확인: `?url=` 안에 또 프록시 URL).
-  // 구멍 매트릭스는 이걸 못 봤다 — 멤브레인이 나중에 원본 URL 을 주워 다시
-  // 부르므로 **도착 축은 켜지기 때문**이다. 지문 축에서만 보였다.
-  //
-  // 이 엔진은 `location.origin` 도 srcdoc/blank 에서 `"null"` 을 준다(대조군
-  // 직접 로드로 확인), 그래서 그쪽으로 갈아타는 것으로는 안 고쳐진다.
-  // 부팅 설정에 부모가 자기 오리진을 실어 보내고(bootJSON), 그것도 없으면
-  // 조상 프레임을 타고 올라가 읽는다.
+  // Resolve the physical proxy origin. In `about:srcdoc` and `about:blank`
+  // frames, `new URL(location.href).origin` and `location.origin` return `"null"`.
+  // Fall back to boot config, the prelude script's own `currentScript.src`, or
+  // ancestor frames.
   function resolveProxyOrigin(u, bootCfg, w) {
     const direct = u && u.origin;
     if (direct && direct !== 'null') return direct;
     const fromBoot = bootCfg && bootCfg.proxyOrigin;
     if (fromBoot && fromBoot !== 'null') return String(fromBoot);
-    // 지금 실행 중인 스크립트가 바로 우리 프렉루드다 — 그 src 는 항상
-    // 프록시 오리진이고, 이 시점에는 아직 가상 base 를 안 깔았으므로
-    // 해석 결과도 진짜다(훅도 아직 안 깔렸다).
+    // `currentScript.src` points to the proxy-hosted prelude before any virtual
+    // <base> element or attribute hook is installed.
     try {
       const cs = w && w.document && w.document.currentScript;
       const src = cs && cs.src;
@@ -296,9 +224,7 @@
         if (o && o !== 'null') return o;
       }
     } catch {}
-    // ★마지막 수단. 조상의 `location` 은 **멤브레인이 가상화해 둔 값**일 수
-    // 있다 — 실측으로 부모 프레임에서 `location.origin` 이 타깃 오리진을
-    // 돌려준다. 그래서 앞의 두 경로가 전부 실패했을 때만 쓴다.
+    // Last resort: walk ancestor frames if boot config and currentScript are unavailable.
     try {
       let f = w;
       for (let i = 0; i < 32 && f && winGet(f, 'parent') && winGet(f, 'parent') !== f; i++) {
@@ -306,7 +232,7 @@
         const o = f.location && f.location.origin;
         if (o && o !== 'null') return String(o);
       }
-    } catch { /* cross-origin 조상은 못 읽는다 */ }
+    } catch { /* cross-origin ancestor */ }
     return direct;
   }
 
@@ -317,43 +243,19 @@
   const proxyOrigin = resolveProxyOrigin(initialProxyURL, boot, root);
   const proxyHost = proxyOrigin ? proxyOrigin.replace(/^[a-z]+:\/\//i, '') : initialProxyURL.host;
 
-  // ★2026-08-22 — 이 블록은 원래 proxyOrigin 보다 **위에** 있었고, 그래서
-  // wasm URL 이 루트 상대 경로(`/__zp/…`)였다. 문서의 base 는 **가상
-  // base(=타깃)** 라, SW 가 잡지 못하는 문서(srcdoc / blob 프레임)에서는
-  // 그 요청이 그대로 **타깃 서버로** 나갔다. 실측: 프록시 로드 한 번에
-  // 픽스처 서버가 `GET /__zp/zp_page_rt.wasm?v=<빌드 id>` 를 **18번** 받았다.
-  // 타깃은 (a) 프록시를 쓰는다는 사실과 (b) 우리 빌드 id 를 공짜로 얻고,
-  // 우린 그 프레임마다 rt 가속 경로를 통째로 잃었다(404 → JS 폴백).
-  // 구멍 매트릭스는 이걸 못 봤다 — 도착 축이 `/img/<id>` 만 센다.
-  // 그래서 반드시 **프록시 오리진 절대 URL** 이어야 하고, 그러려면 이 블록이
-  // proxyOrigin 보다 아래에 있어야 한다.
-  // zp-page-rt (raw WASM, shared memory) — async boot. Once loaded, hot
-  // paths can use rt.classifyBatch (MutationObserver batch) and handle-only
-  // classifications (urlMeta cache). Until loaded, code paths fall through
-  // to the existing JS regex / new URL() path — zero regression.
-  //
-  // The glue (web/zp-rt.js) is bundled as a prefix to this prelude by
-  // scripts/build.mjs, so globalThis.ZeroProxyRT is defined synchronously
-  // before this IIFE runs. The wasm fetch is async; rt stays null until
-  // instantiation completes (~10-50ms after page load on warm cache).
+  // Load zp-page-rt WASM asynchronously using an absolute proxy-origin URL so
+  // frames with a virtual target <base> (such as srcdoc or blob frames) do not
+  // request the WASM binary from the target origin. Until instantiation
+  // completes, URL classification falls back to the JS path.
   let rt = null;
-  // ★부모가 **이 realm 을 먼저 계측했는지** 를 본다. 그런 프레임에서는
-  // `captureNative` 가 잡은 `Native.fetch` 가 사실 **부모 멤브레인의 래퍼**라,
-  // 프록시 오리진 URL 을 넘겨도 가상 오리진(=타깃)으로 다시 매핑된다.
-  // 실측(2026-08-22): 프록시 로드 한 번에 픽스처 서버가
-  // `GET /__zp/zp_page_rt.wasm?v=<빌드 id>` 를 9번 받았다 — 그 9개가 정확히
-  // 이 부류의 프레임이었다. rt 는 **분류 가속용 최적화**일 뿐이므로,
-  // 진짜 네이티브 fetch 를 못 잡은 realm 에서는 그냥 JS 경로로 간다 —
-  // 타깃에게 우리 존재와 빌드 id 를 알려 주는 것보다 그 편이 싸다.
-  // (`__zp_get` 은 부모가 자식 창에 직접 심는 헬퍼라, 자기 프렉루드가
-  // 돌기 전에 있다면 부모가 먼저 계측했다는 뜻이다.)
+  // Skip WASM fetch if a parent frame already instrumented this realm; in that
+  // case `Native.fetch` is the parent membrane's wrapper and would rewrite the
+  // proxy-origin WASM URL to the target origin.
   const realmPreInstrumented = typeof root.__zp_get === 'function';
   if (!realmPreInstrumented && typeof ZeroProxyRTGlobal === 'object' && ZeroProxyRTGlobal) {
     try {
-      // ★글루의 `load(url)` 은 **전역 `fetch`** 를 쓴다. 그 fetch 가 불리는 시점에는
-      // 이미 멤브레인이 갈아끼운 버전이라, 프록시 오리진 절대 URL 을 넘겨도
-      // 가상 오리진(=타깃)으로 다시 매핑돼 타깃 서버로 나간다. 바이트를 직접
-      // 당겨 넘기면 멤브레인이 경로에서 아예 빠진다.
+      // Fetch the raw WASM bytes via Native.fetch and pass the buffer to
+      // ZeroProxyRTGlobal.load so the glue does not call the membrane-wrapped global fetch.
       Native.fetch(proxyOrigin + '/__zp/zp_page_rt.wasm?v=__ZP_BUILD_ID__')
         .then(r => r.arrayBuffer())
         .then(buf => ZeroProxyRTGlobal.load(buf))
@@ -368,20 +270,19 @@
   let virtualURL = new URL(boot.targetUrl);
   let activeEntryId = boot.entryId;
   let baseURL = virtualURL.href;
-  // 페이지가 만든 blob: URL → Blob. 워커 소스는 **생성 시점**에 확정돼야 한다 —
-  // 네이티브는 `new Worker(u); URL.revokeObjectURL(u)` 가 안전하지만, 우리
-  // 워커는 부트스트랩 뒤에 소스를 읽으므로 그 사이 해제되면 읽을 게 없다
-  // (CNN 의 Permutive SDK 가 정확히 이 순서, 2026-09-29). 기록만 한다 — URL 은
-  // 그대로이고, 해제하면 같이 지운다(네이티브 blob 수명보다 길게 잡지 않는다).
+  // Map page-created blob: URLs to their underlying Blob objects so Worker
+  // bootstrap can read the script source even if the page calls
+  // URL.revokeObjectURL immediately after `new Worker(u)`.
   const pageBlobURLs = newMap();
   let explicitBaseURL = '';
   let activeShareVersion = 0;
   let documentCookie = String(boot.documentCookie || '');
   const documentCookieRecords = [];
-  // ── RealmCtx (REFACTOR.md §3.3) — 이 realm 의 ambient 상태를 한 핸들로
-  // 응집. getter/setter 모두 위 모듈 바인딩의 라이브 뷰라 복사·동기화가 없다.
-  // 임베더는 root.__zp_realm(설치 끝에서 노출)으로 realm 상태를 읽고 일부
-  // 필드를 구동할 수 있다. 브리지는 R6 에서 ctx.bridge 로 붙는다.
+  const activeObservers = newSet();
+  let realmDisposed = false;
+  let __zpHeartbeatTimer = null;
+  // Live view of realm state exposed via root.__zp_realm for embedder inspection
+  // and bridge attachment.
   const ctx = {
     get boot() { return boot; },
     get runtimeToken() { return runtimeToken; },
@@ -397,60 +298,41 @@
     get activeProxyFragment() { return activeProxyFragment; }, set activeProxyFragment(v) { activeProxyFragment = v; },
     get activeShareVersion() { return activeShareVersion; }, set activeShareVersion(v) { activeShareVersion = v; },
     get documentCookie() { return documentCookie; }, set documentCookie(v) { documentCookie = v; },
+    get disposed() { return realmDisposed; },
   };
   initDocumentCookieRecords(documentCookie);
   const urlMeta = newWeakMap();
-  // getAttribute 리터럴 parity — 네이티브는 작성자 원문을 그대로 돌려준다.
-  // 우리가 속성을 프록시 URL 로 바꿔 쓰므로 원문은 따로 기억한다.
-  // (요소 → Map(attrName → literal)). htmltx 가 심은 초기 마크업의 리터럴은
-  // `data-zp-lit-*` 속성으로 전달된다 — 둘 다 getAttribute 훅이 읽는다.
+  // Preserve author-written attribute strings for getAttribute parity after the
+  // membrane rewrites DOM attributes to proxy URLs. Initial HTML literals arrive
+  // via `data-zp-lit-*` attributes from htmltx.
   const urlLitMeta = newWeakMap();
   function litAttrName(key) { return 'data-zp-lit-' + String(key).toLowerCase(); }
   function litSet(el, key, value) { let m = urlLitMeta.get(el); if (!m) { m = newMap(); urlLitMeta.set(el, m); } m.set(String(key).toLowerCase(), String(value)); }
   function litGet(el, key) { const m = urlLitMeta.get(el); const k = String(key).toLowerCase(); if (m && m.has(k)) return m.get(k); return undefined; }
   function litDel(el, key) { const m = urlLitMeta.get(el); if (m) m.delete(String(key).toLowerCase()); }
-  // 페이지가 되읽는 값은 자기가 쓴 원본이어야 한다. `urlMeta` 는 요소당 값
-  // 하나라서 못 쓴다 — img 는 `src` 와 `srcset` 을 동시에 갖는 게 정상이고,
-  // 그러면 둘이 서로를 덮는다. 그래서 (요소, 속성) 단위로 따로 기억한다.
+  // Store original srcset strings separately from urlMeta so elements with both
+  // `src` and `srcset` (such as <img>) do not overwrite each other.
   const srcsetMeta = newWeakMap();
   const messageListenerWrappers = newWeakMap();
   const frameWindowOrigins = newWeakMap();
-  // Frames whose routed document has not loaded yet: the blank page in front of
-  // it must not reach the page as a `load` (routeFrameSrc / swallowPlaceholderLoad),
-  // and a counter per element keeps a slow earlier route from overwriting a
-  // newer navigation. Declared here, not beside the code: the install steps in
-  // 06-install.js run before the later files' constants are initialized.
+  // Track frames with in-flight routed navigations so placeholder about:blank
+  // loads can be suppressed and stale async routes cannot overwrite newer ones.
   const pendingFrameRoutes = newWeakSet();
   const frameRouteSeq = newWeakMap();
-  // Sandbox-virt backing store. Target sites that test for `iframe.sandbox`
-  // containing both `allow-scripts` and `allow-same-origin` use that as a
-  // detection-signal for hostile embedding (since browsers refuse to enforce
-  // the sandbox when those two combine). Stripping the attribute would change
-  // observable behavior; we virtualize: the WeakMap holds the SET value, the
-  // real DOM attribute is removed, and the membrane's getAttribute/has/etc
-  // accessors return the virtual value. Membrane already isolates the iframe
-  // content, so the "escape" the sandbox would have prevented cannot actually
-  // happen here.
+  // Backing store for virtualized iframe `sandbox` attributes. The membrane
+  // strips the physical attribute when needed and serves the author-specified
+  // token string through getAttribute/hasAttribute and the sandbox DOMTokenList.
   const frameSandboxMeta = newWeakMap();
-  // frame → { shadow, list }: the `sandbox` DOMTokenList the page sees (see 18-iframes).
+  // Map frame elements to their virtualized `sandbox` DOMTokenList state.
   const sandboxShadows = newWeakMap();
-  // ── opaque-origin frames ──────────────────────────────────────────────────
-  // A frame sandboxed WITHOUT `allow-same-origin` gets an opaque origin from the browser:
-  // its document cannot be reached from the embedder, is not controlled by the service
-  // worker (so it cannot be proxied) and cannot even read `localStorage` (so this prelude
-  // cannot boot in it). The proxy needs the opposite, so the membrane gives such a frame a
-  // same-origin sandbox instead — the browser keeps every other restriction: scripts,
-  // forms, popups, top navigation — and marks the element. The document reads the mark
-  // here and behaves as the opaque document the page asked for: storage and cookies throw,
-  // `origin` is "null", its window is cross-origin to every other. Its namespaces are
-  // private to it, so a gap in the throwing below still leaves nothing of the site's to read.
-  // Natively every frame inside an opaque document — a blank or srcdoc one too — has an opaque
-  // origin of its own, so the mark goes on those as well.
+  // Frames sandboxed without `allow-same-origin` receive a physical same-origin
+  // sandbox so the service worker and prelude can operate, while `data-zp-opaque`
+  // instructs the membrane to enforce opaque-origin restrictions (null origin,
+  // storage/cookie SecurityErrors, and cross-origin isolation).
   const OPAQUE_FRAME_ATTR = 'data-zp-opaque';
-  // Asked of the embedder, whose natives are its own: this realm's may already be hooks of
-  // the embedder's (it contains blank and srcdoc windows before their prelude runs).
+  // Query the parent realm before child-realm hooks are installed.
   const opaqueDocument = (() => {
-    // A popup of an opaque document: the worker, which opened its route, says so.
+    // Popups opened from an opaque document inherit opacity via boot config.
     try { if (boot.opaque === true) return true; } catch {}
     try {
       const fe = winGet(root, 'frameElement');
@@ -459,16 +341,14 @@
       return typeof ask === 'function' && ask(fe) === true;
     } catch { return false; }
   })();
-  // An opaque origin equals nothing but itself: each opaque document has its own token
-  // (the page only ever sees "null"). A frame the embedder has not heard from yet is
-  // 'null#pending'.
+  // Each opaque document receives a unique internal token so two opaque realms
+  // never compare same-origin, while displayOrigin serializes it as "null".
   const opaqueOriginToken = opaqueDocument ? 'null#' + Math.random().toString(36).slice(2) + Date.now().toString(36) : '';
   const OPAQUE_PENDING_ORIGIN = 'null#pending';
   function securityOrigin() { return opaqueDocument ? opaqueOriginToken : virtualURL.origin; }
   function displayOrigin(o) { return typeof o === 'string' && o.indexOf('null#') === 0 ? 'null' : o; }
-  // The virtual origins of this window's ancestors, nearest first — what `location.ancestorOrigins` lists. The real list holds
-  // the PROXY origin of each, and this membrane used to hand out an empty one: a frame that checks its embedder (a challenge
-  // widget reads it to know whose page it is in) saw none.
+  // Collect virtual origins of ancestor frames (nearest first) to back
+  // `location.ancestorOrigins`.
   function embedderOrigins() {
     const out = [];
     try {
@@ -484,10 +364,9 @@
     } catch {}
     return out;
   }
-  // `document.referrer`: the Referer the document's navigation carried, which the worker computed under the policy that
-  // applied (the embedder's header or meta, the frame's `referrerpolicy`). A document that was not fetched (a blank or
-  // srcdoc frame) falls back to the embedder's URL cut by the default policy (strict-origin-when-cross-origin) — full URL
-  // (no fragment) to the same origin, the origin alone across origins, nothing from https to http.
+  // Compute `document.referrer` from the boot config or, for unfetched frames
+  // (about:blank, srcdoc), from the parent's virtual URL under
+  // strict-origin-when-cross-origin.
   function virtualReferrer() {
     if (typeof boot.referrer === 'string') return boot.referrer;
     try {
@@ -504,21 +383,15 @@
       return from.origin === virtualURL.origin ? from.href : from.origin + '/';
     } catch { return ''; }
   }
-  // What the browser throws where an opaque origin is not allowed a storage-like API.
+  // Construct the SecurityError thrown when an opaque origin accesses storage APIs.
   const OPAQUE_FLAG_TEXT = "The document is sandboxed and lacks the 'allow-same-origin' flag.";
   function opaqueDenied(prefix, text) {
-    // An empty `text`: `prefix` is the whole message.
+    // Empty `text` indicates `prefix` is the complete error message.
     try { return new Native.DOMException(text === '' ? prefix : prefix + ': ' + (text || OPAQUE_FLAG_TEXT), 'SecurityError'); } catch { return normalizedError('SecurityError'); }
   }
-  // ★여기서 선언해야 한다 — installBaseObserver 는 프레임 격리 시점에 불리는데,
-  // prelude 설치 시점에 이미 존재하던 iframe 은 이 파일 아래쪽(선언부 원위치)이
-  // 실행되기 **전에** 그 경로를 지난다. const 를 뒤에 두면 TDZ 로 던지고
-  // `catch { return }` 이 삼켜서 그 문서는 base 옵저버(속성 정책 강제 +
-  // base[href] 동기화)를 영영 못 받는다. 실측: 로드당 수백 회.
-  // 우리가 `configurable: false` 로 심는 자리들은 두 번째 시도가 **무조건**
-  // 던진다. 신원(WeakSet)으로 막으려 했더니 안 먹었다 — 멤브레인이 감싼 창은
-  // `w.HTMLLinkElement.prototype` 을 읽을 때마다 다른 래퍼를 주므로 WeakSet 이
-  // 매번 미스한다. 그래서 신원이 아니라 **디스크립터**로 판정한다.
+  // Declare opaqueDocument helpers before realm bootstrap.
+  // `installBaseObserver` runs during early frame containment before later
+  // declarations execute; check descriptor configurability directly.
   function propertyLocked(obj, prop) {
     try {
       const d = Object.getOwnPropertyDescriptor(obj, prop);
@@ -527,20 +400,8 @@
   }
   const crossWindowProxyCache = newWeakMap();
   const postMessageWrappers = newWeakMap();
-  // V8 incumbent realm leak — cross-realm postMessage wrap function call 시 message
-  // event 의 `e.source` 가 incumbent (caller realm 의 contentWindow) 가 아닌 wrap
-  // function 의 realm (parent) 으로 corrupt 됨. NAVER GFP SafeFrame SDK 의 resize
-  // handler 가 `e.source === iframe.contentWindow` 비교로 어느 광고 iframe 에서
-  // resize 메시지 왔는지 식별 → source 가 parent 로 corrupt 되어 모든 광고 iframe
-  // height=0 으로 collapse. Fix: 각 iframe 의 `parent`/`top` accessor 를 sender-aware
-  // proxy 로 override + sender queue 로 message dispatch 시 source 정정.
-  // Description-less Symbols: `Object.getOwnPropertySymbols(obj)` still
-  // returns these, but `symbol.description === undefined` so anti-bot
-  // probes don't see the "zeroproxy.*" prefix that used to be embedded
-  // here. Cross-realm sharing isn't needed for these markers — each
-  // realm gets its own prelude install — so dropping `Symbol.for` is
-  // free. `listenersKey` was already description-less; pinning the
-  // rest to match.
+  // Undescribed Symbols avoid exposing identifying description strings through
+  // Object.getOwnPropertySymbols.
   const frameTargetOriginMarker = Symbol();
   const networkContainmentMarker = Symbol();
   const iframeHooksMarker = Symbol();
@@ -553,8 +414,8 @@
   const WINDOW_BOUND_METHODS = newSet(['addEventListener','removeEventListener','dispatchEvent','setTimeout','setInterval','clearTimeout','clearInterval','requestAnimationFrame','cancelAnimationFrame','requestIdleCallback','cancelIdleCallback','matchMedia','getComputedStyle','postMessage','atob','btoa','focus','blur','close','print','alert','confirm','prompt','scroll','scrollTo','scrollBy']);
   const canvasHookedWindows = newWeakSet();
   const audioHookedWindows = newWeakSet();
-  // The per-profile secret canvas/audio farbling is keyed with (22-tail.js) — read here, before the storage facade hides the
-  // real area. The key has no page's prefix, so no page's storage view or storage event ever carries it.
+  // Read the per-profile canvas/audio farbling seed from native localStorage
+  // before the storage facade virtualizes the namespace.
   const farbleSecret = (() => {
     try {
       const ls = root.localStorage;
@@ -565,37 +426,25 @@
   })();
   const serviceWorkerFacades = newWeakMap();
   const storageMaps = newMap();
-  // The page-rewriter helpers live inside `installPhase2Membrane`'s scope, but
-  // `installNetworkContainment` — a sibling top-level function — needs them to
-  // build the child-realm script executors. Referencing them directly from
-  // there is a guaranteed ReferenceError; it stayed hidden for a long time
-  // because the child-realm classic-script path only runs when target code
-  // writes a script into a friendly iframe (NAVER's ad SDK `insertAdm`, which
-  // could not even load until static module specifiers were rewritten).
-  // Published here so both scopes share one implementation.
+  // Shared hook table populated by installPhase2Membrane so sibling functions
+  // (such as installNetworkContainment) can invoke the script rewriter for
+  // child realms.
   let pageRewriteHooks = null;
-  // What a page is allowed to hold when it obtains another window — frame
-  // `contentWindow`, `frames[i]`, `window.open()`, `event.source`, `parent`,
-  // `top`, `opener`. Filled by installPhase2Membrane; the frame accessors
-  // (18-iframes), the message events (05-messaging) and the popup hook (09)
-  // live in files that cannot see its inner scope.
+  // Shared policy table populated by installPhase2Membrane for wrapping window
+  // references across frame accessors, message events, and popups.
   let windowHandles = null;
 
-  // Non-zero while a child-realm script runs off the ordered pipeline instead of
-  // straight off the parser (see `childEnqueue` in installNetworkContainment).
-  // The only thing that reads it is the `document.write` closed-document guard:
-  // outside a deferred run we must keep the native wipe semantics, because a
-  // page doing a late `document.write` gets wiped in a real browser too.
+  // Tracks active deferred child-realm script executions so `document.write`
+  // does not wipe a closed document during ordered pipeline playback.
   let deferredScriptDepth = 0;
 
-  // Diagnostic ring buffer: capture target-script errors so we can introspect
-  // hydration / runtime failures without instrumenting the page after-the-fact.
-  // Exposed as the global __zp_diagnostics — read from devtools/taskweaver.
+  // Bounded diagnostic ring buffer capturing runtime errors and unhandled
+  // rejections on root.__zp_diagnostics.
   try {
     if (!root.__zp_diagnostics) {
       const diag = [];
       const push = e => { if (diag.length < 200) diag.push(e); };
-      // non-enumerable: keeps it out of `for (k in window)` (see ZP_HIDDEN_RE).
+      // Non-enumerable so `for (const k in window)` skips it.
       Object.defineProperty(root, '__zp_diagnostics', { value: diag, writable: true, enumerable: false, configurable: true });
       root.addEventListener('error', e => {
         const ent = {
@@ -630,18 +479,12 @@
     }
   } catch {}
 
-  // Persistent trace: write checkpoints to proxy-origin localStorage so a
-  // hang in target code can be post-mortem analyzed by restarting the
-  // browser and inspecting __zp_trace_log/__zp_hb. Heartbeat overwrites a
-  // single key (no churn); checkpoints append to a capped log (~100 entries).
+  // Persist bounded trace checkpoints and heartbeat timestamps to proxy-origin
+  // localStorage for post-mortem hang analysis.
   let __zpTraceSeq = 0;
   let __zpNativeStorage = null;
   try { __zpNativeStorage = root.localStorage; } catch {}
 
-  // Pre-warm chain consumer lives in the SW-injected inline script (see
-  // sw.js buildRuntimePrelude). State now travels in the URL fragment so
-  // naver.com's anti-bot JS can't scrub it the way it scrubs proxy-origin
-  // localStorage.
   function zpTrace(tag, extra) {
     if (!__zpNativeStorage) return;
     try {
@@ -662,7 +505,7 @@
   } catch {}
   try {
     let __zpBeats = 0;
-    setInterval(() => {
+    __zpHeartbeatTimer = setInterval(() => {
       __zpBeats++;
       try { __zpNativeStorage && __zpNativeStorage.setItem('__zp_hb', JSON.stringify({ n: __zpBeats, t: Date.now() })); } catch {}
     }, 100);

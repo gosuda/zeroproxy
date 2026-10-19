@@ -11,12 +11,11 @@
     const ab = await req.clone().arrayBuffer();
     return new Uint8Array(ab);
   }
-  // `/zp/api/v2/fetch` 는 바이너리 봉투를 받는다. realm 생애 동안 한 번이라도
-  // "구 SW" 신호(메타 헤더 없는 404)를 받으면 v1(base64-in-JSON)으로 내려앉는다.
-  // 진짜 업스트림 404 는 `X-ZP-Fetch-Meta` 를 달고 오므로 헷갈리지 않는다.
+  // `/zp/api/v2/fetch` accepts binary envelopes. Fall back to v1 (base64-in-JSON)
+  // if a 404 without `X-ZP-Fetch-Meta` indicates an older Service Worker.
   let v2FetchOK = true;
   async function postRuntimeEnvelope(target, payload, bodyBytes, extraInit) {
-    // A cookie the page wrote a moment ago has to be in the jar before this request reads it.
+    // Wait for pending cookie writes before dispatching the request.
     const written = cookieWritesSettled();
     if (written) await written;
     const label = '?url=' + encodeURLParam(target);
@@ -26,20 +25,16 @@
           Object.assign({ method: 'POST', headers: { 'Content-Type': ZP.ENVELOPE_MIME }, body: ZP.encodeEnvelope(payload, bodyBytes) }, extraInit || {}));
         if (r.status === 404 && !r.headers.get('X-ZP-Fetch-Meta')) { v2FetchOK = false; try { r.arrayBuffer().catch(() => {}); } catch {} }
         else return r;
-      } catch (e) { /* v1 으로 한 번 더 — 거기서도 실패하면 그 에러가 나간다 */ }
+      } catch (e) { /* Fall back to v1 */ }
     }
     payload.init.body = bodyBytes ? ZP.bytesToBase64Url(bodyBytes) : null;
     const r = await Native.fetch(proxyOrigin + ZP.apiPath('fetch') + label,
       Object.assign({ method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }, extraInit || {}));
-    v2FetchOK = false; // v1 이 살았는데 v2 가 죽었다 — 엔드포인트 없음으로 확정
+    v2FetchOK = false;
     return r;
   }
-  // blob: / data: 는 브라우저가 그 자리에서 푸는 **인라인 리소스**다. 타깃이
-  // 없으니 프록시로 보낼 것도 없고, 보내면 페이지가 넣은 내용 대신 우리 응답이
-  // 돌아온다 — 실측(2026-08-26): fetch(URL.createObjectURL(new Blob(["HELLO"])))
-  // 이 HELLO 대신 프록시 HTML 을 돌려줬다. 페이지가 자기가 만든 데이터를 다시
-  // 읽는 흔한 패턴(파일 미리보기, 워커 없는 파서, 캔버스 내보내기)이 통째로
-  // 깨진다. 둘 다 인라인이라 우회 통로가 되지 않는다.
+  // `blob:` and `data:` URLs are inline resources resolved locally by the browser;
+  // routing them through the proxy would replace their content with a proxy response.
   function inlineSchemeFetchURL(input) {
     try {
       const href = typeof input === 'string' ? input
@@ -48,13 +43,11 @@
       return /^(?:blob|data):/i.test(String(href).trim()) ? String(href).trim() : null;
     } catch { return null; }
   }
-  // `internal.mode`: a request the page did not make with fetch() — an `<a ping>` is not a CORS request
-  // (the browser sends it whatever the target answers), so it must not meet the CORS rules.
-  // `internal.implicitHeaders`: headers the browser itself would add to this request (an EventSource's
-  // `Cache-Control: no-cache`); they never make a request need a preflight.
+  // `internal.mode` overrides `req.mode` for non-CORS browser requests such as `<a ping>`.
+  // `internal.implicitHeaders` marks browser-injected headers (such as EventSource `Cache-Control: no-cache`)
+  // so they do not trigger a CORS preflight.
   async function fetchThroughRuntime(input, init = {}, internal) {
     if (!Native.fetch || !Native.Request || !Native.Headers) throw normalizedError('NetworkError');
-    // 인라인 스킴은 브라우저에게 그대로 넘긴다 (위 주석 참고).
     if (inlineSchemeFetchURL(input)) return Native.fetch(input, init);
     const target = requestTargetURL(input);
     try { zpTrace('fetch', target.slice(0, 180)); } catch {}
@@ -76,24 +69,14 @@
       init: {
         method: req.method,
         headers: Array.from(req.headers.entries()),
-        // v2 는 봉투 꼬리가 바디다 — head 에는 null. v1 폴백 시
-        // postRuntimeEnvelope 가 base64 로 채운다.
+        // v2 carries the body in the envelope tail; v1 fallback populates `init.body` in base64.
         body: null,
         credentials: req.credentials,
         mode: (internal && internal.mode) || req.mode,
         referrer: req.referrer,
-        // 페이지가 `fetch(u, { referrerPolicy })` 로 명시한 값. SW 는
-        // /zp/api/fetch 요청에 대해 브라우저가 계산한 정책을 볼 수 없으므로
-        // (그 요청의 정책은 프록시 문서의 것이다) 여기서 넘겨준다.
-        //
-        // 명시가 없으면 **문서의 정책**을 여기서 읽어 채운다. `<meta
-        // name=referrer>` 로만 선언한 문서가 그렇다 — 문서 정책은 Request
-        // 객체에 반영되지 않으므로(`req.referrerPolicy` 가 빈 문자열) 이 자리를
-        // 비워 두면 SW 는 기본값으로 떨어진다. 실측(로컬 픽스처): meta 가
-        // no-referrer/origin 이어도 프록시만 전체 URL 을 보냈다.
-        //
-        // 메시지로 미리 알려 주는 경로(ZP_REFERRER_POLICY)만으로는 부족하다 —
-        // 페이지의 첫 fetch 는 파싱 도중에 나가서 그 메시지보다 **빠르다.**
+        // Forward the explicit request referrerPolicy or fall back to the document's policy
+        // (`<meta name="referrer">` is not reflected on `Request.prototype.referrerPolicy`,
+        // and early fetches can race ahead of `ZP_REFERRER_POLICY` messages).
         referrerPolicy,
         redirect: req.redirect,
         cache: req.cache,
@@ -101,20 +84,9 @@
       }
     };
     const extraInit = req.signal ? { signal: req.signal } : null;
-    // Absolute proxy URL — virtual baseURI resolves root-relative paths
-    // against the target host. See scriptProxyPath for the companion bug.
-    // The target also rides in the query string even though the SW reads it
-    // from the JSON body. Without it every membrane fetch produced a resource
-    // timing entry named exactly `<proxy>/zp/api/fetch`, which (a) is
-    // indistinguishable between requests and (b) carries no target, so the
-    // de-proxy getter on `PerformanceEntry.name` cannot recover one. NAVER's
-    // ad SDK locates itself through resource timing and then resolved
-    // `./gfp-display-sdk.js` against that bare path — producing a 404 on
-    // `<proxy>/zp/api/gfp-display-sdk.js`. Routing is unaffected: the SW
-    // matches on `url.pathname` only.
-    // 인코더는 subresourceProxyPath 와 공유한다. 프래그먼트/`&tab=` 은 여기에
-    // 없는 게 맞다 — 이 URL 은 **라벨**이고(SW 는 pathname 으로만 라우팅하고
-    // 타깃은 JSON 바디에서 읽는다) fetch 는 프래그먼트를 어차피 버린다.
+    // Use an absolute proxy URL so virtual baseURI does not resolve root-relative
+    // paths against the target host. Include `?url=<target>` as a label so
+    // `PerformanceEntry.name` de-proxying can recover the target URL for each request.
     return postRuntimeEnvelope(target, payload, bodyBytes, extraInit).then(r => {
       try { zpTrace('fetch:ok', target.slice(0,80) + ' s=' + r.status); } catch {}
       return decodeFetchResponse(r);
@@ -133,8 +105,8 @@
       function ZPXMLHttpRequest() {
         this.readyState = UNSENT;
         this.response = this.responseText = '';
-        // Native defaults are null, not undefined — the accessors added below
-        // would otherwise report `undefined` for an untouched request.
+        // Native defaults are null, not undefined, so the prototype accessors
+        // below report `null` on an untouched request.
         this.responseXML = null;
         this.onreadystatechange = null;
         this.responseType = '';
@@ -164,18 +136,9 @@
         fireEvent(xhr, 'loadend');
       }
       installEventMethods(ZPXMLHttpRequest.prototype);
-      // Native XHR exposes its state as PROTOTYPE accessors, not instance data
-      // properties. We wrote them straight onto the instance, so
-      // `XMLHttpRequest.prototype` carried 16 names where Chrome has 27
-      // (measured 2026-08-02) — both a loud proxy tell and a real compat break:
-      // `'readyState' in XMLHttpRequest.prototype` was false, and any library
-      // that wraps `XMLHttpRequest.prototype.responseText` (analytics shims,
-      // mocking libs) saw nothing to wrap.
-      //
-      // Backing them with `_zp`-prefixed fields keeps every existing
-      // `this.readyState = …` write working — the assignment now routes through
-      // the setter instead of creating an own property, so instance shape gets
-      // closer to native too. defineAccessor masks the pair's toString.
+      // Expose XHR state as prototype accessors backed by `_zp`-prefixed fields
+      // to match native `XMLHttpRequest.prototype` descriptors and avoid creating
+      // own properties on instances.
       for (const _n of ['readyState', 'response', 'responseText', 'responseXML', 'responseType',
         'responseURL', 'status', 'statusText', 'timeout', 'withCredentials', 'upload',
         'onreadystatechange']) {
@@ -185,12 +148,9 @@
           function (v) { this[_k] = v; },
           Native.XMLHttpRequest && Native.XMLHttpRequest.prototype);
       }
-      // 동기 XHR 을 same-origin 중계로 보낸다.
-      //
-      // 네이티브 XHR 을 쓰되 **목적지는 우리 origin** 이다. 타깃 URL 은 쿼리로
-      // 넘기고, Go 가 그 응답을 park 한 채 SW 에 일을 시킨다. 브라우저가 타깃으로
-      // 직접 나가는 일이 없으므로 IP 가 새지 않는다(그게 원래 차단의 이유였다).
-      // 쿠키는 여기서 다루지 않는다 — 기존 경로대로 커널의 jar 가 붙인다.
+      // Route synchronous XHR through the same-origin `/zp/api/sync-fetch` relay.
+      // The Go server parks the HTTP response while the Service Worker performs
+      // the upstream fetch, keeping egress confined to the worker transport.
       function sendSyncThroughRelay(xhr, body) {
         xhr._sent = true;
         let networkError = null;
@@ -204,7 +164,7 @@
             + '&entry=' + nativeEncodeURIComponent(activeEntryId || '');
           for (const kv of xhr._headers) u += '&h=' + nativeEncodeURIComponent(kv[0] + ':' + kv[1]);
           if (xhr.withCredentials) u += '&wc=1';
-          // A cookie written a moment ago may not have reached the worker: this call cannot wait for it.
+          // Include pending cookie writes that have not yet settled in the worker.
           const unsent = pendingCookieWrites();
           if (unsent.length) {
             u += '&dv=' + nativeEncodeURIComponent(virtualURL.href);
@@ -214,11 +174,11 @@
           const nx = new Native.XMLHttpRequest();
           nx.open(xhr._method, u, false);
           if (xhr.responseType === 'arraybuffer' || xhr.responseType === 'blob') {
-            // 동기 XHR 은 responseType 을 못 바꾼다(스펙). 텍스트로 받고 아래에서 변환.
+            // Synchronous XHR does not allow setting `responseType`; receive as text.
           }
           nx.send(body != null && xhr._method !== 'GET' && xhr._method !== 'HEAD' ? body : null);
-          // The worker found the request a network error (a CORS check that failed, say): a synchronous
-          // `send()` ends DONE with nothing and throws — no events.
+          // On a worker-reported network error (such as a failed CORS check), transition
+          // to DONE and throw NetworkError without firing progress events.
           if (nx.getResponseHeader('X-ZP-Sync-Err') === 'ZP_NETWORK_ERROR') {
             xhr._sent = false;
             xhr.status = 0;
@@ -227,8 +187,8 @@
             networkError = normalizedError('NetworkError');
             throw networkError;
           }
-          // Cookies the response set: a synchronous caller reads `document.cookie` as soon as
-          // this returns, so they are applied now (the worker also pushes them, once).
+          // Apply response cookie deltas immediately so synchronous callers reading
+          // `document.cookie` right after `send()` returns observe them.
           try {
             const delta = nx.getResponseHeader('X-ZP-Cookie-Delta');
             if (delta) {
@@ -248,8 +208,7 @@
               if (i > 0) { try { h.append(line.slice(0, i).trim(), line.slice(i + 1).trim()); } catch {} }
             });
             try { h.delete('X-ZP-Cookie-Delta'); } catch {}
-            // What the document may read of the answer, as the worker decided (the relay itself passes only a
-            // few header names through).
+            // Populate CORS-exposed response headers computed by the worker.
             const visible = nx.getResponseHeader('X-ZP-Sync-Visible');
             if (visible) {
               try {
@@ -289,37 +248,20 @@
           xhrDone(xhr, 'error');
         }
       }
-      // readyState 상수는 실제 브라우저에서 **쓰기도 재정의도 불가**하다
-      // (`{value, enumerable: true, writable: false, configurable: false}`).
-      // Object.assign 으로 얹으면 writable+configurable 이 되어 실제보다 무르고,
-      // 디스크립터 모양 대조에 그대로 잡힌다(실측 2026-08-16: 직접 `D-e-` vs
-      // 프록시 `Dcew`). 상수만 따로 심는다.
+      // WebIDL constants on XMLHttpRequest and its prototype are enumerable,
+      // non-writable, and non-configurable (`{ enumerable: true, writable: false, configurable: false }`).
       for (const [k, v] of [['UNSENT', UNSENT], ['OPENED', OPENED], ['HEADERS_RECEIVED', HEADERS_RECEIVED], ['LOADING', LOADING], ['DONE', DONE]]) {
         try { Object.defineProperty(ZPXMLHttpRequest.prototype, k, { value: v, enumerable: true, writable: false, configurable: false }); } catch {}
         try { Object.defineProperty(ZPXMLHttpRequest, k, { value: v, enumerable: true, writable: false, configurable: false }); } catch {}
       }
       assignMasked(ZPXMLHttpRequest.prototype, {
         constructor: ZPXMLHttpRequest,
-        // Chrome-only Privacy Sandbox hooks. We do not implement either — the
-        // proxy never forwards attribution or private-token material — but
-        // their ABSENCE is itself a fingerprint (XHR.prototype 25 vs 27), and
-        // `xhr.setPrivateToken` throwing "not a function" reads differently
-        // from a browser that has the method. Accept-and-ignore matches what a
-        // browser does when the feature is disabled by policy.
+        // Stub Chrome Privacy Sandbox methods so prototype key shapes match native Chrome.
         setAttributionReporting() {},
         setPrivateToken() {},
         open(method, url, async = true, user, password) {
-          // 2026-08-13 — 동기 XHR 을 **감옥 안에서** 지원한다.
-          //
-          // Service Worker 는 동기 XHR 을 가로채지 못한다(실측: 같은 페이지·같은
-          // URL 에서 동기 XHR 은 Go 까지 내려가 403, 비동기 fetch 는 SW 가 503).
-          // 그래서 예전에는 그냥 막았는데, NAVER 캡차가 UI(`rcaptUi`)·문제
-          // (`question`)·**JS 토큰 검증**(`verifyJs`)을 전부 동기 XHR 로 가져오는
-          // 탓에 답이 맞아도 "틀렸다" 가 나왔다(진단 버퍼로 확인).
-          //
-          // 이제는 same-origin 중계 엔드포인트로 던진다. Go 는 그 응답을 park 한 채
-          // SW 에 작업을 넘기고, 실제 전송은 기존 `transportFetch` 가 한다 —
-          // 브라우저가 타깃으로 직접 나가지 않으므로 감옥은 그대로다.
+          // Service Workers do not intercept synchronous XHR; mark sync requests
+          // so `send()` routes them through the same-origin relay endpoint.
           this._sync = (async === false);
           this.abort();
           this._method = String(method || 'GET').toUpperCase();
@@ -387,10 +329,10 @@
       define(root, 'XMLHttpRequest', ZPXMLHttpRequest);
     }
     if (Native.EventSource && Native.fetch && Native.Request && Native.Headers) {
-      // B4: EventSource fidelity. WHATWG HTML SSE §9.2 — auto-reconnect after
-      // soft transport errors with the server-supplied `retry:` interval,
-      // Last-Event-ID echo on reconnect, Content-Type enforcement, 204 clean
-      // close, non-2xx hard fail (no reconnect).
+      // WHATWG HTML SSE §9.2: auto-reconnect after soft transport errors using the
+      // server-supplied `retry:` interval, echo `Last-Event-ID` on reconnect,
+      // enforce `text/event-stream` Content-Type, close cleanly on 204, and fail
+      // permanently on non-2xx responses.
       const CONNECTING = 0, OPEN = 1, CLOSED = 2;
       const DEFAULT_RECONNECT_MS = 3000;
       function ZPEventSource(url, init = {}) {
@@ -431,7 +373,7 @@
         es._reconnectTimer = setTimeout(() => {
           es._reconnectTimer = 0;
           if (es._closed) return;
-          // New controller per attempt so prior abort doesn't poison next fetch.
+          // Allocate a fresh controller per attempt so a prior abort does not poison the next fetch.
           es._controller = new AbortController();
           runEventSource(es);
         }, es._reconnectMs);
@@ -442,13 +384,13 @@
         if (es._lastEventId) headers.push(['Last-Event-ID', es._lastEventId]);
         fetchThroughRuntime(es.url, { method: 'GET', headers, credentials: es._init.withCredentials ? 'include' : 'same-origin', cache: 'no-store', signal: es._controller.signal }, { implicitHeaders: ['cache-control'] }).then(async resp => {
           if (es._closed) return;
-          // 204 = end of stream, close cleanly (no reconnect).
+          // 204 signals end of stream; close cleanly without reconnecting.
           if (resp.status === 204) {
             es.readyState = CLOSED;
             return;
           }
           const ct = (resp.headers && resp.headers.get('Content-Type')) || '';
-          // Per spec wrong MIME or non-2xx is a HARD fail — no reconnect.
+          // Per spec, wrong MIME or non-2xx is a hard failure with no reconnect.
           if (!resp.ok || !/^text\/event-stream\b/i.test(ct)) {
             es.readyState = CLOSED;
             fireEvent(es, 'error');
@@ -504,11 +446,11 @@
           else if (field === 'event') eventType = value || 'message';
           else if (field === 'id') eventLastId = value;
           else if (field === 'retry') {
-            // Per spec only digit-strings update reconnect interval.
+            // Per spec, only digit strings update the reconnect interval.
             if (/^\d+$/.test(value)) es._reconnectMs = parseInt(value, 10);
           }
         }
-        // Per spec the "last event ID buffer" updates on EVERY id field.
+        // Per spec, the last event ID buffer updates on every `id` field.
         if (eventLastId !== null) es._lastEventId = eventLastId;
         if (!data) return;
         data = data.slice(0, -1);
@@ -521,11 +463,9 @@
     }
   }
   function installWebSocket() {
-    // C1: WebSocket boundary fidelity (RFC 6455). Sub-protocol selection
-    // §4.2.2, close code/reason validation §7.4 (code: 1000 or [3000,4999];
-    // reason ≤ 123 UTF-8 bytes), binaryType setter validation,
-    // bufferedAmount accounting. Close events report the peer's handshake,
-    // never a requested status disguised as a successful transport close.
+    // RFC 6455 WebSocket boundary: sub-protocol selection (§4.2.2), close
+    // code/reason validation (§7.4: code 1000 or [3000, 4999], reason <= 123
+    // UTF-8 bytes), binaryType validation, and bufferedAmount accounting.
     const CONNECTING = 0, OPEN = 1, CLOSING = 2, CLOSED = 3;
     const tokenRE = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
     function protocolList(protocols) {
@@ -550,7 +490,7 @@
         throw normalizedError('InvalidAccessError');
       }
     }
-    // RFC 6455 §7.4.1: close reason ≤ 123 UTF-8 bytes.
+    // RFC 6455 §7.4.1: close reason <= 123 UTF-8 bytes.
     function validateReason(reason) {
       if (reason === undefined || reason === '') return;
       const enc = (typeof TextEncoder === 'function') ? new TextEncoder().encode(String(reason)) : null;
@@ -610,8 +550,7 @@
       this._requestedProtocols = plist;
       ctx.bridge.send({ type: ZP.MSG.WS_OPEN, url: this.url, protocols: plist, tabId: boot.tabId, entryId: activeEntryId }).then(reply => {
         if (this._closed || this.readyState === CLOSING) {
-          // close() canceled the opening handshake; do not leave the late
-          // kernel stream waiting for an echo or dispatch a second close.
+          // If close() canceled the opening handshake, abort the late kernel stream.
           try { if (reply.port) reply.port.postMessage({ type: 'abort' }); }
           finally { if (reply.port) reply.port.close(); }
           return;
@@ -644,7 +583,7 @@
           } else if (m.type === 'close') {
             finish(this, m.code, m.reason || '', m.code !== 1006);
           } else if (m.type === 'senddrained' && typeof m.bytes === 'number') {
-            // The kernel acknowledges bytes consumed from the send queue.
+            // Decrement bufferedAmount as the kernel drains the send queue.
             this._bufferedAmount = Math.max(0, this._bufferedAmount - m.bytes);
           }
         };
@@ -661,7 +600,7 @@
       send(data) {
         if (this.readyState === CONNECTING) throw normalizedError('InvalidStateError');
         if (this.readyState !== OPEN || !this._port) {
-          // CLOSING/CLOSED: spec silently grows bufferedAmount and drops.
+          // In CLOSING/CLOSED state, spec increments bufferedAmount and drops the payload.
           this._bufferedAmount += payloadByteLength(data);
           return;
         }
@@ -687,12 +626,11 @@
         const finalReason = reason === undefined ? '' : String(reason);
         this.readyState = CLOSING;
         if (!this._port) {
-          // A canceled opening handshake has no peer close status. Dispatch
-          // asynchronously so handlers installed after close() still observe it.
+          // Dispatch asynchronously so handlers registered after close() observe the close event.
           this._closeGuard = Native.setTimeout(() => fail(this), 0);
           return;
         }
-        // Wait for the peer's close frame; a missing echo is an abnormal close.
+        // Wait for the peer's close frame; treat a missing echo as an abnormal close (1006).
         this._closeGuard = Native.setTimeout(() => {
           if (this._closed) return;
           abort(this);
@@ -702,23 +640,18 @@
         catch { fail(this); }
       }
     });
-    // bufferedAmount: read-only per IDL.
     try {
-      // ZPWebSocket.prototype is a fresh object literal, so unlike XHR/EventSource
-      // (which reuse a function's default .prototype) it has no inherited
-      // non-enumerable `constructor` slot — Object.assign created an enumerable
-      // one, putting `constructor` into Object.keys where no browser has it.
+      // Define `constructor` as non-enumerable on the fresh prototype literal.
       Object.defineProperty(ZPWebSocket.prototype, 'constructor', {
         value: ZPWebSocket, writable: true, enumerable: false, configurable: true,
       });
       defineMasked(ZPWebSocket.prototype, 'bufferedAmount', {
         configurable: false,
-        enumerable: true, // Web IDL attributes are enumerable; these two were the
-                          // only members of the replaced classes still hiding.
+        enumerable: true,
         get() { return this._bufferedAmount | 0; },
       });
     } catch {}
-    // binaryType: strict enum; invalid assignments silently dropped (browser-equivalent).
+    // `binaryType` is a strict enum; invalid assignments are ignored per spec.
     try {
       defineMasked(ZPWebSocket.prototype, 'binaryType', {
         configurable: false,

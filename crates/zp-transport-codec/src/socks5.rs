@@ -10,8 +10,6 @@
 
 use std::io;
 
-// --- RFC 1928 wire constants -----------------------------------------------
-
 /// SOCKS protocol version byte (RFC 1928 §3).
 pub const VER: u8 = 0x05;
 
@@ -25,7 +23,7 @@ pub const METHOD_NONE_ACCEPTABLE: u8 = 0xFF;
 
 /// Command: CONNECT (RFC 1928 §4).
 pub const CMD_CONNECT: u8 = 0x01;
-/// Reserved byte (RFC 1928 §4) — must be 0x00 on requests; servers may
+/// Reserved byte (RFC 1928 §4): must be 0x00 on requests; servers may
 /// send any value on replies.
 pub const RSV: u8 = 0x00;
 
@@ -41,15 +39,13 @@ pub const SUBNEG_VER: u8 = 0x01;
 /// RFC 1929 sub-negotiation STATUS = success.
 pub const SUBNEG_STATUS_OK: u8 = 0x00;
 
-// --- Auth ------------------------------------------------------------------
-
 /// SOCKS5 authentication mode the client wants to offer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Auth {
     /// Offer NoAuth only. Used by the relay's `-socks internal` mode.
     None,
     /// Offer NoAuth + UsernamePassword. The server picks. Used by Tor's
-    /// `IsolateSOCKSAuth` — the strings are circuit keys, not real
+    /// `IsolateSOCKSAuth`; the strings are circuit keys, not real
     /// credentials. Both 1..=255 bytes.
     UserPassword {
         /// Username string, 1..=255 bytes (validation at build time).
@@ -69,9 +65,7 @@ impl Auth {
     }
 }
 
-// --- Greeting (Phase 1) ----------------------------------------------------
-
-/// Emit the RFC 1928 §3 greeting: `VER NMETHODS METHODS…`.
+/// Emit the RFC 1928 §3 greeting: `VER NMETHODS METHODS...`.
 pub fn build_greeting(auth: &Auth) -> Vec<u8> {
     let methods = auth.methods();
     let mut out = Vec::with_capacity(2 + methods.len());
@@ -123,8 +117,6 @@ pub fn parse_greeting_reply(reply: [u8; 2], auth: &Auth) -> io::Result<GreetingN
     }
 }
 
-// --- RFC 1929 sub-negotiation ----------------------------------------------
-
 /// Emit the RFC 1929 sub-negotiation request: `VER ULEN UNAME PLEN PASSWD`.
 /// Both strings must be 1..=255 bytes (protocol limit).
 pub fn build_userpass_subneg(user: &str, pass: &str) -> io::Result<Vec<u8>> {
@@ -161,11 +153,9 @@ pub fn parse_userpass_reply(reply: [u8; 2]) -> io::Result<()> {
     Ok(())
 }
 
-// --- CONNECT (Phase 2) -----------------------------------------------------
-
 /// Build the CONNECT request with ATYP=DOMAINNAME:
 /// `VER CMD RSV ATYP LEN HOST PORT(be u16)`.
-/// We intentionally never emit IPv4/IPv6 ATYP — the relay/Tor does DNS
+/// We intentionally never emit IPv4/IPv6 ATYP; the relay/Tor does DNS
 /// so the browser side never leaks resolver behaviour. `host.len()` must
 /// fit in a single byte, which every real DNS name does.
 pub fn build_connect_request(host: &str, port: u16) -> io::Result<Vec<u8>> {
@@ -196,7 +186,7 @@ pub enum ConnectAtyp {
     Ipv4,
     /// IPv6 BND.ADDR (16 bytes) followed by BND.PORT (2 bytes).
     Ipv6,
-    /// DOMAINNAME — the next byte on the wire is the length prefix; call
+    /// DOMAINNAME: the next byte on the wire is the length prefix; call
     /// [`connect_reply_domain_skip`] once that byte has been read.
     Domain,
 }
@@ -248,8 +238,6 @@ pub fn connect_reply_domain_skip(len_byte: u8) -> usize {
     len_byte as usize + 2
 }
 
-// --- REP code mapping ------------------------------------------------------
-
 /// Map an RFC 1928 REP code to an `io::ErrorKind` so callers can branch
 /// without re-parsing strings.
 pub fn map_rep_kind(rep: u8) -> io::ErrorKind {
@@ -282,8 +270,6 @@ pub fn rep_text(rep: u8) -> &'static str {
     }
 }
 
-// --- Tests -----------------------------------------------------------------
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -299,7 +285,7 @@ mod tests {
             user: "u".into(),
             pass: "p".into(),
         });
-        // VER, NMETHODS=2, NO_AUTH, USER_PASS — NoAuth first so a server
+        // VER, NMETHODS=2, NO_AUTH, USER_PASS: NoAuth first so a server
         // that supports both takes the cheaper one.
         assert_eq!(g, vec![0x05, 0x02, 0x00, 0x02]);
     }
@@ -435,7 +421,7 @@ mod tests {
     #[test]
     fn connect_reply_head_domain() {
         let atyp = parse_connect_reply_head([0x05, 0x00, 0x77, 0x03]).expect("ok");
-        // head[2] (RSV) intentionally non-zero — we accept any value.
+        // head[2] (RSV) intentionally non-zero; we accept any value.
         assert_eq!(atyp, ConnectAtyp::Domain);
         assert_eq!(atyp.fixed_skip(), None);
         assert_eq!(connect_reply_domain_skip(11), 13);
@@ -455,7 +441,7 @@ mod tests {
 
     #[test]
     fn connect_reply_head_rep_mapping_covers_rfc_1928_table() {
-        // §6 REP table → io::ErrorKind. Validates the entire mapping by
+        // §6 REP table to io::ErrorKind. Validates the entire mapping by
         // round-tripping through parse_connect_reply_head so any future
         // change to map_rep_kind shows up here.
         let cases = [
@@ -467,7 +453,7 @@ mod tests {
             (0x06u8, io::ErrorKind::TimedOut),
             (0x07u8, io::ErrorKind::Unsupported),
             (0x08u8, io::ErrorKind::Unsupported),
-            (0x09u8, io::ErrorKind::Other), // unspecified → Other
+            (0x09u8, io::ErrorKind::Other), // unspecified: Other
         ];
         for (rep, expected) in cases {
             let err =

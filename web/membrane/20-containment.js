@@ -1,36 +1,22 @@
-  // A window whose own prelude already ran: its `__zp_get` is another realm's.
-  // Containment is for documents with no membrane of their own (about:blank,
-  // srcdoc, document.write, text/plain). Installing ours over a booted one
-  // REPLACED its helpers — `define` may overwrite a writable slot — so the
-  // child's code read OUR virtual location and storage, and the parent read the
-  // child's location as its own URL. Frames sent through `src` were spared only
-  // by their `data-zp-target-url` stash; one navigated by
-  // `contentWindow.location = …`, by itself or by a named link target was not
-  // (2026-10-01). The marker can't say this: it is a per-realm Symbol.
+  // True if `w` already booted its own membrane prelude (`__zp_get` belongs to
+  // another realm). Containment applies only to documents without their own
+  // membrane (`about:blank`, `srcdoc`, `document.write`, `text/plain`);
+  // overwriting a booted realm's helpers would replace its virtual location and
+  // storage with the parent's.
   function ownsMembrane(w) {
     try { const g = w.__zp_get; return typeof g === 'function' && g !== root.__zp_get; } catch { return false; }
   }
-  // A proxied HTML document still loading: the SW injects a prelude into every
-  // HTML document it serves at a share path (htmltx guarantees a spot even with
-  // no html/head/body/script tag), and that prelude's first act contains the
-  // window. Installing ours in that gap would leave it a pre-instrumented realm
-  // — our fetch/XHR bound to the parent, our non-configurable accessors under
-  // its own. Only while it loads: a page parked at a share path that never
-  // boots (a failed prelude, a launcher) is contained once it completes.
-  //
-  // This replaces the old `data-zp-target-url` exemption, which was sticky: a
-  // routed frame that later showed about:blank, or a document that never got a
-  // prelude, stayed uncontained, and `iframe.contentWindow.eval` ran raw code
-  // at the proxy origin (measured 2026-10-01). Measured too: Chrome does not
-  // reuse the about:blank Window for the routed document, so containing the
-  // blank page in front of a pending route leaks nothing into it.
+  // True if `w` is a proxied HTML document still loading its own injected
+  // prelude. Containing the window before its prelude runs would bind its
+  // fetch/XHR and non-configurable accessors to the parent realm. Once loading
+  // completes (`readyState === 'complete'`), any document that failed to boot a
+  // prelude is contained as a fallback.
   function bootingProxiedDocument(w) {
     try {
       const doc = w.document;
       if (!doc || doc.readyState === 'complete') return false;
       const u = new Native.URL(String(Native.documentURLDesc.get.call(doc)));
-      // The SW serves every document it transforms as text/html (XHTML too), so
-      // any other type here never got a prelude.
+      // The SW serves every transformed document as `text/html`.
       return u.origin === proxyOrigin && ZP.isSharePath(u.pathname) && String(doc.contentType || '') === 'text/html';
     } catch { return false; }
   }
@@ -45,19 +31,15 @@
     if (!w) return;
     try { if (w[networkContainmentMarker]) return; } catch {}
     if (w !== root && (ownsMembrane(w) || bootingProxiedDocument(w))) return;
+    restoreEarlyNatives(w);
     installToStringMasking(w);
-    // OXC rewrite 결과는 `__zp_get/set/call/construct/...` 헬퍼를 호출한다.
-    // about:blank ad iframe (NAVER GFP SafeFrame 등) 은 자체 prelude 가 안 돌고
-    // 부모가 installNetworkContainment 만 깐다 → 이 헬퍼들이 부재하면 SW 가
-    // rewrite 한 외부 스크립트가 `__zp_get is not defined` 로 즉시 throw,
-    // window.onerror=()=>true 가 silence → 광고 미렌더. 부모 wrapper 를
-    // 위임으로 노출해 멤브레인 의미를 보존한다 (location 가상화·dynamic ctor
-    // wrap·dangerous-prop dispatch 모두 부모 closure 가 처리). 자식 native
-    // global 접근은 base[prop] 으로 fall through.
+    // Expose the parent's `__zp_*` runtime helpers on `about:blank` child realms
+    // so SW-rewritten scripts loaded into unbooted iframes can execute against
+    // the membrane while falling through to the child's native globals.
     if (root.__zp_get && !define(w, '__zp_get', root.__zp_get)) throw normalizedError('SecurityError');
     if (root.__zp_fast && !define(w, '__zp_fast', root.__zp_fast)) throw normalizedError('SecurityError');
     if (root.__zp_fastset && !define(w, '__zp_fastset', root.__zp_fastset)) throw normalizedError('SecurityError');
-    // a plain call in the child gets the child's own global: it reads what the child's `window` reads
+    // Unqualified calls in the child receive the child's own global receiver.
     if (root.__zp_get && !define(w, '__zp_this', t => t === w ? root.__zp_get(w, 'window') : root.__zp_this(t))) throw normalizedError('SecurityError');
     if (root.__zp_origin && !define(w, '__zp_origin', root.__zp_origin)) throw normalizedError('SecurityError');
     if (root.__zp_url && !define(w, '__zp_url', root.__zp_url)) throw normalizedError('SecurityError');
@@ -91,32 +73,16 @@
     if (root.__zp_nav_replace && !define(w, '__zp_nav_replace', root.__zp_nav_replace)) throw normalizedError('SecurityError');
     if (root.__zp_runClassic && !define(w, '__zp_runClassic', root.__zp_runClassic)) throw normalizedError('SecurityError');
     if (root.__zp_runEvent && !define(w, '__zp_runEvent', root.__zp_runEvent)) throw normalizedError('SecurityError');
-    // 인라인 스크립트 wrapper. transformHTML 이 `<script>body</script>` 를
-    // `<script>__ZP_EXEC_INLINE_SCRIPT("body")</script>` 로 바꿔서 부모/iframe
-    // 모두에서 동기 rewrite + 실행. iframe 에 wrapper 부재면 ReferenceError →
-    // SafeFrame iframe template 의 `window.onerror=()=>true` 같은 짧은 inline 도
-    // 즉시 실패해서 error swallow 가 안 깔리고 후속 광고 코드 silent 실패.
-    //
-    // 부모 wrapper 를 그대로 위임하면 `Native.FunctionCtor(...).call(root)` 가
-    // 부모 realm 에서 실행 → iframe 의 `window.X` 작성이 부모 window 에 가버린다.
-    // SafeFrame 광고는 iframe.name JSON 의 adm 을 자기 window 에 접근해야 하므로
-    // realm 분리가 깨지면 절대 안 됨. 자식 realm 의 native Function (overwrite 전
-    // 캡처) 으로 새 함수를 만들어 child window 에서 실행하면 realm 보존.
+    // Capture the child realm's native `Function` and `eval` before installing
+    // rewrite gates so inline scripts execute in the child's global scope
+    // rather than leaking declarations into the parent window.
     const childFunction = w.Function;
     let childFunctionFacade;
     if (childFunction) {
-      // Same global-scope requirement as the parent realm's
-      // `execGlobalScript` — classic script declarations must land on the
-      // child's global object, not inside a Function-constructor scope, or
-      // one inline script's `function foo(){}` is invisible to the next.
-      // Capture the child executor before installing its own rewrite gate.
       const childEval = w.eval;
-      // R1 — 자식도 스크립트마다 indirect eval 이라 top-level let/const/class
-      // 가 스크립트를 넘어 살아남지 못한다. 리라이터가 심은
-      // `__zp_lex_decl`/`__zp_lex_bind` 가 여기 없으면 그런 선언을 가진 스크립트는
-      // 첫 줄에서 ReferenceError 로 죽었다(2026-09-29, 헬퍼 커버리지 가드).
-      // 부모 레지스트리를 공유하면 안 된다 — 자식의 `let x` 가 부모 것과 충돌하고
-      // 부모 전역 조회에 새어 들어간다. 자식 전용 Map 과 스코프를 깐다.
+      // Per-realm lexical declaration table (`let`/`const`/`class`) isolated
+      // from the parent realm so top-level lexical bindings survive across
+      // indirect-eval scripts within the child without colliding with the parent.
       const childLexShared = newMap();
       let childLex = childLexShared;
       const childLexEntry = prop => (typeof prop === 'string' ? childLex.get(prop) : undefined);
@@ -150,30 +116,25 @@
         },
         deleteProperty() { return false; },
       }))) throw normalizedError('SecurityError');
-      // 페이지 execGlobalScript 와 같다 — sloppy 는 with(__zp_lex_scope) 로 등록된
-      // 이름만 가로채고, strict 는 with 가 불법이라 그대로 둔다.
       const childStrictRE = /^(\s|\/\*[^]*?\*\/|\/\/[^\n]*)*('use strict'|"use strict")/;
       const childExecGlobal = code => {
         if (!childEval) return (new childFunction(code)).call(w);
         return childEval(childStrictRE.test(code) ? code : 'with(__zp_lex_scope){' + ZP_WITH_PROLOGUE + code + '\n}');
       };
-      // `pageRewriteHooks` rather than the bare helpers: they are locals of
-      // `installPhase2Membrane`, invisible from this function's scope.
       const childRewrite = (source, kind) => {
         const hooks = pageRewriteHooks;
         if (!hooks) throw normalizedError('InvalidStateError');
         return hooks.rewrite(hooks.decodeEntities(source), kind);
       };
-      // A self-bootstrapping srcdoc may capture these guarded intrinsics before
-      // installing its own runtime. They must still compile/execute in this
-      // child: copying root.eval/Function moves listeners and globals to root.
+      // Guard `eval` and `Function` in the child realm so dynamic compilation
+      // stays within the child's global scope.
       const childDynamicEval = function dynamicEval(value) {
         if (new.target) throw new TypeError('eval is not a constructor');
         return typeof value === 'string' ? childExecGlobal(pageRewriteHooks.rewrite(value, 'eval')) : value;
       };
       childFunctionFacade = function Function(...args) {
-        // The native constructor validates/converts parameters exactly once;
-        // creating the function does not execute its unrewritten body.
+        // Validate and convert parameters via the native constructor without
+        // executing the unrewritten body.
         const original = Reflect.construct(childFunction, args);
         const source = origToString.call(original);
         const compiled = childExecGlobal(pageRewriteHooks.rewrite('(' + source + ')', 'classic'));
@@ -185,17 +146,9 @@
       maskNativeFunction(childDynamicEval, 'eval');
       maskNativeFunction(childFunctionFacade, 'Function');
       if (!define(w, 'eval', childDynamicEval) || !define(w, 'Function', childFunctionFacade)) throw normalizedError('SecurityError');
-      // A direct `eval(x)` is rewritten to `__zp_eval.call(this, <eval>, [x], <caller's bindings>, <strict>, <global site>)`.
-      // It runs as the parent realm's does (zpDirectEval): a helper made by THIS realm's Function constructor, with a
-      // parameter named `eval` that holds the intrinsic, so `eval(src)` inside it is a direct eval — and `src` is wrapped
-      // in `with(env)`, where `env` answers the caller's locals (accessors the call site built) and then the lexical
-      // bindings the realm's scripts share. At the top level of a script it is the realm's global code, as before.
-      // Strict code cannot hold a `with`, but it can sit inside one: the strict runner puts a strict arrow function in a
-      // `with` block, so a strict eval finds the caller's locals in its scope chain too (an arrow has no `arguments` of its
-      // own, so the caller's reach the code through the object as well).
-      // Made on first use: in a frame that reuses its initial window this realm's `Function` at install time is the
-      // parent's facade, which rewrites what it compiles and may refuse — such a realm keeps running a direct eval as
-      // global code, as before.
+      // Direct `eval(x)` support for the child realm. Compiles sloppy and strict
+      // runners lazily using the child's `Function` constructor so `eval` inside
+      // `with(__zp_env)` resolves caller locals and shared child lexical bindings.
       let childRunSloppy;
       let childRunStrict;
       const childRunners = () => {
@@ -208,7 +161,6 @@
         }
         return childRunSloppy ? { sloppy: childRunSloppy, strict: childRunStrict } : null;
       };
-      // What the eval's `with` answers: the caller's locals (`d`), then the lexical bindings the realm's scripts share.
       const childEvalEnv = d => {
         const own = k => typeof k === 'string' && Object.prototype.hasOwnProperty.call(d, k);
         const shared = k => typeof k === 'string' && childLexShared.has(k);
@@ -242,13 +194,12 @@
         const rewritten = pageRewriteHooks.rewrite(src, 'classic-local');
         let d = {};
         if (desc && typeof desc === 'object') {
-          // `delete x` must not remove a caller's binding: the accessors are non-configurable, as natively.
+          // Make caller binding accessors non-configurable so `delete x` does not remove them.
           const dd = Object.getOwnPropertyDescriptors(desc);
           for (const k of Object.keys(dd)) { dd[k].configurable = false; dd[k].enumerable = true; }
           d = Object.defineProperties({}, dd);
         }
         const env = childEvalEnv(d);
-        // the eval's own let/const/class live and die with it
         const prevLex = childLex;
         childLex = newMap();
         try {
@@ -260,61 +211,26 @@
         }
       };
       if (!define(w, '__zp_eval', childDirectEval)) throw normalizedError('SecurityError');
-      // Ordered script pipeline for this child realm.
-      //
-      // A `<script src>` written by `document.write` is PARSER-BLOCKING: the
-      // parser stops until it loads, so the next inline script sees the globals
-      // it defined. Our external loader is a `fetch`, so without a queue the
-      // following inline script wins the race — which is exactly the NAVER ad
-      // failure (`bridge.createSdkBridge is not a function`,
-      // `naver_corp_da is not defined`).
-      //
-      // Every executor below goes through `childEnqueue`, so execution order
-      // matches document order regardless of how the code arrived. Downloads
-      // still start the moment the loader is called, so scripts fetch in
-      // parallel and only their EXECUTION is serialized — the same shape the
-      // browser gives `<script defer>`.
-      //
-      // Fast path: with an empty queue the work runs synchronously, so a realm
-      // that never loads an external script keeps today's exact semantics and
-      // nothing becomes async that was not already.
+      // Ordered script queue for the child realm. `<script src>` written via
+      // `document.write` is natively parser-blocking; because external scripts
+      // are fetched asynchronously through `/zp/api/script`, `childEnqueue`
+      // serializes execution in document order while letting downloads start in
+      // parallel. When the queue is empty, inline scripts run synchronously.
       let childTail = null;
       let childPending = 0;
       const childReportError = err => {
-        // Surface it the way a real script error would, without breaking the
-        // chain — one failing creative must not stall the rest of the queue.
         try { (w.setTimeout || setTimeout)(() => { throw err; }, 0); } catch {}
       };
       const childSettle = () => { if (--childPending === 0) childTail = null; };
-      // Ordering must never become a liveness risk. A real parser blocks forever
-      // on a stalled `<script src>`, but a stall here is OUR failure (relay
-      // hiccup, wedged transport), not the site's, and it would silently strand
-      // every later script in this realm — an ad slot that never fills and no
-      // error anywhere. So there is a cap; the stranded script still runs if it
-      // eventually lands, just out of order.
-      //
-      // Two things about the cap are load-bearing, both learned the hard way
-      // (the first version got them both wrong and regressed NAVER's ad bridge
-      // straight back to `bridge.createSdkBridge is not a function`):
-      //
-      //  1. The deadline is PER ITEM, timed from when that item starts running.
-      //     Capping the wait on the queue tail instead makes the deadline
-      //     cumulative — every item's timer starts at ENQUEUE, which for a
-      //     written chunk is all at once, so a realm whose scripts collectively
-      //     exceed the cap loses ordering even though nothing stalled.
-      //  2. It is a stall detector, not a slowness budget. Measured on NAVER,
-      //     a 5 s cap fired 3 times per load — those were slow-but-live scripts,
-      //     and firing broke exactly the ordering this queue exists to keep.
+      // Per-item stall timeout so a wedged external script fetch does not block
+      // subsequent scripts in the child realm indefinitely. Timed from when the
+      // item begins waiting rather than enqueue time.
       const CHILD_STALL_MS = 30000;
       const childCapped = pending => new Promise(resolve => {
         let settled = false;
         const finish = () => { if (!settled) { settled = true; resolve(); } };
-        // Report rejections here: `childCapped` resolves either way, so a
-        // `.catch` downstream would never see them.
         Promise.resolve(pending).then(finish, err => { childReportError(err); finish(); });
         try { (w.setTimeout || setTimeout)(() => {
-          // Record it: a firing cap means ordering was abandoned, and that is
-          // otherwise invisible — no error, just an ad slot that misbehaves.
           if (!settled) try {
             const diag = root.__zp_diagnostics;
             if (diag && diag.length < 200) diag.push({ t: 'script-stall', ms: CHILD_STALL_MS });
@@ -332,8 +248,6 @@
           try { result = work(); } catch (err) { childReportError(err); return; }
           if (!result || typeof result.then !== 'function') return result;
           childPending++;
-          // `childCapped` starts this item's stall timer now, i.e. when the
-          // item itself started — see the per-item note above.
           childTail = childCapped(result).then(childSettle);
           return result;
         }
@@ -341,10 +255,6 @@
         childTail = childTail.then(() => childCapped(childRunDeferred(work))).catch(childReportError).then(childSettle);
         return childTail;
       };
-      // Record the offending source when a child script throws. These run in an
-      // ad iframe's realm, so the console stack points at the prelude's eval and
-      // nothing identifies WHICH creative failed — without this, diagnosing one
-      // means guessing.
       const childRecordFailure = (err, source) => {
         try {
           const diag = root.__zp_diagnostics;
@@ -360,8 +270,6 @@
         catch (err) { childRecordFailure(err, source); throw err; }
       });
       const childExecModule = source => childEnqueue(() => (new childFunction(childRewrite(source, 'module'))).call(w));
-      // `_REWRITTEN` variants: code already rewritten by zp-htmltx — execute
-      // directly in the child realm without going through the page rewriter.
       const childExecRewritten = code => childEnqueue(() => childExecGlobal(String(code || '')));
       const childRunRewrittenModule = code => {
         const blob = new (w.Blob || Blob)([String(code || '')], { type: 'text/javascript' });
@@ -371,37 +279,14 @@
         return p;
       };
       const childExecRewrittenModule = code => childEnqueue(() => childRunRewrittenModule(code));
-      // External script loader for iframe. SW only controls top-level (parent)
-      // — `document.write` 가 iframe 의 about:blank document 를 reset 한 뒤에는
-      // 자식이 SW client 자격을 잃어 `<script src=ext>` fetch 가 SW 우회 직행 → Go
-      // 서버 403 POLICY_BLOCKED → 광고 미렌더. parent realm 의 native fetch 로
-      // SW-routed 경로 (`/zp/api/script?u=...`) 를 fetch + child realm 에서 실행
-      // 하여 SafeFrame loader 가 정상 실행되게 한다.
-      // External script written into the child document.
-      //
-      // DEAD END (2026-07-30) — do NOT "fix" the ordering with synchronous XHR.
-      // It looks like the obvious answer (the only way an inline script can
-      // wait), but **the Service Worker does not intercept synchronous
-      // XMLHttpRequest**: measured on one controlled page, the same URL returns
-      // 403 from the Go server for sync XHR and 503 from the SW for `fetch`.
-      // Sync XHR bypasses the whole transport, 403s, and silently degrades back
-      // to the async path — one wasted request per script and no ordering
-      // gained. The Go server cannot serve `/zp/api/script` either; the proxied
-      // fetch lives in the browser kernel by design. Ordering is solved by
-      // `childEnqueue` above instead: fetch in parallel, execute in order.
-      // `cors`: the script asked for it with `crossorigin`; the worker then holds the target's answer to the CORS
-      // rules, and a refused script is skipped without a trace (natively: an `error` event on the element).
+      // Fetch external scripts via the parent realm's SW-controlled `Native.fetch`
+      // (`/zp/api/script`) and serialize execution through `childEnqueue`.
       const childLoadExternal = (url, kind, cors) => {
         const dtype = String(kind || 'classic');
-        // Start downloading NOW so N scripts in one written chunk fetch in
-        // parallel; the queue only serializes their execution.
         const asked = cors === 'anonymous' || cors === 'use-credentials' ? cors : '';
         const path = scriptProxyPath(String(url || ''), dtype);
         let fetching = (asked ? Native.fetch(path, { headers: { 'X-ZP-Element-CORS': asked } }) : Native.fetch(path)).then(r => r.text());
         if (asked) fetching = fetching.then(code => code, () => '');
-        // `childRunDeferred` here as well as in `childEnqueue`: this body runs a
-        // microtask after the fetch even on the empty-queue fast path, so the
-        // `document.write` guard has to see the deferred flag either way.
         return childEnqueue(() => fetching.then(code => childRunDeferred(() => {
           if (dtype === 'module') return childRunRewrittenModule(code);
           childExecGlobal(code);
@@ -418,7 +303,7 @@
     if (root.__ZP_EXEC_EVENT && !define(w, '__ZP_EXEC_EVENT', root.__ZP_EXEC_EVENT)) throw normalizedError('SecurityError');
     if (root.__ZP_SET_BASE && !define(w, '__ZP_SET_BASE', root.__ZP_SET_BASE)) throw normalizedError('SecurityError');
     if (childFunction && childFunction.prototype) try {
-      // Constructor-chain compilation must use the same child-owned gate.
+      // Route `Function.prototype.constructor` in the child realm to `childFunctionFacade`.
       const childConstructorOverrides = newWeakMap();
       defineMasked(childFunction.prototype, 'constructor', {
         get() { return childConstructorOverrides.get(this) || childFunctionFacade; },
@@ -448,18 +333,13 @@
     try { Object.defineProperty(w, networkContainmentMarker, { value: true, enumerable: false, configurable: false }); } catch {}
   }
 
-  // The membrane's helpers live on a contained frame's global object (its rewritten code finds them there), so the frame's own
-  // reflection — `Object.getOwnPropertyNames(window)`, `Reflect.ownKeys`, `Object.getOwnPropertyDescriptors`, run through the frame's
-  // OWN built-ins, which are not the patched ones of the page's realm — listed some fifty `__zp_*` names that no window has. The
-  // frame's reflection answers for its global as the page's realm's does.
-  // A class of ours that a contained frame shares (XMLHttpRequest, WebSocket, EventSource): the SAME constructor in both realms is a
-  // function of the page's realm in the frame too — the frame's `XMLHttpRequest instanceof Function` reads false, and `frame.
-  // XMLHttpRequest === XMLHttpRequest` true where natively every realm has its own. The frame gets a constructor of its own over the
-  // same prototype (so instances are interchangeable), with the frame's Function.prototype and the class's statics.
+  // Create a per-realm constructor wrapper sharing `rootCtor.prototype` while
+  // inheriting from the child realm's interface prototype or `Function.prototype`,
+  // so `frame.XMLHttpRequest instanceof frame.Function` is true and
+  // `frame.XMLHttpRequest !== XMLHttpRequest`.
   function realmCopyOf(w, rootCtor) {
     try {
       const name = rootCtor.name;
-      // a constructor must be an ordinary function: a method (`{ [name]() {} }`) has no [[Construct]]
       const copy = function () {
         if (!new.target) throw new TypeError("Failed to construct '" + name + "': Please use the 'new' operator, this DOM object constructor cannot be called as a function.");
         return Reflect.construct(rootCtor, arguments, new.target);
@@ -473,7 +353,6 @@
       lengthLike(copy, rootCtor);
       nameLike(copy, name);
       maskNativeFunction(copy, name);
-      // the frame's own native class sits where the copy goes: its [[Prototype]] (an interface constructor's is its parent interface's)
       let native = null;
       try { const d = Object.getOwnPropertyDescriptor(w, name); native = d && typeof d.value === 'function' ? d.value : null; } catch {}
       const fp = (native && Object.getPrototypeOf(native)) || (w.Function && w.Function.prototype);
@@ -481,6 +360,9 @@
       return copy;
     } catch { return rootCtor; }
   }
+  // Filter `__zp_*` properties out of `Object.getOwnPropertyNames`,
+  // `Reflect.ownKeys`, and `Object.getOwnPropertyDescriptors` in a contained
+  // child realm when inspecting global window objects.
   function hideInternalNamesInRealm(w) {
     const isHidden = k => typeof k === 'string' && ZP_HIDDEN_RE.test(k);
     const isGlobal = t => { try { return t === w || (!!t && typeof t === 'object' && t.window === t); } catch { return false; } };
@@ -503,26 +385,12 @@
   }
 
   function installBlockers(w, strict = false) {
-    // D4 / D5: WebTransport, RTCPeerConnection, etc. expose a *virtual*
-    // constructor surface so target code's feature detection succeeds and
-    // its fallback flow (e.g., await wt.ready.catch(() => fallbackToWS()))
-    // works cleanly. The gateway transport itself is still pending —
-    // .ready rejects with a ZeroProxy-tagged error carrying the friendly
-    // reason. This is strictly better than a hard ctor-throw because most
-    // production sites detect WebTransport availability via the Promise.
+    // Install virtual gateway constructors for WebTransport and WebRTC so
+    // feature detection succeeds and fallback flows run cleanly when no gateway
+    // is configured.
     const gatewayMeta = {
-      // D4: `WebTransport` slot prefers the real native-pass-through
-      // virtual class when `boot.wtGateway` is set; otherwise the ctor
-      // factory returns the legacy stub automatically.
-      // D5: `RTCPeerConnection` is the native class forced relay-only through
-      // the operator's TURN server when `boot.rtcICEServers` carries
-      // credentials, else the stub. `webkitRTCPeerConnection` is the same
-      // function, as natively (aliased after this loop).
       'WebTransport': { code: 'WT_UNSUPPORTED', kind: 'WebTransport', ctor: makeWebTransportConstructor },
       'RTCPeerConnection': { code: 'RTC_GATEWAY_UNAVAILABLE', kind: 'WebRTC', ctor: () => makeRTCPeerConnectionConstructor(w, 'RTCPeerConnection') },
-      // RTCDataChannel is not user-constructible; it's returned by
-      // createDataChannel on the (now-virtual) PC. Keep the legacy stub
-      // for direct construction attempts.
       'RTCDataChannel': { code: 'RTC_GATEWAY_UNAVAILABLE', kind: 'WebRTC' },
     };
     const hadWebkitRTC = 'webkitRTCPeerConnection' in w;
@@ -534,30 +402,22 @@
       const ok = define(w, name, blockCtor);
       if (strict && name in w && !ok) throw normalizedError('SecurityError');
     }
-    // the same function under a second name, as natively (`define` would rename it: RTCPeerConnection.name read "webkitRTCPeerConnection")
+    // Alias `webkitRTCPeerConnection` to the same function without renaming `RTCPeerConnection.name`.
     if (hadWebkitRTC) {
       let aliased = false;
       try { Object.defineProperty(w, 'webkitRTCPeerConnection', { value: w.RTCPeerConnection, enumerable: nativeEnumerability(w, 'webkitRTCPeerConnection'), configurable: false, writable: true }); aliased = true; } catch {}
       if (!aliased && strict) throw normalizedError('SecurityError');
     }
-    // B4 / EventSource: intentionally NOT wrapped. The Service Worker
-    // intercepts all controlled-origin fetches including SSE, so the native
-    // EventSource implementation is safe. Wrapping it would change the
-    // observable interface unnecessarily. See compat-pipeline.test.js.
-    // D6: physical hardware + permission-gated APIs pass through to native.
-    // Browser user-consent prompt is the real boundary; they do not leak
-    // target/proxy origin. Sensor noise injection / fingerprinting noise is
-    // a future phase. The block list below is intentionally empty.
+    // Permission-gated hardware and media APIs pass through to native because
+    // the browser user-consent prompt serves as the boundary and does not leak
+    // the proxy origin.
     const nav = w.navigator;
     if (nav) {
-      for (const name of /* intentionally empty — see D6 in PHASE2 plan */ []) {
+      for (const name of /* intentionally empty */ []) {
         const deny = function(){ throw normalizedError('NotSupportedError'); };
         maskAccessorFn(deny, 'get', name);
         try { defineMasked(nav, name, { get: deny, configurable: false }); } catch {}
       }
-      // D6: getUserMedia / getDisplayMedia / enumerateDevices pass through to
-      // native. Browser permission prompt is the consent boundary, and these
-      // do not leak target/proxy origin to external network.
     }
     if (w.speechSynthesis) {
       const voices = Object.freeze([

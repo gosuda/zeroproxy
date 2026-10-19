@@ -70,7 +70,7 @@ fn scratch_probe() {
         "typeof location;",
         "location instanceof Location;",
         "location?.['href'];",
-        // -- computed member mediation --
+        // computed member mediation
         "x[k];",
         "x['location'];",
         "x[k] = v;",
@@ -81,7 +81,7 @@ fn scratch_probe() {
         "frames[i].location;",
         "x?.[k];",
         "x?.['location'];",
-        // -- computed / optional calls --
+        // computed / optional calls
         "x[k](1,2);",
         "x['location']();",
         "x?.[k](a);",
@@ -89,7 +89,7 @@ fn scratch_probe() {
         "x?.[k]?.();",
         "obj.location.assign('u');",
         "history.pushState({},'','/p');",
-        // -- Reflect / Object paths --
+        // Reflect / Object paths
         "Reflect.get(doc, k);",
         "Reflect.get(doc, 'location');",
         "Reflect.get(obj, 'foo');",
@@ -101,26 +101,26 @@ fn scratch_probe() {
         "Object.getOwnPropertyDescriptors(doc);",
         "Object.getOwnPropertyNames(doc);",
         "Object.keys(d);",
-        // -- eval --
+        // eval
         "eval('location.href');",
         "eval('var q=1; q');",
         "eval(x);",
         "(0,eval)('location');",
         "eval?.('location');",
         "e=eval; e('location');",
-        // -- with --
+        // with
         "with(o){ x = 1; }",
         "with(a){ with(b){ location = u; } }",
         "with(o){ ({location} = y); }",
         "with(o){ delete location; }",
         "with(o){ delete x.p; }",
-        // -- for-of/in dangerous targets --
+        // for-of/in dangerous targets
         "for (var location of xs) {}",
         "for (var location in xs) {}",
         "for (var {location} of xs) {}",
         "for ([location] of xs) {}",
         "for ({a: location} of xs) {}",
-        // -- loop caps --
+        // loop caps
         "for(;;){}",
         "for(i=0;;i++){}",
         "for(i=0;true;i++){}",
@@ -128,7 +128,7 @@ fn scratch_probe() {
         "while(true){}",
         "do{}while(true);",
         "for(i=0;i<n;i++){}",
-        // -- loop caps in bare / labeled positions --
+        // loop caps in bare / labeled positions
         "if(c) for(i=0;;i++) x();",
         "if(c) for(i=0;;i++) x(); else y();",
         "while(c) do{}while(true);",
@@ -139,7 +139,7 @@ fn scratch_probe() {
         "a: b: for(i=0;;i++){ continue a; break b; }",
         "if(c) while(true) x();",
         "with(o){ if(q) for(i=0;;i++) x(); }",
-        // -- misc --
+        // misc
         "var {location} = o;",
         "var [location] = a;",
         "var {a: location} = o;",

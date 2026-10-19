@@ -1,4 +1,4 @@
-//! Virtual WebRTC client. Phase D5.
+//! Virtual WebRTC client.
 //!
 //! Implements virtual `RTCPeerConnection`/`RTCDataChannel` that routes through
 //! `internal/rtcgw` (pion-based server gateway). SDP munging keeps all ICE

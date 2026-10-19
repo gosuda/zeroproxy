@@ -21,20 +21,16 @@
     try { window.dispatchEvent(new HashChangeEvent('hashchange', { oldURL, newURL: virtualURL.href })); } catch { try { window.dispatchEvent(new Event('hashchange')); } catch {} }
     return out;
   }
-  // Schemes that cannot load proxied web content — the browser hands them to
-  // an external handler (mail client, dialer, app store). Native
-  // `location.assign('mailto:…')` must NOT die on TARGET_PROTOCOL_BLOCKED.
-  // Deliberately absent: javascript:/data:/blob:/about: — those execute or
-  // inline content and must keep failing closed.
+  // External handler schemes delegated directly to the browser rather than
+  // routed through the proxy. Executable and inline schemes (javascript:,
+  // data:, blob:, about:) remain blocked.
   const NAV_EXTERNAL_SCHEMES = newSet(['mailto:', 'tel:', 'sms:', 'callto:', 'skype:', 'intent:', 'market:', 'webcal:', 'geo:', 'tg:', 'whatsapp:', 'zoommtg:', 'ms-teams:', 'slack:', 'discord:']);
   function delegatableExternalScheme(raw) {
     const m = /^([A-Za-z][A-Za-z0-9+.-]*:)/.exec(String(raw).trim());
     return !!m && NAV_EXTERNAL_SCHEMES.has(m[1].toLowerCase());
   }
   function setVirtualLocation(raw, replace = false) {
-    // D4: `location.href='javascript:…'` — 네이티브는 코드를 현재 문서에서
-    // 평가한다(반환 문자열이면 문서 교체). 여기서는 재작성 후 페이지 realm 에서
-    // 실행하고, 문자열 반환의 문서 교체는 희소 경로라 생략한다.
+    // Rewrite and execute `location.href = "javascript:..."` in global scope.
     const jsMatch = /^\s*javascript:/i.exec(String(raw));
     if (jsMatch) {
       const code = String(raw).slice(jsMatch[0].length);
@@ -70,12 +66,9 @@
     activeProxyFragment = shareFragmentForKey(share.key);
     return path + activeProxyFragment;
   }
-  // routeKey → target of every frame route this realm opened. `/zp/p/<token>`
-  // cannot be decrypted here, and a child that runs no prelude of its own
-  // (text/plain, an image, a failed boot) cannot say where it is — this is how
-  // the parent still reads that frame's location and message origin. Keyed by
-  // where the frame IS (its current document path), unlike the element stash,
-  // which records where it was first sent.
+  // Map encrypted frame route keys to target URLs so the parent realm can
+  // resolve a child frame's virtual location and postMessage origin even
+  // before or without child prelude boot.
   const frameRouteTargets = newMap();
   function frameRouteTarget(path) {
     return ZP.isSharePath(path) ? frameRouteTargets.get(ZP.shareRouteKey(path)) || '' : '';
@@ -84,20 +77,16 @@
     if (frameRouteTargets.size >= 4096) frameRouteTargets.delete(frameRouteTargets.keys().next().value);
     frameRouteTargets.set(routeKey, target);
   }
-  // `opaque`: is the frame this route is for opaque (a boolean, or a function asked as the route is sent —
-  // the frame's sandbox may be set while the route is being made). Default: the frames this document makes
-  // are opaque when it is.
+  // `opaque` may be a boolean or a predicate evaluated when the route is sent;
+  // defaults to the embedding document's opacity.
   async function activatedFrameURL(raw, base = baseURL, opaque) {
     const target = targetURL(raw, base);
     const share = await ZP.encryptShareURL(target);
     rememberFrameRoute(share.encrypted, target);
     const entryId = 'e' + ZP.randomId();
     const isOpaque = typeof opaque === 'function' ? !!opaque() : opaque === undefined ? opaqueDocument : !!opaque;
-    // parentTargetUrl carries the embedding page's virtual URL so the SW can
-    // send the right Referer when fetching the iframe document. Without it
-    // the iframe's own URL is used, and origin-aware endpoints (e.g. NAVER's
-    // shopsquare.naver.com /newshopping) 404 because they expect the embedder
-    // page's host in Referer.
+    // Pass parentTargetUrl so the service worker sends the embedding page's
+    // virtual URL in the iframe document's Referer header.
     await ctx.bridge.send({ type: ZP.MSG.FRAME_ROUTE, tabId: boot.tabId, routeKey: share.encrypted, entryId, targetUrl: target, baseUrl: target, parentTargetUrl: virtualURL.href, ...(isOpaque ? { opaque: true } : null) });
     return proxyOrigin + ZP.makeSharePath(share.encrypted) + shareFragmentForKey(share.key);
   }

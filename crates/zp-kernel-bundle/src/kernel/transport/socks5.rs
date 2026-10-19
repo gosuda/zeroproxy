@@ -7,10 +7,10 @@
 //!
 //! * Greeting with `NoAuth` (0x00) and/or `UsernamePassword` (0x02).
 //! * RFC 1929 username/password sub-negotiation. Used by Tor for
-//!   `IsolateSOCKSAuth` — the username:password pair is the isolation key,
+//!   `IsolateSOCKSAuth`; the username:password pair is the isolation key,
 //!   not a real credential, so any string under 255 bytes is accepted.
 //! * `CONNECT` (0x01) with `DOMAINNAME` (0x03) ATYP. ZeroProxy intentionally
-//!   never sends IPv4/IPv6 ATYP — every target is identified by hostname so
+//!   never sends IPv4/IPv6 ATYP; every target is identified by hostname so
 //!   the relay/Tor side does the DNS resolution and we don't leak browser-side
 //!   resolver behaviour. `IPV4`/`IPV6` parsing in the *reply* is supported.
 //!
@@ -39,8 +39,8 @@ use zp_transport_codec::socks5 as codec;
 /// from that point the stream is a transparent byte pipe to `host:port`
 /// and the caller can run TLS or HTTP directly on top.
 ///
-/// `host` is sent verbatim as ATYP=DOMAINNAME — no resolver is run on the
-/// browser side. `host.len()` must fit in a single byte (≤255), which all
+/// `host` is sent verbatim as ATYP=DOMAINNAME without browser-side DNS
+/// resolution. `host.len()` must fit in a single byte (<= 255), which all
 /// real DNS names do.
 pub async fn connect<S>(stream: &mut S, host: &str, port: u16, auth: &Auth) -> io::Result<()>
 where
@@ -104,7 +104,7 @@ where
     stream.read_exact(&mut head).await?;
     match codec::parse_connect_reply_head(head)? {
         atyp @ (codec::ConnectAtyp::Ipv4 | codec::ConnectAtyp::Ipv6) => {
-            // Fixed-length BND.ADDR + BND.PORT — codec tells us how much.
+            // Fixed-length BND.ADDR + BND.PORT determined by the codec.
             let skip = atyp.fixed_skip().expect("fixed ATYP has known skip");
             let mut buf = vec![0u8; skip];
             stream.read_exact(&mut buf).await?;

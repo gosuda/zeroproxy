@@ -1,21 +1,16 @@
-//! ZeroProxy SW rewriter WASM bundle (cdylib).
+//! ZeroProxy Service Worker rewriter WASM bundle (cdylib).
 //!
-//! 2026-06-08 split-bundle (c.3): the rewriter half of the former
-//! monolithic `zp-bundle`. The kernel / transport stack (rustls + h2 +
-//! yamux + mlkem + tokio + flate2 / brotli / ruzstd + membrane / rtcgw /
-//! wtproxy) moved to the sibling `zp-kernel-bundle` crate so its wasm
-//! can be fetched + instantiated lazily — only on the first
-//! `transportFetch` — instead of blocking SW `activate`. This crate
-//! covers the eager path: every script / CSS / HTML response runs
-//! through `rewriteScript`, `rewriteCSS`, or `transformHtml`, so its
-//! wasm must be ready before the SW serves the first byte.
+//! Exposes the eager document transformation path (`rewriteScript`,
+//! `rewriteCSS`, `transformHtml`, `HtmlTxn`, source-map composition, and CSP
+//! helpers). The transport stack lives in the sibling `zp-kernel-bundle` crate
+//! and is loaded lazily on first `transportFetch`.
 //!
 //! Loaded by the Service Worker (`web/sw.js`) via
-//! `importScripts('/__zp/zp_bundle_sw.js')` + `wbg({ module_or_path:
+//! `importScripts('/__zp/zp_bundle_sw.js')` and `wbg({ module_or_path:
 //! '/__zp/zp_bundle_sw_bg.wasm' })` inside `initBundle()`.
 //!
-//! Page-realm continues to use `zp-page-bundle` — an even leaner cdylib
-//! that drops `transformHtml` / sourcemap / CSP exports.
+//! The page realm uses `zp-page-bundle`, a smaller cdylib that omits HTML,
+//! CSS, source-map, and CSP exports.
 
 #![cfg(target_arch = "wasm32")]
 
@@ -27,13 +22,12 @@ use wasm_bindgen::prelude::*;
 use zp_engine::{DocCtx, TransformEngine};
 
 thread_local! {
-    /// REFACTOR.md §3.1 — 모든 wasm export 가 나눠 쓰는 단일 engine.
-    /// RewriterInstance 의 OXC arena 재사용으로 warm-path 비용이 줄어든다.
+    /// Thread-local engine shared across WASM exports so warm-path rewrites
+    /// reuse the OXC bump arena.
     static ENGINE: RefCell<TransformEngine> = RefCell::new(TransformEngine::new());
 }
 
-/// Run `f` on the shared engine, mapping EngineError → JsError with the
-/// exact same message text the pre-facade code emitted.
+/// Runs `f` on the shared engine, mapping `EngineError` to `JsError`.
 fn with_engine<R>(
     f: impl FnOnce(&mut TransformEngine) -> Result<R, zp_engine::EngineError>,
 ) -> Result<R, JsError> {
@@ -44,13 +38,9 @@ fn with_engine<R>(
 
 #[wasm_bindgen(start)]
 pub fn init() {
-    // Panic hook. Without it a Rust panic in here surfaces to JS as a bare
-    // `RuntimeError: unreachable` with no message and no location — which is
-    // exactly how the NAVER document failure presented (`HtmlTxn.write` threw
-    // "unreachable" after ~247 KB, the SW errored the body stream, and the page
-    // rendered blank). Mirror the kernel bundle: log to the SW console AND push
-    // into `self.__zpRustTrace`, the JS-side ring that survives the trap and can
-    // be read from a page via the SW's `__zpTraceDump` message.
+    // Install a panic hook so Rust panics log their file/line and message to
+    // the Service Worker console and `self.__zpRustTrace` instead of trapping
+    // as a bare `RuntimeError: unreachable`.
     std::panic::set_hook(Box::new(|info| {
         let loc = info
             .location()
@@ -82,11 +72,15 @@ fn push_trace(line: &str) {
             fresh
         }
     };
+    if arr.length() >= 512 {
+        let _ = arr.shift();
+    }
     arr.push(&JsValue::from_str(line));
     let _ = js_sys::Reflect::set(&global, &key, &arr);
 }
 
-/// Bundle version (mirrors zp-shared); used by SW↔prelude version verification (B3.d).
+/// Bundle version (mirrors `zp-shared`); used for version verification between
+/// the Service Worker and prelude.
 #[wasm_bindgen(js_name = bundleVersion)]
 pub fn bundle_version() -> String {
     zp_engine::TransformEngine::new().version().to_string()
@@ -99,16 +93,15 @@ pub fn rewrite_script_js(source: &str, kind: &str, target_url: &str, proxy_origi
     with_engine(|e| e.rewrite_script(source, kind, &ctx))
 }
 
-/// Patch-mode emit (memory plan #3). Returns the patch list as a flat
-/// JSON string the caller can deserialise once and apply in-place over
-/// the original source buffer. Avoids the full re-emit cost on
-/// 90%-unchanged scripts.
+/// Patch-mode script rewrite. Returns a flat JSON patch list that the caller
+/// deserialises once and applies over the original source buffer, avoiding full
+/// codegen re-emission on mostly unchanged scripts.
 ///
 /// Output schema:
 ///   `{"patches":[{"start":<u32>,"end":<u32>,"replacement":"<str>"}],"len":<u32>}`
 ///
-/// `len` is the original source byte length (lets the JS side allocate
-/// the exact output buffer up-front).
+/// `len` is the original source byte length so the JS caller can preallocate
+/// the output buffer.
 #[wasm_bindgen(js_name = rewriteScriptPatches)]
 pub fn rewrite_script_patches_js(
     source: &str,
@@ -120,10 +113,10 @@ pub fn rewrite_script_patches_js(
     with_engine(|e| e.rewrite_script_patches_json(source, kind, &ctx))
 }
 
-/// D2 source-map composer: returns a Source Map v3 JSON document mapping
-/// the rewritten script back to the original source. The SW serves it at
-/// `/__zp/sourcemap?u=<targetUrl>&k=<kind>` so DevTools breakpoints set on
-/// the rewritten (`__zp_*`-wrapped) code land on the original identifiers.
+/// Source-map composer: returns a Source Map v3 JSON document mapping the
+/// rewritten script back to the original source. Served by the Service Worker
+/// at `/__zp/sourcemap?u=<targetUrl>&k=<kind>` so DevTools breakpoints on
+/// rewritten (`__zp_*`-wrapped) code resolve to original identifiers.
 #[wasm_bindgen(js_name = composeSourceMap)]
 pub fn compose_source_map_js(
     source: &str,
@@ -135,12 +128,10 @@ pub fn compose_source_map_js(
     with_engine(|e| e.compose_source_map(source, kind, &ctx, target_url))
 }
 
-/// Same as `composeSourceMap` but additionally chains the resulting map
-/// with the target site's *original* `.map` (the one the bundler emitted
-/// alongside the source). DevTools resolves rewritten → typescript /
-/// pre-minify origin in one hop instead of stopping at the bundled `.js`.
-/// `original_map_json` may be empty — the function falls back to the
-/// unchained map without raising.
+/// Composes the rewriter source map and chains it with the target site's
+/// original `.map` so DevTools resolves rewritten code back to pre-bundler
+/// sources in one hop. When `original_map_json` is empty or invalid, falls
+/// back to the unchained map.
 #[wasm_bindgen(js_name = composeSourceMapChained)]
 pub fn compose_source_map_chained_js(
     source: &str,
@@ -155,7 +146,7 @@ pub fn compose_source_map_chained_js(
     })
 }
 
-/// Transform target HTML — calls zp-htmltx + zp-rewriter for inline scripts.
+/// Transform target HTML via `zp-htmltx` and `zp-rewriter` for inline scripts.
 #[wasm_bindgen(js_name = transformHtml)]
 pub fn transform_html_js(
     html: &str,
@@ -166,13 +157,12 @@ pub fn transform_html_js(
     with_engine(|e| e.transform_html(html, &ctx))
 }
 
-/// Streaming HTML transform for progressive document render. Construct once per
-/// document; feed decoded (gunzipped) HTML byte chunks via [`HtmlTxn::write`] as
-/// they arrive from the kernel `ReadableStream`; finish with [`HtmlTxn::end`].
-/// Each `write` returns the rewritten bytes produced so far, so the SW can pipe
-/// them straight to the page. `prelude_html` is injected right after `<head>`
-/// (pass `""` to skip). Same strict-mode rewrite as `transformHtml`, just
-/// incremental — see `zp_htmltx::HtmlTxn` for the chunk-invariance guarantee.
+/// Streaming HTML transform for progressive document rendering. Construct once
+/// per document, feed decoded HTML byte chunks via [`HtmlTxn::write`] as they
+/// arrive from the kernel `ReadableStream`, and finish with [`HtmlTxn::end`].
+/// `prelude_html` is injected right after `<head>` (pass `""` to skip).
+/// Applies the same strict-mode rewrite rules as `transformHtml`; see
+/// `zp_htmltx::HtmlTxn` for the chunk-invariance guarantee.
 #[wasm_bindgen]
 pub struct HtmlTxn {
     // `Option` so `end` can consume the inner txn (lol_html's `end` takes self
@@ -214,18 +204,13 @@ impl HtmlTxn {
     }
 }
 
-/// 2026-06-08 split-bundle (c.1) Step 4: SWC-based CSS rewriter (ported from
-/// the now-deleted `rewriter-rs/` crate). Returns the rewritten CSS or
-/// throws a `CSS_PARSE_FAILED` JsError. `base_url` is the CSS file's
-/// absolute URL (used to resolve relative refs in `url(...)` / `@import`);
+/// Rewrites CSS `url(...)` and `@import` references using `zp-css`, or throws a
+/// `CSS_PARSE_FAILED` `JsError`. `base_url` is the stylesheet's absolute URL;
 /// `control_prefix` is typically `/zp/`.
 ///
-/// `proxy_origin` (e.g. `http://proxy.localhost:18080`) makes the emitted
-/// `/zp/api/fetch?url=…` references ABSOLUTE. Root-relative ones resolve
-/// against the consuming context's base, which the membrane virtualises to the
-/// TARGET origin — so inside a proxied iframe they were requested from the
-/// target host and 404'd (NAVER's webfonts and shopping sprites disappeared
-/// this way). Passing an empty string keeps the legacy root-relative output.
+/// When `proxy_origin` (e.g. `http://proxy.localhost:18080`) is non-empty,
+/// emitted `/zp/api/fetch?url=...` URLs are absolute so they do not resolve
+/// against a virtualized target `<base>` inside proxied iframes.
 #[wasm_bindgen(js_name = rewriteCSS)]
 pub fn rewrite_css_js(
     source: &str,
@@ -261,5 +246,3 @@ pub fn build_csp_with_js(ws_origin: &str, challenge_compat: bool) -> String {
 pub fn is_challenge_document_js(cf_mitigated: &str, host: &str, path: &str) -> bool {
     ENGINE.with(|e| e.borrow().is_challenge_document(cf_mitigated, host, path))
 }
-
-// Kernel exports moved out in (c.3) — see `crates/zp-kernel-bundle/`.

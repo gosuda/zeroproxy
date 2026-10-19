@@ -1,18 +1,9 @@
-// Drives the launcher page the way a user does: wait for the runtime, type the
-// target, press Open.
-//
-// The launcher keeps Open disabled — and its submit handler a no-op ("Runtime is
-// still loading") — until the service worker's runtime reports ready. A fresh
-// browser context starts cold, so clicking straight away races that: the click
-// does nothing, no navigation happens and the test sits out its timeouts. A CI
-// run lost exactly that way (no navigation, no gateway session, 105 s).
-//
-// Returns whether the click led to a navigation, so a caller that then finds no
-// result can say which stage stalled.
+// Drives the launcher page: wait for the runtime button to enable, enter the target URL, and submit.
+// The launcher keeps Open disabled until the service worker runtime reports ready.
+// Returns whether the click triggered a navigation.
 async function openThroughLauncher(page, proxyOrigin, targetUrl, { navigationTimeout = 45000 } = {}) {
-  // Not awaited: when the service worker has to start for this navigation, goto's own wait can hang
-  // (measured 2026-10-02: the page complete and controlled while goto still waited). The button says
-  // when the runtime is ready.
+  // Do not await goto: when the service worker starts during this navigation, goto's wait can hang
+  // even after the page is complete and controlled. Wait on the button state instead.
   page.goto(`${proxyOrigin}/zp/`, { waitUntil: 'domcontentloaded' }).catch(() => {});
   try {
     await page.waitForFunction(() => { const b = document.querySelector('button'); return b && !b.disabled; }, { timeout: 90000, polling: 100 });
@@ -28,8 +19,7 @@ async function openThroughLauncher(page, proxyOrigin, targetUrl, { navigationTim
   return navigated;
 }
 
-// What the page is showing — a stuck launcher, an error page and a silent
-// script all look the same from "no result".
+// Captures the current URL and visible body text for timeout diagnostics.
 async function pageText(page) {
   return page.evaluate(() => ({ url: location.href.slice(0, 90), text: document.body.innerText.slice(0, 160) })).catch(e => ({ error: String(e) }));
 }

@@ -5,16 +5,13 @@ import { access, copyFile, mkdir, readdir, readFile, rm, writeFile } from 'node:
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-// 함수 선언은 호이스팅되지만 `let` 은 TDZ 다. buildWeb() 이 이 파일의 최상위
-// 호출에서 먼저 실행되므로, 선언이 아래에 있으면 "Cannot access before
-// initialization" 으로 죽는다(실제로 밟았다). 최상위에서 선언한다.
+// Declare buildId before top-level buildWeb() executes to avoid the temporal dead zone.
 let buildId = '';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const args = parseArgs(process.argv.slice(2));
 const outRoot = path.resolve(repoRoot, args.out || 'dist');
 const webSrc = path.join(repoRoot, 'web');
-// REFACTOR.md §3.3 — runtime-prelude 소스는 web/membrane/*.js concat 조각.
 const membraneDir = path.join(webSrc, 'membrane');
 const webOut = path.join(outRoot, 'web');
 const serverOut = path.join(outRoot, process.platform === 'win32' ? 'zeroproxy-server.exe' : 'zeroproxy-server');
@@ -25,10 +22,7 @@ const buildEnv = {
   BINARYEN_CORES: process.env.BINARYEN_CORES || '2',
   GOFLAGS: process.env.GOFLAGS ?? '-p=2',
 };
-// Minify by default — produces the artifact shipped to clients. Opt out
-// with `--no-minify` for readable dist output when chasing a bug.
-// Explicit `--minify` still works (no-op when default is already true)
-// so existing invocations keep parsing.
+// Minify by default to match the shipped client artifact; pass --no-minify for readable debug output.
 const minify = args.noMinify !== true;
 const zpBundleWasm = path.join(repoRoot, 'target', 'wasm32-unknown-unknown', 'release', 'zp_bundle.wasm');
 const zpKernelBundleWasm = path.join(repoRoot, 'target', 'wasm32-unknown-unknown', 'release', 'zp_kernel_bundle.wasm');
@@ -103,10 +97,7 @@ function selectedTargets(parsed) {
 }
 
 async function cleanSelectedOutputs(selected) {
-  // When the Rust step is skipped, the `dist/web/__zp/` subdir holds the
-  // wasm-bindgen output from a previous build — wiping it would force the
-  // dev to re-run the (slow) Rust build before SW can register. Preserve
-  // __zp when rust is not being rebuilt.
+  // Preserve dist/web/__zp/ when skipping the Rust build so existing wasm-bindgen outputs remain usable.
   async function rmWebPreserveZp() {
     if (!selected.rust) {
       const entries = await readdir(webOut, { withFileTypes: true }).catch(() => []);
@@ -133,8 +124,7 @@ async function cleanSelectedOutputs(selected) {
 
 async function buildWeb() {
   await mkdir(webOut, { recursive: true });
-  // wasm 이 이미 dist/web/__zp 에 있어야 id 에 반영된다 — buildWeb 은 Rust
-  // 단계 뒤에 돈다.
+  // Compute buildId after buildRustBundle() so WASM artifacts in dist/web/__zp/ are included in the hash.
   await computeBuildId();
 
   const zpBundlePage = await makeZPBundlePageClassic();
@@ -145,9 +135,7 @@ async function buildWeb() {
     .split('__ZP_HOP_BY_HOP_HEADERS__').join(JSON.stringify(hdrPolicy.hop_by_hop));
   const workerPrelude = stripWorkerPreludeImports(await readSource('worker-prelude.js'));
 
-  // index.html 도 build id 치환 대상이다. 그냥 복사하면 런처의
-  // `<script src="/zp/assets/zp-core.js">` 가 버전 없는 URL 로 남아 로드마다
-  // 재검증 왕복이 하나 남는다(측정: 웜 로드에서 유일하게 남던 요청).
+  // Substitute __ZP_BUILD_ID__ in index.html so the zp-core.js script URL is versioned and immutable.
   await writeFile(
     path.join(webOut, 'index.html'),
     (await readFile(path.join(webSrc, 'index.html'), 'utf8'))
@@ -158,47 +146,29 @@ async function buildWeb() {
 
   await writeBundled('zp-core.js', [await readSource('zp-core.js')]);
   await writeBundled('zp-rt.js', [await readSource('zp-rt.js')]);
-  // runtime-prelude needs ZeroProxyRT available at IIFE entry — bundle
-  // zp-rt.js (the raw-WASM glue) as a prefix so it self-registers on
-  // globalThis before runtime-prelude.js runs. The async rt.load() call
-  // inside runtime-prelude will fetch /__zp/zp_page_rt.wasm.
+  // Prepend zp-rt.js so ZeroProxyRT is registered on globalThis before the runtime-prelude IIFE runs.
   const surfaceTable = JSON.stringify(await urlSurfacePairs());
   await writeBundled('runtime-prelude.js', [
     await readSource('zp-rt.js'),
     (await readMembraneSource()).split('__ZP_URL_SURFACES__').join(surfaceTable),
   ]);
-  // 2026-06-08 split-bundle (c.1) Step 4: classic-script wrapper that
-  // inlines the SW-flavored ZPBundle wasm-bindgen glue + wasm bytes and
-  // does an `initSync()` so the page realm has `globalThis.ZPBundle`
-  // ready synchronously by the time runtime-prelude's IIFE runs. Both
-  // JS and CSS rewrite live here now (legacy crate deleted in Step 4).
+  // Inline the ZPBundle wasm-bindgen glue and WASM bytes with synchronous initSync()
+  // so globalThis.ZPBundle is ready before runtime-prelude runs.
   await writeBundled('zp-page-bundle.js', [zpBundlePage]);
   await writeBundled('worker-prelude.js', [await readSource('zp-core.js'), workerPrelude]);
-  // 2026-06-08 split-bundle (c.1) Step 4: legacy rust-rewriter.js dropped
-  // from the SW bundle. The SW realm loads the modern ZPBundle via the
-  // top-level `importScripts('/__zp/zp_bundle_sw.js')` (see sw.js).
   await writeBundled('sw.js', [await readSource('zp-core.js'), serviceWorker]);
 }
 
 async function buildRustBundle() {
   run('cargo', ['build', '--locked', '--release', '--target', 'wasm32-unknown-unknown', '-p', 'zp-bundle']);
-  // 2026-06-08 split-bundle (c.3): zp-kernel-bundle holds the SW
-  // transport/kernel half (rustls + h2 + yamux + mlkem + tokio +
-  // flate2/brotli/ruzstd + membrane/rtcgw/wtproxy). Its wasm is fetched +
-  // instantiated lazily — only on first `transportFetch` — instead of
-  // blocking SW `activate`.
+  // zp-kernel-bundle holds the SW transport and kernel stack, instantiated lazily on first transportFetch.
   run('cargo', ['build', '--locked', '--release', '--target', 'wasm32-unknown-unknown', '-p', 'zp-kernel-bundle']);
-  // 2026-06-08 split-bundle (c.2): zp-page-bundle is the page-realm wasm —
-  // strict subset (rewriter + sourcemap + CSS + html-tx) without the SW
-  // kernel/transport stack.
+  // zp-page-bundle contains only the page-realm rewriter, sourcemap, CSS, and HTML transform logic.
   run('cargo', ['build', '--locked', '--release', '--target', 'wasm32-unknown-unknown', '-p', 'zp-page-bundle']);
-  // zp-page-rt: raw extern "C" cdylib loaded by web/zp-rt.js. No wasm-bindgen
-  // glue; the .wasm is copied as-is and JS instantiates it directly.
+  // zp-page-rt is a raw extern "C" cdylib instantiated directly by web/zp-rt.js without wasm-bindgen glue.
   run('cargo', ['build', '--locked', '--release', '--target', 'wasm32-unknown-unknown', '-p', 'zp-page-rt']);
   await mkdir(zpBundleOutDir, { recursive: true });
-  // SW bundle (zp-bundle, full transport stack). No-modules glue loadable
-  // via importScripts(); wrapped in an IIFE so top-level `let wasm_bindgen`
-  // stays function-scoped.
+  // Wrap no-modules wasm-bindgen glue in an IIFE so top-level let wasm_bindgen stays function-scoped.
   run('wasm-bindgen', [
     '--target', 'no-modules',
     '--out-dir', zpBundleOutDir,
@@ -213,12 +183,7 @@ async function buildRustBundle() {
       '(function(){\n' + swGlue + '\n;try{ self.ZPBundleWBG = wasm_bindgen; }catch(_e){};\n})();\n',
     );
   }
-  // 2026-06-08 split-bundle (c.3): SW kernel bundle (zp-kernel-bundle —
-  // rustls + h2 + yamux + mlkem + tokio + decoders + membrane/rtcgw/
-  // wtproxy). Same no-modules + IIFE wrap shape as the rewriter bundle,
-  // but its factory is exposed under `self.ZPKernelWBG` so the SW's
-  // `initKernel()` shim can find it independently. The wasm itself
-  // stays unfetched until first `transportFetch`.
+  // Expose the SW kernel factory under self.ZPKernelWBG for lazy initialization.
   run('wasm-bindgen', [
     '--target', 'no-modules',
     '--out-dir', zpBundleOutDir,
@@ -233,9 +198,7 @@ async function buildRustBundle() {
       '(function(){\n' + kernelGlue + '\n;try{ self.ZPKernelWBG = wasm_bindgen; }catch(_e){};\n})();\n',
     );
   }
-  // Page bundle (zp-page-bundle, rewriter + CSS only). Same no-modules
-  // flavor + same IIFE wrap; exposes its factory under a distinct global
-  // so the page boot wrapper can find it.
+  // Expose the page bundle factory under self.ZPPageBundleWBG for synchronous page bootstrap.
   const zpPageBundleWasm = path.join(repoRoot, 'target', 'wasm32-unknown-unknown', 'release', 'zp_page_bundle.wasm');
   run('wasm-bindgen', [
     '--target', 'no-modules',
@@ -251,10 +214,7 @@ async function buildRustBundle() {
       '(function(){\n' + pageBundleGlue + '\n;try{ self.ZPPageBundleWBG = wasm_bindgen; }catch(_e){};\n})();\n',
     );
   }
-  // wasm-opt feature flags: rustc since 1.82 emits bulk-memory / sign-ext /
-  // multivalue etc. by default for wasm32, but wasm-opt rejects them unless
-  // explicitly enabled. Mirror the runtime feature set rustc assumes (which
-  // browsers have shipped for years). `npm i -D binaryen` provides wasm-opt.
+  // Enable the WebAssembly features that rustc emits by default for wasm32.
   const WASM_OPT_FLAGS = [
     '--enable-bulk-memory',
     '--enable-bulk-memory-opt',
@@ -264,10 +224,6 @@ async function buildRustBundle() {
     '--enable-multivalue',
     '--enable-reference-types',
   ];
-  // Optimize the wasm-bindgen outputs — SW bundle (zp_bundle_sw_bg.wasm)
-  // + page bundle (zp_page_bundle_bg.wasm). The legacy `--target web`
-  // ES-module page output is no longer built (zp-page-bundle is loaded
-  // as a classic script via importScripts-like `<script>` tags).
   const swWasm = path.join(zpBundleOutDir, 'zp_bundle_sw_bg.wasm');
   const kernelWasm = path.join(zpBundleOutDir, 'zp_kernel_sw_bg.wasm');
   const pageBundleWasm = path.join(zpBundleOutDir, 'zp_page_bundle_bg.wasm');
@@ -278,7 +234,6 @@ async function buildRustBundle() {
     tryRunOptional('wasm-opt', ['-Oz', ...WASM_OPT_FLAGS, kernelWasm, '-o', kernelWasm]);
     tryRunOptional('wasm-opt', ['-Oz', ...WASM_OPT_FLAGS, pageBundleWasm, '-o', pageBundleWasm]);
   }
-  // zp-page-rt: copy raw wasm into __zp/, optionally optimize. No glue file.
   const pageRtDst = path.join(zpBundleOutDir, 'zp_page_rt.wasm');
   await copyFile(zpPageRtWasm, pageRtDst);
   tryRunOptional('wasm-opt', ['-Oz', ...WASM_OPT_FLAGS, pageRtDst, '-o', pageRtDst]);
@@ -286,11 +241,7 @@ async function buildRustBundle() {
 
 function tryRunOptional(cmd, argv) {
   try {
-    // On Windows, `npm i -g binaryen` installs `wasm-opt.cmd` not
-    // `wasm-opt.exe`. Plain `spawnSync('wasm-opt', ...)` returns ENOENT
-    // for `.cmd` shims because Node won't auto-resolve PATHEXT unless
-    // `shell:true` is set. That's why the page-bundle wasm-opt step
-    // silently no-op'd — Linux/macOS hit the binary, Windows fell through.
+    // Use shell: true on Windows so spawnSync resolves .cmd shims installed by npm.
     const result = spawnSync(cmd, argv, { cwd: repoRoot, env: buildEnv, stdio: 'inherit', shell: process.platform === 'win32' });
     return result.status === 0;
   } catch {
@@ -302,17 +253,9 @@ function buildServer() {
   run('go', ['build', '-trimpath', '-o', serverOut, './cmd/zeroproxy-server']);
 }
 
-// URL 표면 테이블은 `crates/zp-shared/testdata/url_surfaces.json` 이 단일 소스다.
-// 프렐류드가 손목록을 들고 있으면 Rust 목록과 갈라진다 — 2026-08-20~21 에 그
-// 이유로 `background` / `feImage` / `image-set` 이 csp-only 로 남아 있었다.
-// 빌드 시점에 박아 넣어 목록이 한 곳에만 존재하게 한다.
-//
-// `deliberate` 은 제외한다 — 정책상 어느 realm 에서도 리라이트하지 않는 자리다.
-// 나머지(rewrite/srcset/navigation/special/known-gap)는 페이지 realm 이 다뤄야
-// 한다. `known-gap` 은 htmltx 에만 없는 것이지 페이지 realm 은 이미 다룬다.
-//
-// `xlink:href` 같은 접두 속성은 프렐류드가 `attrLocalName` 으로 접두를 떼고
-// 보므로 로컬 이름으로 눕힌다.
+// Derive URL surface pairs from crates/zp-shared/testdata/url_surfaces.json.
+// Exclude 'deliberate' entries (never rewritten) and strip namespace prefixes
+// (such as xlink:href) to match attrLocalName lookup in the prelude.
 async function urlSurfacePairs() {
   const raw = await readFile(
     path.join(repoRoot, 'crates', 'zp-shared', 'testdata', 'url_surfaces.json'),
@@ -326,13 +269,11 @@ async function urlSurfacePairs() {
     const attr = bits[bits.length - 1];
     pairs.add(tag + ':' + attr);
   }
-  if (pairs.size < 20) throw new Error('url_surfaces.json 에서 뽑은 표면이 너무 적다: ' + pairs.size);
+  if (pairs.size < 20) throw new Error('Too few URL surfaces extracted from url_surfaces.json: ' + pairs.size);
   return [...pairs].sort();
 }
 
-// 타깃 응답 헤더 정책도 픽스처가 단일 소스다. Go 사본이 있었지만 호출자가
-// 없는 죽은 코드였고(2026-08-21 확인), "Go 가 막고 있다" 는 믿음이 실제
-// 탈출을 낳았다. 이제 목록은 여기 하나이고 빌드가 SW 에 박아 넣는다.
+// Embed the target response header policy from the shared fixture into the service worker.
 async function responseHeaderPolicy() {
   const raw = await readFile(
     path.join(repoRoot, 'crates', 'zp-shared', 'testdata', 'response_header_policy.json'),
@@ -341,7 +282,7 @@ async function responseHeaderPolicy() {
   const doc = JSON.parse(raw);
   for (const key of ['reporting', 'directive', 'hop_by_hop']) {
     if (!Array.isArray(doc[key]) || doc[key].length === 0) {
-      throw new Error('response_header_policy.json 의 ' + key + ' 가 비었다');
+      throw new Error('response_header_policy.json key "' + key + '" is empty');
     }
   }
   return doc;
@@ -351,7 +292,7 @@ async function readSource(name) {
   return readFile(path.join(webSrc, name), 'utf8');
 }
 
-// 사전순 파일명 순서로 '\n' join 한다 (test/js/_prelude.cjs 와 동일 규칙).
+// Join membrane fragments in lexicographical filename order (matching test/js/_prelude.cjs).
 async function membraneFragmentNames() {
   return (await readdir(membraneDir)).filter(n => n.endsWith('.js')).sort();
 }
@@ -363,17 +304,7 @@ async function readMembraneSource() {
   return parts.join('\n');
 }
 
-// 2026-08-14 — 콘텐츠 기반 build id.
-//
-// 에셋을 `no-cache` 로 바꿔 재검증 캐시는 살렸지만(1042KB → 0KB), 여전히 매
-// 로드마다 조건부 요청 왕복이 남는다. URL 에 build id 를 실으면 그 왕복도
-// 사라진다 — 빌드가 바뀌면 URL 이 바뀌므로 `immutable` 로 줘도 낡은 사본이
-// 남을 수 없다. 파일명을 해싱하는 대신 `?v=` 를 쓰는 이유는 참조 지점이
-// 여러 곳(sw.js 의 importScripts 리터럴, 프렐류드의 wasm 경로,
-// ZP.assetPath)이라 파일명 재작성이 그 전부를 건드려야 하기 때문이다.
-//
-// **소스 바이트**로 해싱한다. 산출물로 해싱하면 치환이 산출물을 바꿔
-// 순환이 된다.
+// Hash source and WASM inputs to produce a content-addressed buildId for immutable ?v= asset URLs.
 async function computeBuildId() {
   const { createHash } = await import('node:crypto');
   const h = createHash('sha256');
@@ -382,14 +313,10 @@ async function computeBuildId() {
     h.update(n);
     h.update(await readFile(path.join(webSrc, n)));
   }
-  // membrane 조각도 해시에 포함 — 안 그러면 조각만 바뀐 빌드가 같은 id 를
-  // 받아 immutable 에셋이 낡은 채로 굳는다.
   for (const n of await membraneFragmentNames()) {
     h.update('membrane/' + n);
     h.update(await readFile(path.join(membraneDir, n)));
   }
-  // wasm 도 포함해야 한다 — Rust 만 바뀐 빌드에서 id 가 그대로면 낡은 wasm 이
-  // immutable 로 굳는다.
   for (const p of await listWasmArtifacts()) {
     h.update(path.basename(p));
     try { h.update(await readFile(p)); } catch {}
@@ -418,12 +345,7 @@ async function writeBundled(fileName, parts) {
 }
 
 function stripServiceWorkerImports(source) {
-  // CRLF-tolerant: web/sw.js can be checked out with either LF or CRLF
-  // line endings depending on git autocrlf. Without \r? the regex misses
-  // CRLF lines, leaving importScripts in the bundle. The bundled sw.js
-  // would then have two top-level `let wasm_bindgen` declarations (one
-  // from inlined rust-rewriter, one from importScripts'd rust-rewriter),
-  // causing a SyntaxError during SW evaluation.
+  // Match both LF and CRLF line endings so git autocrlf checkouts do not leave duplicate importScripts in the bundle.
   return source.replace(/^importScripts\('\/zp\/assets\/zp-core\.js'\);\r?\n/gm, '');
 }
 
@@ -431,12 +353,7 @@ function stripWorkerPreludeImports(source) {
   return source.replace(/^\s*importScripts\('\/zp\/assets\/zp-core\.js'\);\r?\n/m, '');
 }
 
-// 2026-06-08 split-bundle (c.2): page-realm ZPBundle uses the dedicated
-// `zp-page-bundle` crate's WASM (~1 MB after wasm-opt) instead of the
-// full SW bundle's (~3.8 MB). The page bundle exposes only the rewriter
-// + CSS rewriter — no kernel/transport stack (rustls / h2 / mlkem /
-// yamux / tokio / flate2 / brotli / ruzstd / membrane / rtcgw / wtproxy
-// all left in the SW bundle).
+// Build the classic-script page bundle wrapper from zp-page-bundle (rewriter and CSS only).
 async function makeZPBundlePageClassic() {
   const glueJs = await readFile(path.join(zpBundleOutDir, 'zp_page_bundle.js'), 'utf8');
   const wasmBytes = await readFile(path.join(zpBundleOutDir, 'zp_page_bundle_bg.wasm'));

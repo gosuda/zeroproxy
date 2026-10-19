@@ -1,12 +1,10 @@
 
   function installStorageFacades(w) {
-    // D7 hardening: every target-origin gets an isolated namespace inside the
-    // proxy-origin's real storage. Persistence is preserved (key-prefixed
-    // wrappers backed by native storage), and target A's keys are invisible
-    // to target B. localStorage persists across reloads; sessionStorage is
-    // per-tab session (additionally scoped by tabId).
+    // Isolate each target origin in its own key-prefixed namespace inside the
+    // proxy origin's native storage. `localStorage` is scoped by origin hash;
+    // `sessionStorage` is scoped by both tab session ID and origin hash.
     const targetOriginKey = securityOrigin();
-    // sha1-ish short hash (FNV-1a) of origin to keep keys compact + collision-resistant for our scale.
+    // Compute a compact FNV-1a 32-bit hash of the target origin.
     const originHash = (() => {
       let h = 0x811c9dc5;
       for (let i = 0; i < targetOriginKey.length; i++) { h ^= targetOriginKey.charCodeAt(i); h = Math.imul(h, 16777619); }
@@ -17,24 +15,13 @@
     const idbPrefix = 'zp:i:' + originHash + ':';
     const bcPrefix = 'zp:b:' + originHash + ':';
     const sharedWorkerPrefix = 'zp:w:' + originHash + ':';
-    // Capture native storage refs BEFORE defining the accessor: the getter
-    // would otherwise recurse into itself (`w.localStorage` re-triggers the
-    // accessor, causing a stack overflow that breaks every page that touches
-    // storage — observed on naver.com home widgets). Cache the wrapper too
-    // so repeated reads don't allocate a fresh proxy each access.
+    // Capture native storage references before defining the accessors so the
+    // getters do not recurse into themselves, and cache the wrapped facades so
+    // repeated reads return the same instance.
     const nativeLocalStorage = w.localStorage;
     const nativeSessionStorage = w.sessionStorage;
-    // ★sessionStorage 는 **브라우저 탭 세션**에 묶여야 한다.
-    //
-    // 예전 접두는 `boot.tabId` 를 썼는데 그건 런처에서 Open 할 때마다 새로
-    // 발급된다. 그래서 같은 탭에서 A → B → A 로 돌아오면 A 의 sessionStorage 가
-    // 사라졌다. 대조군(프록시 없이 같은 순서)은 **남는다** — 실측으로 확인한
-    // 재현성 결함이다(2026-08-22).
-    //
-    // 진짜 탭 세션의 수명을 가진 것은 **네이티브 sessionStorage 자신**이다
-    // (탭마다 다르고 탭 안 내비게이션에는 살아남는다). 거기 id 를 한 번 심어
-    // 두고 그걸 쓰면 브라우저 의미와 정확히 같아진다. 타깃별 격리는 originHash
-    // 가 계속 담당한다.
+    // Persist the tab-session identifier inside `nativeSessionStorage` itself so
+    // `sessionStorage` survives cross-site navigations within the same browser tab.
     const tabSessionKey = '__zp_sid';
     let tabSessionId = '';
     try {
@@ -46,9 +33,9 @@
     } catch { tabSessionId = boot.tabId; }
     const sessionPrefix = 'zp:s:' + tabSessionId + ':' + originHash + ':';
     if (w === root) {
-      // window.name backing: same tab-session lifetime + origin scope as the
-      // session facade. The REAL name is emptied — it would leak whatever the
-      // launcher or a previous target wrote into every later document.
+      // Back `window.name` for the top window with tab-session + origin-scoped
+      // storage and clear the underlying native `window.name` so values do not
+      // leak across cross-origin navigations.
       const nameKey = 'zp:n:' + tabSessionId + ':' + originHash;
       let cachedName;
       rootWindowNameStore = {
@@ -58,22 +45,11 @@
         },
         set(v) { cachedName = String(v); try { nativeSessionStorage.setItem(nameKey, cachedName); } catch {} },
       };
-      // ★실명 삭제는 최상위 문서에만 적용한다. 프레임의 `window.name` 은
-      // 곧 **브라우징 컨텍스트 이름**이라, 지우면 부모의 `window['nf']` /
-      // `frames['nf']` / `<a target=name>` 명명 조회가 전부 깨진다(실측:
-      // srcdoc 자식의 prelude 가 자기 이름을 지워 `frames['nf']` → undefined).
-      // 자식의 실명은 읽기 표면이 전부 가상 스토어를 거치므로 유지해도 페이지에
-      // 새지 않는다. 대신 초기 가상값을 실명으로 시드하고 쓰기도 실명에
-      // 반영해, 타깃이 `window.name` 을 바꾸면 명명 조회도 따라가게 한다.
+      // Only clear the native `window.name` on the top window; a child frame's
+      // `window.name` is its browsing-context name used by `frames[name]` and `<a target>`.
       const isTopFrame = (() => { try { return w.top === w; } catch { return true; } })();
       if (isTopFrame) { try { winSet(w, 'name', ''); } catch {} }
       else {
-        // A frame's name belongs to ITS browsing context, not to its origin: the real
-        // `name` already behaves as natively — it is the iframe's `name`, survives the
-        // frame's navigations and is what `target=` finds — and nothing of ours is ever
-        // written to it. The store above is the top window's, keyed by tab and origin:
-        // behind it a same-site frame read its parent's name (and, naming itself, wrote
-        // over it).
         rootWindowNameStore = {
           get() { try { return String(winGet(w, 'name') || ''); } catch { return ''; } },
           set(v) { try { winSet(w, 'name', String(v)); } catch {} },
@@ -92,22 +68,13 @@
       if (!wrappedSessionStorage) wrappedSessionStorage = prefixedStorage(nativeSessionStorage, sessionPrefix);
       return wrappedSessionStorage;
     });
-    // Native `storage` events speak PHYSICAL keys. Every proxied site shares one
-    // physical origin, so the browser fires one in every frame of every site for
-    // any site's write — carrying that site's prefixed key and its new value —
-    // and for our own bookkeeping keys (`__zp_trace_log`, `__zp_hb`, the window
-    // name store), constantly. Hand the page only what its OWN namespace wrote,
-    // under the key it used, with its own Storage as `storageArea`: what
-    // same-origin frames get natively. Registered first and in capture, so every
-    // page listener — `addEventListener`, `onstorage`, `<body onstorage>` — runs
-    // after it. Events the page builds and dispatches itself are not trusted and
-    // pass untouched; an own `storageArea` marks an event already translated (a
-    // window can be set up by both the embedder and its own prelude).
+    // Filter and translate native `storage` events in capture phase so the page
+    // only observes writes belonging to its own origin namespace, with the prefix
+    // stripped from `key` and its own facade as `storageArea`.
     try {
       const hasOwn = Object.prototype.hasOwnProperty;
       w.addEventListener('storage', ev => {
         if (!ev.isTrusted || hasOwn.call(ev, 'storageArea')) return;
-        // An opaque document has no storage to hear about.
         if (opaqueDocument) { ev.stopImmediatePropagation(); return; }
         const area = ev.storageArea;
         const key = ev.key;
@@ -115,8 +82,7 @@
         let pageArea = null;
         if (nativeLocalStorage && area === nativeLocalStorage) { prefix = localPrefix; pageArea = w.localStorage; }
         else if (nativeSessionStorage && area === nativeSessionStorage) { prefix = sessionPrefix; pageArea = w.sessionStorage; }
-        // A null key is a native `clear()`: the facade never issues one (it removes
-        // its own keys one by one), so it cannot belong to this namespace.
+        // Suppress events from other namespaces, internal `__zp_` keys, or native `clear()` (`key === null`).
         if (prefix === null || typeof key !== 'string' || !key.startsWith(prefix) || key.startsWith(prefix + '__zp_')) {
           ev.stopImmediatePropagation();
           return;
@@ -127,9 +93,7 @@
     } catch {}
     if (w.indexedDB) {
       const nativeIDB = w.indexedDB;
-      // 접근자로 심는다 — 실제 브라우저의 `window.indexedDB` 는 **접근자**이고
-      // 데이터 프로퍼티로 바꿔 놓으면 디스크립터 모양만 봐도 티가 난다
-      // (실측 2026-08-16: 직접 `Ace.` vs 프록시 `D-ew`).
+      // Expose `indexedDB` via an accessor to match the native property descriptor shape.
       const virtualIDB = {
         open(name, version) {
           if (opaqueDocument) throw opaqueDenied("Failed to execute 'open' on 'IDBFactory'", 'access to the Indexed Database API is denied in this context.');
@@ -143,10 +107,7 @@
         databases: nativeIDB.databases ? () => opaqueDocument ? Promise.reject(opaqueDenied("Failed to execute 'databases' on 'IDBFactory'", 'Access to the IndexedDB API is denied in this context.')) : nativeIDB.databases().then(list => list.filter(db => db.name && db.name.startsWith(idbPrefix)).map(db => Object.assign({}, db, { name: db.name.slice(idbPrefix.length) }))) : undefined
       };
       defineAccessor(w, 'indexedDB', () => virtualIDB);
-      // `webkitIndexedDB` bypasses the namespace entirely — alias it to the
-      // facade. The rest of the webkitIDB* family are plain constructor
-      // aliases with no open path; map them onto the real IDB* so nothing
-      // reaches the un-namespaced factory.
+      // Alias `webkitIndexedDB` to the namespaced facade so legacy callers cannot bypass origin isolation.
       if (w.webkitIndexedDB) try { defineAccessor(w, 'webkitIndexedDB', () => virtualIDB); } catch {}
       for (const alias of ['IDBKeyRange','IDBRequest','IDBTransaction','IDBCursor','IDBCursorWithValue','IDBDatabase','IDBFactory','IDBObjectStore','IDBIndex','IDBOpenDBRequest','IDBVersionChangeEvent','IDBFileHandle','IDBMutableFile','IDBFileRequest','IDBLocaleAwareKeyRange']) {
         const webkit = 'webkit' + alias;
@@ -155,7 +116,6 @@
     }
     if (w.caches) {
       const nativeCaches = w.caches;
-      // indexedDB 와 같은 이유로 접근자 — 실제 `window.caches` 는 접근자다.
       const virtualCaches = {
         open(name) { return nativeCaches.open(cachePrefix + String(name)); },
         delete(name) { return nativeCaches.delete(cachePrefix + String(name)); },
@@ -168,10 +128,9 @@
         return virtualCaches;
       });
     }
-    // cookieStore: same jar as document.cookie (documentCookieRecords).
-    // The native object would expose REAL proxy-origin cookies.
+    // Back `cookieStore` with the virtual cookie jar (`documentCookieRecords`) so
+    // native proxy-origin cookies are not exposed.
     if (w.cookieStore) {
-      // An opaque origin may hold the object but not use it.
       let deniedCookieStore = null;
       const denyCookieStore = () => {
         if (deniedCookieStore) return deniedCookieStore;
@@ -185,14 +144,11 @@
       };
       defineAccessor(w, 'cookieStore', () => (opaqueDocument ? denyCookieStore() : virtualCookieStore()));
     }
-    // OPFS — `navigator.storage.getDirectory()` returns the REAL proxy-origin
-    // root, shared across targets. Hand out a per-target subdirectory handle;
-    // every operation below it stays inside the namespace transparently.
+    // Scope OPFS (`navigator.storage.getDirectory()`) to a per-target-origin subdirectory.
     try {
       const storageMgr = w.navigator && w.navigator.storage;
       if (storageMgr && typeof storageMgr.getDirectory === 'function' && typeof storageMgr.getDirectory.__zpWrapped !== 'boolean') {
         const nativeGetDirectory = storageMgr.getDirectory.bind(storageMgr);
-        // handle.name 은 페이지에 노출되므로 마커+오리진 원문 대신 해시를 쓴다.
         let oh = 0x811c9dc5;
         const opfsKey = securityOrigin();
         for (let i = 0; i < opfsKey.length; i++) { oh ^= opfsKey.charCodeAt(i); oh = Math.imul(oh, 16777619); }
@@ -204,11 +160,7 @@
         try { Object.defineProperty(wrapped, '__zpWrapped', { value: true }); } catch {}
         maskNativeFunction(wrapped, 'getDirectory');
         define(storageMgr, 'getDirectory', wrapped);
-        // The OPFS root's `.name` is '' natively (Chrome 152). What we hand out
-        // is the per-target subdirectory, so `root.name` read 'zp:o:<hash>' —
-        // a fingerprint that also names the namespace. Mask exactly this
-        // target's root name (a structured-cloned copy of the handle is a new
-        // object, so match by name rather than identity).
+        // Mask the per-target subdirectory's `.name` as `''` to match the native OPFS root handle.
         const FSH = w.FileSystemHandle && w.FileSystemHandle.prototype;
         const nameDesc = FSH && Object.getOwnPropertyDescriptor(FSH, 'name');
         if (nameDesc && typeof nameDesc.get === 'function' && nameDesc.configurable) {
@@ -227,15 +179,13 @@
         }
       }
     } catch {}
-    // Legacy webkit filesystem/quota APIs — real proxy-origin FS, no clean
-    // virtualization. Remove the surface (feature detection falls back).
+    // Hide unvirtualized legacy webkit quota and sync filesystem globals.
     for (const legacy of ['webkitPersistentStorage','webkitTemporaryStorage','webkitStorageInfo','webkitRequestFileSystemSync','webkitResolveLocalFileSystemURLSync']) {
       try { if (w[legacy] !== undefined) define(w, legacy, undefined); } catch {}
     }
-    // The two entry points stay FUNCTIONS. Chrome has them, and a script that calls one without a guard (the classic
-    // incognito probe, `webkitRequestFileSystem.call(window, …)`, which a bot-management VM runs) died with `reading
-    // 'call'` of undefined — a tell no browser has. No file system is created: the request reports what Chrome reports
-    // when storage is denied, a SecurityError to the error callback.
+    // Keep `webkitRequestFileSystem` and `webkitResolveLocalFileSystemURL` as functions
+    // that asynchronously invoke their error callback with `SecurityError`, matching
+    // Chrome's behavior when storage access is denied.
     for (const [legacy, errorIndex, length] of [['webkitRequestFileSystem', 3, 3], ['webkitResolveLocalFileSystemURL', 2, 2]]) {
       try {
         if (typeof w[legacy] !== 'function') continue;
@@ -249,10 +199,8 @@
         define(w, legacy, denied);
       } catch {}
     }
-    // fetchLater — the real API schedules a fire-and-forget request at
-    // document teardown. The raw URL cannot go direct (that is a leak), so
-    // emulate over the /zp/api/fetch envelope with keepalive on
-    // pagehide/visibilitychange→hidden — the same path fetch() takes.
+    // Emulate `fetchLater` over `postRuntimeEnvelope` with `keepalive: true` on
+    // `pagehide` or `visibilitychange` to `'hidden'`.
     try {
       if (typeof w.fetchLater === 'function' && Native.fetch && Native.Request) {
         const fl = function fetchLater(input, init) {
@@ -268,8 +216,6 @@
             try {
               const raw = input && typeof input === 'object' && typeof input.url === 'string' ? input.url : String(input);
               const target = requestTargetURL(raw);
-              // fetchThroughRuntime 과 같은 패턴 — Request 입력이면 그것의
-              // method/headers 를 유지하고 opts 로 덮어쓴다.
               const req = (input && typeof input === 'object' && typeof input.clone === 'function') ? new Native.Request(input, opts) : new Native.Request(target, opts);
               let bodyBytes = null;
               const b = opts.body;
@@ -283,8 +229,6 @@
                         credentials: req.credentials, mode: req.mode, referrer: req.referrer,
                         referrerPolicy: req.referrerPolicy || documentReferrerPolicy(), redirect: req.redirect, cache: req.cache, integrity: req.integrity },
               };
-              // keepalive 의 ~64KB 바디 상한에 v2(33% 작음)가 특히 잘 맞는다 —
-              // 실패 시 v1 폴백은 postRuntimeEnvelope 안에서 한다.
               postRuntimeEnvelope(target, payload, bodyBytes, { keepalive: true }).catch(() => {});
             } catch {}
           };
@@ -306,12 +250,8 @@
         define(w, 'fetchLater', fl);
       }
     } catch {}
-    // URL constructor + canParse/parse: a base argument built from OUR
-    // routing vocabulary (share path, /zp/ api URL, proxy-origin string)
-    // must resolve against the VIRTUAL base — otherwise
-    // `new URL(rel, leakedBase).href` hands the proxy origin back. An
-    // absent base still throws natively (single-arg relative URLs are
-    // invalid) — only the vocabulary leak is normalized.
+    // Normalize proxy-origin URLs passed to `new URL()`, `URL.canParse()`, and
+    // `URL.parse()` against `baseURL` so proxy routing paths do not leak.
     if (Native.URL) {
       const wrapURLBase = b => {
         const g = unleakedTargetRaw(String(b));
@@ -320,15 +260,11 @@
       const ZPURL = function URL(input, base) {
         const g = unleakedTargetRaw(String(input));
         const inp = g === null ? baseURL : g;
-        // WebIDL: optional 인자의 `undefined` 는 **부재**와 같다 —
-        // `new URL(x, undefined)` 는 base 없는 생성과 동일해야 한다.
-        // `'undefined'` 문자열로 넘기면 절대 URL 에도 Invalid base URL 이 난다
-        // (zp-core canonicalTargetURL 이 `base || undefined` 를 항상 넘긴다).
+        // Per WebIDL, an explicit `undefined` optional argument is treated as omitted.
         return base !== undefined ? new Native.URL(inp, wrapURLBase(base)) : new Native.URL(inp);
       };
       try { ZPURL.prototype = Native.URL.prototype; } catch {}
-      // Blob 브랜드 검사 — MediaSource/MediaStream 은 기록하지 않는다(워커
-      // 소스가 될 수 없고, 복사본 URL 을 만들면 MSE 핸들이 하나 더 생긴다).
+      // Only record `Blob` instances in `pageBlobURLs` (not `MediaSource` or `MediaStream`).
       const blobSize = w.Blob && Object.getOwnPropertyDescriptor(w.Blob.prototype, 'size');
       const isBlob = o => { try { blobSize.get.call(o); return true; } catch { return false; } };
       for (const sm of ['createObjectURL', 'revokeObjectURL', 'canParse', 'parse']) {
@@ -351,40 +287,30 @@
       }
       brandLikeNative(ZPURL, null, 'URL');
       define(w, 'URL', ZPURL);
-      // `webkitURL` is a live alias of the native constructor — unwrapped it
-      // resolves relative input against the REAL document base (proxy URL).
-      // the same function under a second name (`define` would rename it: URL.name read "webkitURL")
+      // Alias `webkitURL` to `ZPURL` via `Object.defineProperty` so `ZPURL.name` stays `"URL"`.
       if (w.webkitURL) { try { Object.defineProperty(w, 'webkitURL', { value: ZPURL, enumerable: nativeEnumerability(w, 'webkitURL'), configurable: false, writable: true }); } catch {} }
     }
-    // ★컨테인먼트가 자식 창에 먼저 심은 래퍼 위에 자식 prelude 가 다시 심으면
-    // 이중 래핑이다 — SharedWorker 는 workerBootstrapURL 이 두 번 적용돼
-    // `u=<bootstrap URL>` 자기재귀로 죽고(실측: srcdoc 자식의 SharedWorker
-    // NetworkError), BroadcastChannel 은 접두어가 두 번 붙는다. 진짜 네이티브를
-    // __zp_real* 에 붙들어 두고 재설치는 항상 그것을 감싸게 한다.
+    // Stash the original native constructor on `w[stash]` so re-installation on a
+    // pre-contained child window wraps the native constructor rather than double-wrapping.
     function realCtor(w, stash, cur) {
       const real = w[stash] || cur;
-      // Not `define`: that names the function after the key it is installed under, and the native constructor — which `new Native`
-      // and `.prototype.constructor` still are — would read "__zp_realBC" to the page.
       if (!w[stash]) { try { Object.defineProperty(w, stash, { value: real, enumerable: false, configurable: false, writable: true }); } catch {} }
       return real;
     }
-    // D7: BroadcastChannel must be origin-scoped. Wrap constructor to prefix
-    // channel name with target origin hash; messages from another target
-    // never reach this one.
+    // Prefix `BroadcastChannel` names with the target origin hash so messages do
+    // not cross target origins, while masking `.name` with the requested channel name.
     if (w.BroadcastChannel) {
       const NativeBC = realCtor(w, '__zp_realBC', w.BroadcastChannel);
       const BCWrap = function(name) {
         const requested = String(name);
         const native = new NativeBC(bcPrefix + requested);
-        // Mask `.name` so target code observes the un-prefixed channel name
-        // it requested; the proxy-origin scoping must stay invisible.
         try { Object.defineProperty(native, 'name', { value: requested, configurable: true, enumerable: true }); } catch {}
         return native;
       };
       try { BCWrap.prototype = NativeBC.prototype; } catch {}
       try { define(w, 'BroadcastChannel', BCWrap); } catch {}
     }
-    // D7: SharedWorker — name + URL prefix so two targets never share a worker.
+    // Scope `SharedWorker` instances by target origin hash and bootstrap URL.
     if (w.SharedWorker) {
       const NativeSW = realCtor(w, '__zp_realSW', w.SharedWorker);
       const SWWrap = function(url, opts) {
@@ -393,19 +319,10 @@
       try { SWWrap.prototype = NativeSW.prototype; } catch {}
       try { define(w, 'SharedWorker', SWWrap); } catch {}
     }
-    // D7 (removed 2026-09-14): `document.origin` 가상화. 프로토타입 모양 축이
-    // 처음 돌자마자 "Document 프록시에만: origin" 을 잡았는데, 실측해 보니 이
-    // 엔진은 **document.origin 자체가 없다** — Document.prototype 도
-    // Node.prototype 도 Window.prototype 도 own 이 아니고 `typeof
-    // document.origin === 'undefined'`. 가상화할 실체가 없으니 지운다. 아래
-    // 주석("origin 은 Document.prototype 에 산다")은 이번 실측 전 가정이었고
-    // 틀렸다 — window.origin/location.origin 과 헷갈린 것으로 보인다.
     if (w.document) {
       const docProto = w.Document && w.Document.prototype;
-      // document.domain getter/setter. Chrome M109+ 에서 setter 는 완전한
-      // no-op 이다 — 던지지도 바꾸지도 않는다(deprecation 경고만). 이전엔
-      // suffix 검사 후 virtualDomain 을 바꿨는데 그건 M109 이전 의미다.
-      // 게터는 가상 호스트를 돌린다.
+      // `document.domain` returns the virtual hostname (or `''` in an opaque document);
+      // the setter is a no-op matching modern Chrome behavior.
       const virtualDomain = virtualURL.hostname.toLowerCase();
       defineOnProto(
         w.document,
@@ -415,61 +332,22 @@
         () => {}
       );
     }
-    // window.origin / self.origin getters — point at virtual target origin.
+    // Virtualize `window.origin` / `self.origin` and `isSecureContext` for the target URL.
     try { defineMasked(w, 'origin', { get() { return displayOrigin(securityOrigin()); }, configurable: true, enumerable: true }); } catch {}
-    // isSecureContext — the proxy is served from localhost so the REAL value
-    // is always `true`, but an http: target would be `false` natively.
-    // Potentially-trustworthy = https/wss/file + localhost-family hosts.
     try {
       const vsc = virtualURL.protocol === 'https:' || virtualURL.protocol === 'wss:' || virtualURL.protocol === 'file:'
         || /^(localhost|127\.0\.0\.1|\[::1\])$/i.test(virtualURL.hostname) || /\.localhost$/i.test(virtualURL.hostname);
       defineMasked(w, 'isSecureContext', { get() { return vsc; }, configurable: true, enumerable: true });
     } catch {}
-    // D7 (removed): we used to redefine `performance.timeOrigin` to a
-    // "target navigation" baseline. `boot.navigationStart` is never assigned
-    // anywhere in the tree, so the baseline was always `Date.now()` at prelude
-    // time — it virtualized nothing and bought us three fingerprints:
-    //   1. timeOrigin + performance.now() - Date.now() = +388ms measured.
-    //      Natively that skew is sub-millisecond; it is the cheapest clock
-    //      consistency check there is.
-    //   2. timeOrigin !== performance.timing.navigationStart. Those two are
-    //      the same instant in every real browser; ours disagreed by exactly
-    //      the prelude's startup cost.
-    //   3. `timeOrigin` became an OWN property of the performance instance.
-    //      Natively it is an accessor on Performance.prototype and the
-    //      instance has no own names at all.
-    // Native timeOrigin leaks nothing a target could not already get from
-    // Date.now(): it is when the proxy page navigated, which is when the user
-    // opened the target. Keeping native is strictly better on every axis.
-    // Performance Resource Timing leaked raw proxy URLs. Entry names were the
-    // only URL surface the membrane never virtualized, so
-    // `performance.getEntriesByType('resource')[i].name` came back as
-    // `http://<proxy>/zp/api/fetch?url=<target>`.
-    //
-    // Two problems, one cause:
-    //   1. Locating your own script through resource timing is the standard
-    //      idiom when `currentScript` is unavailable (async callbacks). NAVER's
-    //      ad SDK does exactly that, then resolves `./gfp-display-sdk.js`
-    //      against what it found — producing a request for
-    //      `<proxy>/zp/api/gfp-display-sdk.js`, which 404s. `script.src` was
-    //      already virtualized, which is why every URL-emitting path we
-    //      audited looked correct: the wrong base came from here.
-    //   2. It hands target code our origin and internal API paths, which the
-    //      membrane exists to keep hidden.
-    //
-    // The target is recoverable with no bookkeeping — our proxy URLs carry it
-    // in the query string (`?url=` / `?u=`), and `/zp/p/<token>` documents map
-    // to the virtual URL.
+    // Virtualize PerformanceEntry `.name` and `toJSON()` so resource timing entries
+    // report target URLs rather than `/zp/api/fetch?url=...` proxy paths.
     try {
       const entryProto = w.PerformanceEntry && w.PerformanceEntry.prototype;
       const nameDesc = entryProto && Object.getOwnPropertyDescriptor(entryProto, 'name');
       if (nameDesc && typeof nameDesc.get === 'function') {
         const nativeName = nameDesc.get;
-        // The navigation entry is named by the document URL **at load** — it
-        // does not follow later hash/pushState changes (Chrome 152). The share
-        // fallback maps `/zp/p/<token>` to the CURRENT virtual URL, so after a
-        // `location.hash` write the entry read `…#frag` where Chrome keeps the
-        // load URL. Capture it here, before page code runs.
+        // Capture the initial virtual URL for the `'navigation'` entry so later
+        // `location.hash` or `pushState` updates do not mutate its `.name`.
         const bootVirtualHref = virtualURL.href;
         const typeDesc = Object.getOwnPropertyDescriptor(entryProto, 'entryType');
         const isNavigationEntry = e => { try { return !!typeDesc && typeDesc.get.call(e) === 'navigation'; } catch { return false; } };
@@ -481,8 +359,7 @@
           configurable: true,
           enumerable: nameDesc.enumerable
         });
-        // `toJSON()` serialises from internal slots, bypassing the getter, so
-        // structured-clone / JSON paths would still leak the proxy URL.
+        // Override `toJSON()` as well because native serialization reads internal slots directly.
         const nativeToJSON = entryProto.toJSON;
         if (typeof nativeToJSON === 'function') {
           define(entryProto, 'toJSON', function toJSON() {
@@ -491,8 +368,7 @@
             return out;
           });
         }
-        // Lookup by name receives a TARGET url from page code, which no longer
-        // matches what the native index stores — resolve it ourselves.
+        // Match `getEntriesByName` against virtualized entry names when the native lookup finds no direct match.
         const perfProto = w.Performance && w.Performance.prototype;
         const nativeByName = perfProto && perfProto.getEntriesByName;
         if (typeof nativeByName === 'function') {
@@ -507,37 +383,17 @@
           });
         }
       }
-      // ★이름만 고치고 **타이밍 필드는 그대로 둔** 것이 모순이 됐다
-      // (2026-08-22 타이밍 축 신설, github 대조군 대비 실측).
-      //
-      //   대조군(직접) : workerStart>0  0/140,  nextHopProtocol h2/h3
-      //   프록시        : workerStart>0  **196/196**, nextHopProtocol 전부 ''
-      //
-      // 명세상 `workerStart` 는 **서비스 워커를 지난 요청에만** 붙는다.
-      // 그런데 우리는 페이지에게 `navigator.serviceWorker.controller === null` 을
-      // 말해 둔다(실측 확인). 즉 **우리가 하는 말과 타이밍이 서로 모순**이고,
-      // 그 모순은 한 줄로 검사된다:
-      //   !navigator.serviceWorker.controller &&
-      //   performance.getEntriesByType('resource').every(e => e.workerStart > 0)
-      //
-      // 그래서 타이밍을 우리가 이미 하고 있는 말에 맞춘다. 지어내는 게 아니라
-      // **이미 한 진술과 일치시키는** 것이다 — 어긋난 값을 지어내면 새 tell 이 된다.
+      // Align `PerformanceResourceTiming` attributes with the virtualized network environment
+      // (where `navigator.serviceWorker.controller === null` and HTTPS targets report TLS/H2 metadata).
       const resProto = w.PerformanceResourceTiming && w.PerformanceResourceTiming.prototype;
       const timingOverrides = {
-        // SW 가 없다고 말했으므로 워커 단계도 없어야 한다.
         workerStart: () => 0,
-        // SW 합성 응답은 빈 문자열이 된다. 이름의 스킴으로 그럴듯한 값을 넣는다.
         nextHopProtocol: (e, raw) => {
           if (raw) return raw;
           try { return new Native.URL(e.name).protocol === 'https:' ? 'h2' : 'http/1.1'; }
           catch { return 'h2'; }
         },
-        // 'cache' 는 우리 SW 가 준 것이라는 뜻이다. 페이지에겐 SW 가 없다.
         deliveryType: () => '',
-        // transferSize 0 + 큰 encodedBodySize = 캡시 적중이라는 주장이다.
-        // deliveryType 을 비우기로 했으니 전송량도 그에 맞춰야 한다
-        // (헤더 분을 더하는 것이 브라우저의 셀셈이다).
-        // 압축 크기를 아는 것만 바꿀다 — 모르면 손대지 않는다(지어내기 금지).
         encodedBodySize: (e, raw) => {
           const known = encodedSizes.get(e.name);
           return known && known < raw ? known : raw;
@@ -548,11 +404,6 @@
           if (known) return known + 300;
           return e.encodedBodySize ? e.encodedBodySize + 300 : raw;
         },
-        // https 리소스인데 TLS 피그가 아예 없으면 — 우리 오리진이 http 라서다.
-        // 대조군은 140개 중 136개가 0 이 아니다. 재사용된 연결의 명세 모양은
-        // connectStart == secureConnectionStart == connectEnd 이므로 그 값을 쓴다 —
-        // 없는 숫자를 지어내는 게 아니라 **이미 있는 타임라인과 일치시킨다**.
-        // http 타깃은 0 이 맞다(진짜로 TLS 가 없다).
         secureConnectionStart: (e, raw) => {
           if (raw) return raw;
           try { if (new Native.URL(e.name).protocol !== 'https:') return raw; } catch { return raw; }
@@ -574,7 +425,6 @@
             maskAccessorFn(Object.getOwnPropertyDescriptor(resProto, key).get, 'get', key);
           } catch {}
         }
-        // toJSON 은 내부 슬롯에서 직렬화해 게터를 건너뛴다 — 이름과 같은 문제다.
         const nativeResToJSON = resProto.toJSON;
         if (typeof nativeResToJSON === 'function') {
           define(resProto, 'toJSON', function toJSON() {
@@ -589,30 +439,15 @@
         }
       }
 
-      // De-proxying a name only helps entries that HAVE a target behind them.
-      // Our own infrastructure — /zp/assets/zp-core.js, zp-page-bundle.js,
-      // runtime-prelude.js, /__zp/zp_page_rt.wasm — has none, so those four fell
-      // through `return s` and sat in the list under their real names. Measured
-      // on naver.com: 4 of 250 resource entries spelled out the membrane. That
-      // is not a statistical tell a fingerprinter has to reason about; it is our
-      // product name, readable in one call to getEntriesByType('resource').
-      //
-      // The right shape is absence, not renaming: a browser loading naver.com
-      // directly has no such entries. Rule — if a name STILL points at the proxy
-      // after de-proxying, it is infrastructure and gets dropped. That stays
-      // correct as new internal routes appear, because anything we can map to a
-      // target survives on its own.
-      // Judged on the RAW name: the read-back name maps every other `/zp/` path to the document's own URL, so a worker's
-      // bootstrap (`/zp/worker-bootstrap.js#u=…`) came out as a resource entry named after the page — natively a worker's
-      // script is no entry of the page at all.
-      // (nameDesc is the native descriptor, taken above before the name was virtualized)
+      // Filter out internal proxy infrastructure assets (`/zp/assets/*`, `/__zp/*`,
+      // worker bootstrap scripts, and `blob:` URLs) that do not map to a target URL.
       const rawEntryName = e => (nameDesc && nameDesc.get ? Reflect.apply(nameDesc.get, e, []) : e.name);
       const isInfraEntry = (e) => {
         try {
           const n = rawEntryName(e);
           if (typeof n !== 'string') return false;
           if (n.lastIndexOf(proxyOrigin, 0) === 0) {
-            // a frame's document (`/zp/p/<token>`) is a real entry natively too (initiatorType "iframe")
+            // Keep `/zp/p/<token>` frame document entries (`initiatorType === "iframe"`).
             try { if (ZP.isSharePath(new Native.URL(n).pathname)) return false; } catch {}
             return deproxyURL(n).lastIndexOf(proxyOrigin, 0) === 0;
           }
@@ -630,8 +465,7 @@
           });
         }
       }
-      // PerformanceObserver is the push-based twin of the same list; without
-      // this it re-leaks every name the pull path now hides.
+      // Apply the same infrastructure-entry filter to `PerformanceObserver` callbacks.
       const NativePO = w.PerformanceObserver;
       if (typeof NativePO === 'function') {
         const ZPPerformanceObserver = function PerformanceObserver(cb) {
@@ -651,13 +485,11 @@
         define(w, 'PerformanceObserver', ZPPerformanceObserver);
       }
     } catch {}
-    // ── A frame cross-origin to its embedder (2026-10-13; .lean-ctx/fp-lab.js, a user's Chrome) ───────────────────────
-    // Underneath, every frame is same-origin with its embedder, so the browser granted each one what only a same-origin
-    // frame gets: every feature whose default allowlist is 'self' (Turnstile's frame read 61 features, natively 20), the
-    // top's notification permission (natively `denied` in every cross-origin frame), `permissions.query` states of the
-    // top. And `getAllowlistForFeature` named the proxy origin. The feature policy is read as the browser computes it
-    // for the virtual frame tree: a cross-origin frame keeps a feature only if its embedder allows it for the frame's
-    // origin, or delegates it with `allow`; allowlists name virtual origins.
+    // Virtualize FeaturePolicy, Notification.permission, and Permissions.query
+    // for frames that are virtually cross-origin to their embedder. A
+    // cross-origin frame retains a policy-controlled feature only when its
+    // embedder allows the feature for the frame's virtual origin or delegates
+    // it via the iframe `allow` attribute.
     const crossOriginFrame = (() => {
       try {
         const p = winGet(root, 'parent');
@@ -691,7 +523,7 @@
       const nativeAllowed = fpProto.allowedFeatures;
       const nativeAllowlist = fpProto.getAllowlistForFeature;
       const nativeAllows = fpProto.allowsFeature;
-      // which document (or iframe element, for its container policy) a policy object answers for
+      // Record which document or iframe element a policy object answers for.
       const owners = newWeakMap();
       const hookOwner = (proto, kind) => {
         const d = proto && Object.getOwnPropertyDescriptor(proto, 'featurePolicy');
@@ -705,9 +537,7 @@
       };
       hookOwner(w.Document && w.Document.prototype, 'document');
       hookOwner(w.HTMLIFrameElement && w.HTMLIFrameElement.prototype, 'frame');
-      // Is `feature` granted to a cross-origin document of `origin` by its embedder `parentDoc` through `el`?
-      // The embedder's own (virtual) policy decides: it must allow the feature itself, and allow it for that origin
-      // or delegate it. Asked through the embedder's realm, whose policy object is itself virtual.
+      // Check whether the embedder's virtual policy grants a feature to a cross-origin frame.
       function embedderGrants(parentDoc, el, feature, origin) {
         try {
           const pp = parentDoc && parentDoc.featurePolicy;
@@ -716,7 +546,7 @@
           return pp.allowsFeature(feature, origin) || allowAttributeGrants(el, feature, origin);
         } catch { return true; }
       }
-      // what the policy object `policy` virtually allows (the real answer filtered)
+      // Filter the native policy query through the virtual cross-origin delegation check.
       function virtuallyAllows(policy, feature) {
         const own = owners.get(policy);
         if (!own) return true;
@@ -726,7 +556,7 @@
           try { parentDoc = winGet(root, 'parent').document; } catch {}
           return embedderGrants(parentDoc, winGet(root, 'frameElement'), feature, ownOrigin());
         }
-        // an iframe's container policy: computed for the origin of its (virtual) src
+        // Evaluate an iframe's container policy against its virtual src origin.
         let src = '';
         try { src = new URL(targetURLForElement(own.node, Native.getAttribute.call(own.node, 'src') || '') || 'about:blank').origin; } catch {}
         if (!src || src === 'null' || src === ownOrigin()) return true;
@@ -755,8 +585,7 @@
       } }).allowsFeature);
       void nativeAllowed; void nativeAllows;
     }
-    // A permission backed by a policy-controlled feature is `denied` where the feature is not allowed (measured:
-    // camera, microphone, geolocation, clipboard-read, midi, screen-wake-lock in a cross-origin frame).
+    // A permission backed by a policy-controlled feature is denied when the feature is disallowed.
     function featureDeniedHere(name) {
       try {
         const policy = w.document.featurePolicy;
@@ -764,8 +593,7 @@
         return !policy.allowsFeature(name);
       } catch { return false; }
     }
-    // `screen.isExtended` is false where 'window-management' is not allowed — a cross-origin frame natively (measured in the Turnstile
-    // widget on a two-monitor machine: false; through the proxy, where every frame is the embedder's origin underneath: true).
+    // screen.isExtended is false when window-management is disallowed in a cross-origin frame.
     if (w.Screen && w.Screen.prototype) {
       const ied = Object.getOwnPropertyDescriptor(w.Screen.prototype, 'isExtended');
       if (ied && typeof ied.get === 'function') {
@@ -775,14 +603,14 @@
         });
       }
     }
-    // ── Policy-gated APIs in a frame cross-origin to its embedder (2026-10-15; .lean-ctx/gd-gated-apis.js, Chrome 154) ──────────────
-    // Underneath, every frame is the proxy origin, so the browser's own policy check let a cross-origin frame use what only a
+    // Policy-gated APIs in a frame that is cross-origin to its embedder.
+    // Underneath, every frame is the proxy origin, so the browser's own policy check lets a cross-origin frame use what only a
     // same-origin one may: each feature whose default allowlist is 'self' and that the embedder did not delegate with `allow`.
-    // Natively these APIs refuse there, at once, with the browser's own error — and Turnstile's widget reads how they answer
-    // (its stage said "downloadable" for the built-in AI here against "unavailable" natively, and Summarizer took 3 s to say so).
-    // The table is what Chrome 154 answered in a cross-origin frame. "Denied here" is the virtual policy above — an `allow` that
-    // delegates the feature, or the document's own Permissions-Policy header, are the same question the browser asks — so a call
-    // the browser would have let through runs natively.
+    // Natively these APIs refuse there at once, with the browser's own error, and verification widgets (Turnstile) read how
+    // they answer: the built-in AI must say "unavailable" immediately, not "downloadable" after a delay.
+    // The table is what Chrome 154 answered in a cross-origin frame. "Denied here" is the virtual policy above (an `allow` that
+    // delegates the feature, or the document's own Permissions-Policy header, is the same question the browser asks), so a
+    // call the browser would have let through still runs natively.
     const policyError = (name, message) => (name === 'TypeError'
       ? new (w.TypeError || TypeError)(message)
       : new (w.DOMException || Native.DOMException)(message, name));
@@ -879,9 +707,9 @@
         });
       }
     }
-    // A WebGL context made in a cross-origin frame is on the low-power GPU whatever it asked for (measured natively: the attribute
-    // reads "low-power" for a request of "default", "high-performance" and "low-power" alike, on WebGL and WebGL2, canvas and
-    // OffscreenCanvas; the top frame honours the request). Turnstile's widget reads the attribute.
+    // A WebGL context made in a cross-origin frame is on the low-power GPU whatever it asked for: natively the attribute reads
+    // "low-power" for a request of "default", "high-performance" and "low-power" alike, on WebGL and WebGL2, canvas and
+    // OffscreenCanvas, while the top frame honours the request. Turnstile's widget reads the attribute.
     if (crossOriginFrame) {
       for (const Ctor of [w.HTMLCanvasElement, w.OffscreenCanvas]) {
         replaceNativeMethod(Ctor && Ctor.prototype, 'getContext', orig => ({ getContext(...args) {
@@ -897,33 +725,19 @@
         } }).getContext);
       }
     }
-    // D7: Notification permission state must be per-target-origin. Wrap the
-    // static permission getter; granting is still gated by the native browser
-    // UI but target code seeing 'default'/'denied' will react in its own
-    // origin namespace.
+    // Scope Notification.permission per target origin while keeping the native consent prompt.
     if (w.Notification) {
       const NativeN = w.Notification;
-      // We cannot fully isolate native notification permissions, but we can
-      // override the static getter to return per-origin state held in
-      // localStorage namespace. Setter via requestPermission still calls
-      // native (browser UI consent gate).
       try {
         const permKey = '__zp_notif_perm';
-        // 2026-08-12 — **네이티브 게터를 먼저 잡아 둔다.**
-        // 예전 코드는 폴백으로 `NativeN.permission` 을 읽었는데, `NativeN` 이
-        // 바로 이 프로퍼티를 정의하는 객체라 **자기 자신을 무한 재귀 호출**했다.
-        // 저장값이 없을 때(= 권한을 건드린 적 없는 보통 경우)만 터지므로 오래
-        // 숨어 있었고, 실제로 NAVER anti-bot 이 `Notification.permission` 을 읽는
-        // 순간 스택 오버플로 폭풍(`Maximum call stack size exceeded` 3,2xx건)이
-        // 나면서 렌더러가 수십 초 멈췄다. `clear-site-data` 로 저장값이 지워지면
-        // 재현되고 남아 있으면 안 나서, 증상이 간헐적으로 보였다.
+        // Capture the native getter before redefining Notification.permission to avoid self-recursion.
         const nativePermDesc = Object.getOwnPropertyDescriptor(NativeN, 'permission');
         const nativePerm = nativePermDesc && nativePermDesc.get
           ? nativePermDesc.get.bind(NativeN)
           : () => (nativePermDesc ? nativePermDesc.value : 'default');
         defineMasked(NativeN, 'permission', {
           get() {
-            // natively `denied` in an opaque document and in every frame cross-origin to its embedder
+            // Notification permission is denied in opaque documents and cross-origin frames.
             if (opaqueDocument || crossOriginFrame) return 'denied';
             try {
               const stored = prefixedStorage(nativeLocalStorage, localPrefix).getItem(permKey);
@@ -936,8 +750,7 @@
         const nativeRP = NativeN.requestPermission ? NativeN.requestPermission.bind(NativeN) : null;
         if (nativeRP) {
           define(NativeN, 'requestPermission', function(callback) {
-            // Natively a cross-origin frame is refused at once, with no prompt; underneath this frame is same-origin with
-            // the proxy page, and the browser would have asked the user on the proxy's behalf.
+            // Cross-origin frames are denied immediately without prompting on the proxy origin's behalf.
             if (opaqueDocument || crossOriginFrame) {
               if (typeof callback === 'function') try { callback('denied'); } catch {}
               return Promise.resolve('denied');
@@ -951,12 +764,7 @@
         }
       } catch {}
     }
-    // D7: navigator.permissions.query — the real query resolves against the
-    // PROXY origin's grants: a device permission granted to target A would
-    // show 'granted' to target B. Track per-target grants for the device
-    // permissions we can observe (camera/mic via getUserMedia, display via
-    // getDisplayMedia, geolocation via success callback) and answer 'prompt'
-    // for unrecorded names; other permission names fall through to native.
+    // Track per-target device permission grants so one target's grant does not leak to another.
     const grantedPerms = newSet();
     try {
       const storedGrants = prefixedStorage(nativeLocalStorage, localPrefix).getItem('__zp_grants');
@@ -999,14 +807,7 @@
         define(geo, 'watchPosition', wrappedWatch);
       }
     } catch {}
-    // The answer is the browser's own PermissionStatus — a stand-in made with own `name`/`state`/`onchange` had three
-    // names a real one has not, and `query` was an own property of `navigator.permissions` (natively on
-    // `Permissions.prototype`) — and only its `state` reads the virtual value:
-    //  * an opaque origin is granted nothing, and is told so;
-    //  * a frame cross-origin to its embedder is denied notifications and push, and every permission whose feature its
-    //    policy does not allow (measured: camera, microphone, geolocation, clipboard-read, midi, screen-wake-lock);
-    //  * a device permission this target never obtained reads 'prompt' — another target's grant does not show here
-    //    (타깃이 이 권한을 얻은 기록이 없으면 'prompt').
+    // Return the native PermissionStatus instance while overriding its state getter with the virtual origin's permission state.
     const permProto = w.Permissions && w.Permissions.prototype;
     const statusProto = w.PermissionStatus && w.PermissionStatus.prototype;
     if (permProto && typeof permProto.query === 'function' && statusProto) {
@@ -1036,17 +837,13 @@
         return answer.then(status => { try { stateOverride.set(status, v); } catch {} return status; });
       } }).query);
     }
-    // Privacy Sandbox — sharedStorage / Protected-Audience / Topics /
-    // Private-State-Token are keyed to the REAL proxy origin, so data written
-    // by one target is readable by every other target in the tab. That is an
-    // isolation violation we cannot virtualise cheaply → fail closed.
+    // Fail closed on Privacy Sandbox APIs keyed to the physical proxy origin.
     try {
       const nav = w.navigator;
       const navProto = w.Navigator && w.Navigator.prototype;
       for (const pa of ['joinAdInterestGroup','leaveAdInterestGroup','runAdAuction','updateAdInterestGroups','createAuctionNonce','getInterestGroupAdAuctionData','clearOriginJoinedAdInterestGroups']) {
         if (nav && typeof nav[pa] === 'function') {
-          // In the native's place (Navigator.prototype), shaped like it — as own properties of the navigator they were seven
-          // names `Object.getOwnPropertyNames(navigator)` lists where a browser lists none.
+          // Define stubs on Navigator.prototype so navigator owns no extra property names.
           if (navProto && Object.getOwnPropertyDescriptor(navProto, pa)) {
             replaceNativeMethod(navProto, pa, () => ({ [pa]() { return Promise.reject(normalizedError('NotSupportedError')); } })[pa]);
           } else {
@@ -1066,14 +863,14 @@
           }
         }
       }
-      // document.browsingTopics → empty topics (privacy-safe, non-throwing)
+      // Return an empty topics list from document.browsingTopics.
       const docProto2 = w.Document && w.Document.prototype;
       if (docProto2 && typeof docProto2.browsingTopics === 'function') {
         const noTopics = function browsingTopics() { return Promise.resolve([]); };
         maskNativeFunction(noTopics, 'browsingTopics');
         define(docProto2, 'browsingTopics', noTopics);
       }
-      // document.privateToken / PrivateStateToken — gate to inert values.
+      // Stub document.privateToken with inert values.
       try {
         if (docProto2) {
           const dTok = Object.getOwnPropertyDescriptor(docProto2, 'privateToken');
@@ -1081,35 +878,12 @@
         }
       } catch {}
     } catch {}
-    // customElements — **네이티브 레지스트리 그대로** 둔다 (2026-09-29).
-    //
-    // 2026-09-24 감사는 "레지스트리가 진짜 프록시 오리진에 묶여 타깃끼리 이름이
-    // 부딪힌다" 고 보고 타깃별 접두어(`zp<hash>-x`)를 붙였다. 전제가 틀렸다 —
-    // 레지스트리는 오리진이 아니라 **Window 마다** 있고 문서를 넘지 못한다.
-    // 크롬 152 실측: 최초 about:blank 의 same-origin 내비게이션(프록시에선 모든
-    // 타깃이 same-origin 이라 이것이 유일한 공유 후보)에서도 심어 둔 정의가
-    // 사라지고 그 생성자는 새 문서의 요소에서 돌지 않는다. 격리 이득은 0 이다.
-    //
-    // 비용은 컸다. 교체 기반 업그레이드라 define 전에 잡아 둔 요소 참조가 떨어져
-    // 나갔고, CSS 타입 선택자(`tool-tip{…}`)·`closest`·`matches` 가 접두 이름을
-    // 못 찾았다. GitHub catalyst 의 findTarget 이 `el.closest(tag) === this` 라
-    // react-partial 6개가 "No embedded data provided" 로 전부 죽었다.
+    // Leave customElements on the native per-Window registry.
   }
   function prefixedStorage(native, prefix) {
-    // Wrap native localStorage/sessionStorage with a fixed key prefix. All
-    // reads/writes/iteration are scoped to the target origin namespace.
+    // Scope localStorage and sessionStorage keys to the target origin prefix.
     if (!native) return null;
-    // ★우리 진단 키(`__zp_hb`, `__zp_trace_log`)를 페이지에서 숨긴다.
-    //
-    // 실측(2026-08-22): 페이지가 `localStorage.key(i)` 로 열거하면 저 둘이
-    // 그대로 보였다 = **프록시라는 지문**. 네이티브 저장소를 보니 접두 없는
-    // 사본과 `zp:l:<hash>:` 접두가 붙은 사본이 **둘 다** 있었다 — 즉 어떤
-    // 경로는 네이티브로, 어떤 경로는 파사드를 타고 타깃 네임스페이스로 들어갔다
-    // (프렐류드가 자식 realm 에서 다시 평가될 때 캡처 순서가 뒤집힌다).
-    //
-    // 캡처 순서를 realm 마다 맞추는 것보다 **파사드에서 거르는 쪽**이 확실하다 —
-    // 어느 경로로 들어오든 페이지에는 안 보인다. 타깃이 `__zp_` 로 시작하는 키를
-    // 쓸 확률은 무시할 만하고, 쓴다면 어차피 우리와 충돌한다.
+    // Hide internal __zp_ keys from enumeration and direct reads.
     const hidden = (name) => String(name).startsWith('__zp_');
     const facade = {
       get length() {
@@ -1144,17 +918,7 @@
         for (const k of toDelete) native.removeItem(k);
       },
     };
-    // ★진짜 Storage 는 **이름 기반 접근**을 지원한다: `localStorage.token = 'x'`
-    // 로 쓰고 `localStorage.token` 으로 읽으며 `'token' in localStorage` 가
-    // true 다. 아주 흔한 관용구인데, 여섯 멤버만 가진 frozen 평범한 객체는
-    // 그 쓰기를 **조용히 삼킨다**(비엄격 모드라 throw 도 없다) → 사이트의
-    // 저장이 통째로 사라진다. 게다가 `Object.keys(localStorage)` 가 저장된
-    // 키가 아니라 **메서드 이름**을 돌려줘서 그 자체로 지문이었다
-    // (length 는 4인데 키는 6개로 자기모순).
-    //
-    // 그래서 멤버는 프로토타입에 non-enumerable 로 두고(= 자체 own 속성 0),
-    // 항목 접근은 Proxy 로 위임한다. own 속성이 없어야 frozen target 의
-    // ownKeys 불변식에 걸리지 않는다.
+    // Keep Storage methods non-enumerable on a prototype and delegate named property access through a Proxy.
     const RESERVED = newSet(['length', 'key', 'getItem', 'setItem', 'removeItem', 'clear']);
     const storageProto = Object.create(
       (typeof Storage === 'function' && Storage.prototype) ? Storage.prototype : Object.prototype
@@ -1207,15 +971,7 @@
         return true;
       },
     });
-    // Root the facade at Storage.prototype BEFORE freezing: a frozen object is
-    // non-extensible, so a later setPrototypeOf throws (tried 2026-08-03 at the
-    // call sites — silently no-op). Safe because the facade owns all six
-    // Storage members, so the native implementations stay shadowed and never
-    // receive an unbranded `this`. Without this,
-    // `localStorage instanceof Storage` is false and
-    // `Object.prototype.toString.call(localStorage)` is "[object Object]"
-    // instead of "[object Storage]" — a fingerprint, and a break for code that
-    // type-checks a Storage argument.
+    // Set Storage.prototype before freezing so instanceof Storage and Object.prototype.toString match native.
     try {
       if (typeof Storage === 'function' && Storage.prototype) Object.setPrototypeOf(facade, Storage.prototype);
     } catch {}

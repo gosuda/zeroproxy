@@ -5,7 +5,7 @@
     }
     documentCookie = documentCookieString();
   }
-  // The document's own write: `document.cookie = …`, `cookieStore.set`.
+  // Parse and store a cookie set via `document.cookie` or `cookieStore.set`.
   function setDocumentCookie(line) {
     const scope = virtualURL;
     const parts = String(line).split(';').map(p => p.trim()).filter(Boolean);
@@ -26,8 +26,7 @@
     }
     storeCookieRecord(rec);
   }
-  // One cookie in the page's copy, and what it means for `document.cookie` and
-  // `cookieStore`'s `change`. `expires` in the past is a deletion.
+  // Update the local cookie record and notify `cookieStore` listeners (`expires` in the past deletes the record).
   function storeCookieRecord(rec) {
     const idx = documentCookieRecords.findIndex(r => r.name === rec.name && r.domain === rec.domain && r.path === rec.path);
     const deleted = rec.expires <= Date.now();
@@ -35,11 +34,11 @@
     else if (idx >= 0) documentCookieRecords[idx] = rec;
     else documentCookieRecords.push(rec);
     documentCookie = documentCookieString();
-    // cookieStore's `change` event observes the same jar as document.cookie.
+    // `cookieStore` `change` events observe the same jar as `document.cookie`.
     const item = cookieItemFromRec(rec);
     fireCookieChange(deleted ? [] : [item], deleted ? [item] : []);
   }
-  // Secure cookies reach https and, like Chrome, loopback over http (a local dev target).
+  // Allow `Secure` cookies over HTTPS and HTTP loopback addresses, matching Chrome behavior.
   function cookieContextSecure() {
     if (virtualURL.protocol === 'https:') return true;
     const h = virtualURL.hostname.toLowerCase();
@@ -58,18 +57,12 @@
     return visibleCookieRecords().sort((a, b) => b.path.length - a.path.length).map(r => r.name + '=' + r.value).join('; ');
   }
   function defaultCookiePath(scope = virtualURL) { const p = scope.pathname || '/'; const i = p.lastIndexOf('/'); return i <= 0 ? '/' : p.slice(0, i); }
-  // Cookies the service worker's jar changed, as records (see `changeFor` there): from
-  // the response of the page's own fetch / XHR (applied before the promise resolves),
-  // and pushed to every document that can see them — a frame's navigation, an image or a
-  // script, a sibling frame, another tab. The jar is the truth; this document keeps a
-  // copy that `document.cookie` and `cookieStore` read. HttpOnly changes never arrive.
-  // The same change can come twice (response and push): each id is applied once.
-  // A request the page makes after writing a cookie carries it — natively the browser's jar is updated
-  // synchronously. Ours lives in the service worker, and the write (a message) and the request (a fetch)
-  // travel by different routes: either may get there first. So a runtime request waits for the
-  // acknowledgement of the writes still in flight.
-  // sent → { wid, line }. A write has an id so the worker applies it once even when it arrives twice (as the
-  // message and with a synchronous request) and so this document can tell the push of its own write.
+  // Apply cookie changes pushed from the service worker jar (via fetch/XHR responses
+  // or cross-frame broadcasts) to the local `document.cookie` and `cookieStore` state.
+  // HttpOnly changes are excluded, and duplicate change IDs are ignored.
+  // Because service worker cookie writes are asynchronous, runtime requests wait for
+  // in-flight writes (`cookieWritesInFlight`) to settle so subsequent fetches include
+  // newly written cookies. Each write carries a unique `wid` for deduplication.
   const cookieWritesInFlight = newMap();
   const ownCookieWrites = newSet();
   function sendCookieSet(line) {
@@ -85,9 +78,8 @@
   function cookieWritesSettled() {
     return cookieWritesInFlight.size ? Promise.all(Array.from(cookieWritesInFlight.keys())) : null;
   }
-  // What a request that cannot wait (a synchronous XHR) carries instead: [id, line] of each write the worker
-  // has not acknowledged. A script that writes and sends in one synchronous run never lets an acknowledgement
-  // in, so the list grows with the run: the newest are what matter, and the cap keeps the request small.
+  // Synchronous XHR requests cannot await in-flight cookie writes, so they attach
+  // the most recent unacknowledged `[wid, line]` pairs directly to the request.
   const MAX_CARRIED_COOKIE_WRITES = 32;
   function pendingCookieWrites() {
     return Array.from(cookieWritesInFlight.values()).slice(-MAX_CARRIED_COOKIE_WRITES).map(w => [w.wid, w.line]);
@@ -99,13 +91,13 @@
     for (const c of changes) {
       try {
         if (!c || typeof c.name !== 'string' || typeof c.domain !== 'string') continue;
-        if (c.wid && ownCookieWrites.has(c.wid)) continue; // this document wrote it: its copy has it
+        if (c.wid && ownCookieWrites.has(c.wid)) continue; // Ignore pushes for writes originated by this document.
         if (c.id) {
           if (appliedCookieChanges.has(c.id)) continue;
           appliedCookieChanges.add(c.id);
           if (appliedCookieChanges.size > 512) appliedCookieChanges.delete(appliedCookieChanges.values().next().value);
         }
-        // Only what this document could ever read: its own host, or a parent domain.
+        // Accept only cookies whose domain matches this document's host or a parent domain.
         if (!(c.hostOnly ? c.domain === host : host === c.domain || host.endsWith('.' + c.domain))) continue;
         const rec = {
           name: c.name, value: String(c.value), domain: c.domain, hostOnly: !!c.hostOnly,
@@ -118,10 +110,9 @@
     }
   }
 
-  // ── virtual cookieStore ────────────────────────────────────────────────
-  // CookieStore and document.cookie share one cookie jar natively; the raw
-  // `window.cookieStore` would read/write REAL proxy-origin cookies (leak +
-  // cross-target pollution). The facade is backed by documentCookieRecords.
+  // ── virtual cookieStore
+  // Back `window.cookieStore` with `documentCookieRecords` so it shares the virtual
+  // origin's jar with `document.cookie` instead of reading or writing physical proxy-origin cookies.
   let virtualCookieStoreSingleton = null;
   const cookieStoreListeners = newSet();
   let cookieStoreOnChange = null;

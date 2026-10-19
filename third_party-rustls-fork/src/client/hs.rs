@@ -728,10 +728,9 @@ fn apply_chrome_ja3_shape(exts: &mut ClientExtensions<'_>, initial_hello: bool) 
         _ => chrome134_fallback_extension_order(),
     };
 
-    // ECH GREASE(65037)도 셔플 대상에 포함시킨다. 캡처한 스펙에는 이미 들어
-    // 있지만 하드코딩 폴백 목록에는 없어서, 폴백 경로만 ECH 가 맨 뒤로 밀리는
-    // 비대칭이 생긴다. 여기서 채워 두 경로를 같게 만든다. (필드가 None 이면
-    // 인코더가 알아서 건너뛰므로 목록에 있는 것 자체는 무해하다.)
+    // Include ECH GREASE (65037) in the extension shuffle pool. Captured specs
+    // already list it, whereas the hardcoded fallback list omits it; adding it
+    // here keeps both paths consistent (if the field is None, the encoder skips it).
     {
         let ech = crate::msgs::enums::ExtensionType::EncryptedClientHello;
         if !order.contains(&ech) {
@@ -739,25 +738,11 @@ fn apply_chrome_ja3_shape(exts: &mut ClientExtensions<'_>, initial_hello: bool) 
         }
     }
 
-    // 2026-08-19 — 순서를 **연결마다 섞는다**. 내용이 아니라 안정성이 지문이었다.
-    //
-    // 실측(browserleaks/json, 같은 브라우저로 3회씩): ja4 / ja4_r / ja3n /
-    // akamai 는 프록시와 직접이 전부 일치하는데, **확장 순서**만 달랐다.
-    // 직접 Chrome 은 3회 모두 다른 순서였고 우리는 3회 모두 같은 순서였다.
-    // 즉 한 번의 해시로는 안 걸리지만 두 번만 보면 걸린다 — "매 연결 같은
-    // 순서" 는 브라우저가 하지 않는 행동이다. Chrome/BoringSSL 은
-    // `ssl_setup_extension_permutation` 으로 SSL 객체마다 한 번 섞는다.
-    //
-    // 캡처한 스펙의 순서를 버리는 게 아깝지 않은 이유: 그 순서 자체가 사용자
-    // 브라우저가 그날 뽑은 **한 번의 무작위 순열**이었다. 고정해 두면 오히려
-    // 그 한 순열이 우리 서명이 된다.
-    //
-    // ★per-call 난수를 쓰면 안 된다. `encode()` 는 한 핸드셰이크에서 여러 번
-    // 돈다(PSK binder 를 ClientHello 직렬화 위에 MAC 하고, 그 뒤 wire 용으로
-    // 다시 직렬화한다). 그래서 **연결마다 한 번** 뽑히는 `order_seed` 로
-    // 결정적으로 정렬한다 — 같은 이유로 HelloRetryRequest 의 두 번째
-    // ClientHello 도 같은 순서가 되고, ECH 는 inner/outer 가 seed 를 공유하므로
-    // outer-extensions 압축도 어긋나지 않는다.
+    // Permute extension order once per connection using `order_seed`, matching
+    // BoringSSL's `ssl_setup_extension_permutation`. Sorting deterministically
+    // by `order_seed` (rather than drawing fresh randomness per `encode()` call)
+    // ensures PSK binder calculation, final wire encoding, HelloRetryRequest,
+    // and ECH inner/outer extension compression all observe the same order.
     order.sort_by_cached_key(|ext| {
         crate::msgs::handshake::low_quality_integer_hash(
             ((exts.order_seed as u32) << 16) | (u16::from(*ext) as u32),
@@ -900,18 +885,9 @@ fn apply_chrome_ja3_shape(exts: &mut ClientExtensions<'_>, initial_hello: bool) 
                 payload: PayloadU16::new(payload_bytes),
             },
         ));
-        // ECH GREASE 는 **순서 섞기에 함께 참여**시킨다.
-        //
-        // 예전 주석은 "real Chrome 148 emits it second-to-last, immediately
-        // before pre_shared_key" 였고 그래서 `contiguous_extensions` 에서
-        // 65037 을 빼내 `used_extensions_in_encoding_order` 가 맨 뒤에 붙이게
-        // 뒀다. **2026-08-19 실측으로 그 전제가 깨졌다**: 같은 머신의 직접
-        // Chrome 151 은 fe0d 를 16개 중 9/12/8번째, 즉 **한가운데**에 놓는다
-        // (browserleaks ja4_ro, 3회). 우리만 항상 마지막이면 그 자체가 신호다.
-        //
-        // 우리가 보내는 ECH 는 GREASE 뿐이다(위의 무작위 enc/payload). 진짜
-        // ECH 의 inner/outer 압축 관계가 없으므로 위치를 옮겨도 프로토콜상
-        // 잃을 게 없다. PSK 는 여전히 맨 뒤다 — 그건 RFC 8446 이 요구한다.
+        // Keep ECH GREASE in `contiguous_extensions` so it participates in the
+        // per-connection extension permutation alongside other non-PSK extensions,
+        // matching Chrome's placement rather than pinning 0xfe0d to the tail.
         let ech_typ = crate::msgs::enums::ExtensionType::EncryptedClientHello;
         if !exts.contiguous_extensions.contains(&ech_typ) {
             exts.contiguous_extensions.push(ech_typ);

@@ -2,10 +2,9 @@
 //!
 //! One `Http2Client` per origin. A single TLS connection (one handshake,
 //! one yamux stream) carries every concurrent fetch to that origin via h2
-//! stream multiplex — that's the entire reason h2 exists, and it's what
-//! makes the TLS pool useful for parallel browser subresource fetches.
-//! HTTP/1.1 pooling, in contrast, can only reuse a connection across
-//! *sequential* requests; parallel fetches each pay a fresh handshake.
+//! stream multiplex. HTTP/1.1 pooling, in contrast, can only reuse a
+//! connection across *sequential* requests; parallel fetches each pay a
+//! fresh handshake.
 //!
 //! ## Driver pattern
 //!
@@ -14,17 +13,16 @@
 //! (same shape as yamux). We `wasm_bindgen_futures::spawn_local` it so
 //! it runs in the same JS event loop. When the connection ends (GoAway,
 //! transport EOF, peer error) the driver future resolves and the
-//! `SendRequest` clones start returning errors — we surface those and
+//! `SendRequest` clones start returning errors; we surface those and
 //! [`crate::kernel::transport::pool`] evicts the origin entry.
 //!
-//! ## tokio ↔ futures bridge
+//! ## tokio and futures bridge
 //!
 //! h2 requires `tokio::io::AsyncRead + AsyncWrite`. Our TLS stream sits
 //! on `futures::io::AsyncRead + AsyncWrite`. [`tokio_util::compat`] does
 //! the wrapping (zero-cost newtype + trait impls). Wasm32 builds of
-//! `tokio` with `default-features = false` give us only the io traits +
-//! macros — no socket I/O, no multi-thread runtime — which is exactly
-//! what we need.
+//! `tokio` with `default-features = false` give us only the io traits and
+//! macros (no socket I/O, no multi-thread runtime).
 
 use std::io;
 use std::cell::{Cell, RefCell};
@@ -55,7 +53,7 @@ pub(crate) struct StreamingResponse {
     pub(crate) status: u16,
     pub(crate) reason: String,
     /// Content-Encoding / Content-Length already stripped (body is decoded
-    /// plaintext of unknown length → chunked transfer to the page).
+    /// plaintext of unknown length, streamed to the page).
     pub(crate) headers: Vec<(String, String)>,
     pub(crate) stream: web_sys::ReadableStream,
 }
@@ -72,7 +70,7 @@ impl H2Response {
 
 /// Cloneable handle to an open HTTP/2 connection. Sending a request via
 /// `SendRequest::ready().await` allocates a fresh stream on the existing
-/// TLS+TCP connection — no new handshake, no new socket. The clone is
+/// TLS+TCP connection (no new handshake, no new socket). The clone is
 /// cheap (Arc<Mutex<...>> internally) so the pool can hand the same
 /// `Http2Client` to every concurrent fetch on the origin.
 #[derive(Clone)]
@@ -82,7 +80,7 @@ pub(crate) struct Http2Client {
 
 impl Http2Client {
     /// Optimistic liveness check. h2 0.4 has no synchronous "is the
-    /// connection still open?" probe — `SendRequest::poll_ready` needs a
+    /// connection still open?" probe; `SendRequest::poll_ready` needs a
     /// `Context`, which we can't synthesize at lookup time. Returning
     /// `true` here means we always hand out a clone; the next
     /// `send_request` surfaces any real failure, and the pool layer
@@ -97,12 +95,7 @@ impl Http2Client {
 /// `Http2Client` that can issue concurrent requests on the open
 /// connection.
 ///
-/// The Builder configures SETTINGS to match a real Chrome ClientPreface
-/// — anti-bot WAFs (NAVER's nid.* family) profile the connection-opening
-/// frames, and our defaults landed us in a slow lane that delayed every
-/// first response by ~60s. The values below are the ones Chrome 134
-/// stable sends today (validated against tls.peet.ws/api/all Akamai H2
-/// fingerprint):
+/// The Builder configures SETTINGS to match a Chrome ClientPreface:
 ///
 ///   HEADER_TABLE_SIZE       = 65536       (matches Chrome)
 ///   ENABLE_PUSH             = 0           (Chrome explicitly off)
@@ -111,19 +104,9 @@ impl Http2Client {
 ///   connection window       = 15_728_640  (target; produces a
 ///                                          WINDOW_UPDATE increment of
 ///                                          15_663_105 vs the h2 default
-///                                          65535, which is exactly the
-///                                          value Chrome 134 reports
-///                                          to Akamai-fp)
+///                                          65535, matching Chrome 134)
 ///
-/// Akamai H2 fingerprint check: with these values the second pipe-
-/// separated field in `tls.peet.ws`'s response is `15663105`, matching
-/// Chrome 134 stable. The pseudo-header order (last field; we emit
-/// `m,s,a,p`, Chrome 134 emits `m,a,s,p`) is still a known diff —
-/// fixing that would need a patch to the `h2` crate or raw HEADERS-frame
-/// encoding.
-///
-/// MAX_FRAME_SIZE stays at the 16384 default — Chrome also sends 16384
-/// so no override needed.
+/// MAX_FRAME_SIZE stays at the 16384 default, which Chrome also sends.
 pub(crate) async fn handshake<S>(tls: S) -> io::Result<Http2Client>
 where
     S: AsyncRead + AsyncWrite + Unpin + 'static,
@@ -138,7 +121,7 @@ where
         .initial_window_size(6_291_456)
         // 15_728_640 = 15_663_105 + 65_535 (h2 default). h2 sends
         // `WINDOW_UPDATE = configured_size - default` so the on-wire
-        // increment is 15_663_105 — Chrome 134's exact value.
+        // increment is 15_663_105 (Chrome 134's exact value).
         .initial_connection_window_size(15_728_640)
         .max_header_list_size(262_144);
     let (send, connection) = builder
@@ -147,7 +130,7 @@ where
         .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("h2: handshake: {e}")))?;
     spawn_local(async move {
         // The connection future drives ping/window/SETTINGS frames. When
-        // it completes (clean GoAway or error) we just drop — the
+        // it completes (clean GoAway or error) we just drop; the
         // `SendRequest` will start returning errors on the next call,
         // and the pool layer evicts.
         let _ = connection.await;
@@ -221,7 +204,7 @@ pub(crate) async fn send_request(
     }
 
     // `SendRequest::ready` waits until the connection has capacity for a
-    // new stream (rare to block — h2 default MAX_CONCURRENT_STREAMS is
+    // new stream (rare to block; h2 default MAX_CONCURRENT_STREAMS is
     // high). Cloning is cheap so we don't share `send` mutably.
     let sender = client.send.clone();
     let mut sender = sender
@@ -506,7 +489,7 @@ fn headers_to_vec(map: &HeaderMap) -> Vec<(String, String)> {
     for (k, v) in map.iter() {
         let name = k.as_str().to_string();
         // Header values are bytes; lossy-decode for our String API. The
-        // wire-side stays exact — this only affects what JS sees, and
+        // wire-side stays exact; this only affects what JS sees, and
         // browsers do lossy decoding too.
         let value = String::from_utf8_lossy(v.as_bytes()).into_owned();
         out.push((name, value));

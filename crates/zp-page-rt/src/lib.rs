@@ -1,12 +1,12 @@
-//! zp-page-rt — page runtime hot-path policies, shared-memory ABI.
+//! Page runtime hot-path policies and shared-memory ABI (`zp-page-rt`).
 //!
 //! Loaded by `web/zp-rt.js` as a raw WASM module (no wasm-bindgen glue).
 //! All ABI surface is `#[no_mangle] pub extern "C"`; `web/zp-rt.js`
 //! implements its handle and shared-memory calling contract.
 //!
 //! Hard rules:
-//! - Never panic — input is untrusted, `panic = "abort"` would kill the page.
-//! - All public exports return only u32 / u64. JS interprets bit fields.
+//! - Never panic: input is untrusted and `panic = "abort"` would terminate the page.
+//! - All public exports return only u32 or u64; JS interprets bit fields.
 //! - Memory growth is allowed only inside the bootstrap path; hot calls must
 //!   not grow so JS-side `Uint8Array` views stay valid for the call duration.
 
@@ -23,15 +23,12 @@ use std::hash::{BuildHasherDefault, Hasher};
 use std::mem::MaybeUninit;
 use std::ptr::addr_of;
 
-// ---------------------------------------------------------------------------
-// Scratchpad — JS writes UTF-8 here via TextEncoder.encodeInto, then calls
+// Scratchpad: JS writes UTF-8 here via TextEncoder.encodeInto, then calls
 // url_intern(ptr, len). The pointer is a fixed offset within the WASM linear
 // memory so JS can cache it across calls (subject to memory.grow refresh).
 //
-// Size: 64KB. Max URL length per WHATWG is unbounded but real-world Chrome
-// limit is ~32K; we double that for safety. encodeInto truncates on
-// overflow, and JS-side will reject inputs > cap/3 (UTF-8 worst case).
-// ---------------------------------------------------------------------------
+// Size: 64 KiB. Chrome's practical URL limit is ~32 KiB; JS rejects inputs
+// larger than cap/3 (UTF-8 worst case).
 
 const SCRATCH_CAP: usize = 64 * 1024;
 
@@ -47,11 +44,10 @@ fn scratch_base() -> *const u8 {
     addr_of!(SCRATCH) as *const u8
 }
 
-// ---------------------------------------------------------------------------
-// URL classification — first-pass scheme partitioning. Mirrors the union of
-// runtime-prelude.js's isHTTPURL / hasExecutableURLScheme / hasDangerousURLScheme
-// in a single enum so the JS caller branches once per attribute set.
-// ---------------------------------------------------------------------------
+// URL classification: first-pass scheme partitioning. Mirrors the union of
+// runtime-prelude.js's isHTTPURL, hasExecutableURLScheme, and
+// hasDangerousURLScheme in a single enum so the JS caller branches once per
+// attribute set.
 
 #[repr(u32)]
 #[derive(Copy, Clone, PartialEq, Eq)]
@@ -116,8 +112,8 @@ fn classify_scheme(input: &[u8]) -> UrlClass {
             b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.')
         };
         if !valid {
-            // First non-scheme char (e.g. '/' '?' '#') before any colon →
-            // relative URL.
+            // First non-scheme char (e.g. '/', '?', '#') before any colon
+            // indicates a relative URL.
             return UrlClass::Relative;
         }
     }
@@ -189,22 +185,17 @@ fn eq_ci(a: &[u8], b_lower: &[u8]) -> bool {
         .all(|(x, y)| ascii_lower(*x) == *y)
 }
 
-// ---------------------------------------------------------------------------
-// URL intern pool. Append-only. handle = index + 1 (0 reserved for invalid).
-// Hash collisions resolved by linear probe (small dataset; capacity bench-tuned).
-//
+// URL intern pool: append-only, handle = index + 1 (0 reserved for invalid).
 // `class_cache` stores the precomputed UrlClass for O(1) classify after
-// intern. Hash uses FxHash-style multiplier — no allocations.
-// ---------------------------------------------------------------------------
+// intern. Hash uses an FxHash-style multiplier without allocations.
 
 struct UrlEntry {
     offset: u32,
     len: u32,
 }
 
-// IdentityHasher — we already feed pre-hashed u64 keys into the map, so
-// the std SipHash would re-hash them at significant cost. Using identity
-// makes the map essentially a direct-addressed table on the lower bits.
+// IdentityHasher: keys fed into the map are already pre-hashed u64 values, so
+// identity hashing avoids a redundant SipHash pass.
 #[derive(Default)]
 struct IdentityHasher(u64);
 impl Hasher for IdentityHasher {
@@ -224,8 +215,8 @@ struct UrlPool {
     bytes: Vec<u8>,
     entries: Vec<UrlEntry>,
     class_cache: Vec<u8>, // UrlClass as u8 per entry index
-    // by_hash: pre-hashed key → handle. Collisions are verified by byte
-    // compare against the entries table. Identity hasher avoids re-hashing.
+    // Maps pre-hashed key to handle; collisions are verified by byte comparison
+    // against `entries`.
     by_hash: FastMap<u32>,
 }
 
@@ -253,8 +244,7 @@ impl UrlPool {
         }
         let h = fxhash(trimmed);
         if let Some(&handle) = self.by_hash.get(&h) {
-            // Verify the stored bytes match — collision possibility is
-            // negligible (64-bit hash) but defensively correct.
+            // Verify stored bytes match to guard against 64-bit hash collisions.
             let idx = (handle - 1) as usize;
             let e = &self.entries[idx];
             let start = e.offset as usize;
@@ -299,7 +289,7 @@ thread_local! {
     static POOL: RefCell<UrlPool> = RefCell::new(UrlPool::new());
 }
 
-// FxHash — same constants as rustc-hash. Stable, fast, no allocations.
+// FxHash using the same multiplier constant as rustc-hash.
 fn fxhash(input: &[u8]) -> u64 {
     let mut h: u64 = 0;
     for &b in input {
@@ -307,10 +297,6 @@ fn fxhash(input: &[u8]) -> u64 {
     }
     h
 }
-
-// ---------------------------------------------------------------------------
-// Public ABI — raw extern "C". JS reads exports by name.
-// ---------------------------------------------------------------------------
 
 /// Version: major<<16 | minor<<8 | patch.
 #[no_mangle]
@@ -355,7 +341,7 @@ pub extern "C" fn url_classify(handle: u32) -> u32 {
 
 /// Get a view (ptr, len packed as u64) of the canonicalized URL bytes.
 /// JS decodes via TextDecoder. Pointer is valid only until the next
-/// intern call may grow the bytes Vec — JS must decode immediately.
+/// intern call may grow the bytes Vec; JS must decode immediately.
 #[no_mangle]
 pub extern "C" fn url_view(handle: u32) -> u64 {
     POOL.with(|p| p.borrow().view(handle))
@@ -385,17 +371,13 @@ pub extern "C" fn url_intern_and_classify(ptr: u32, len: u32) -> u64 {
     ((h as u64) << 32) | (c as u64)
 }
 
-/// Scheme-only classification — NO intern, NO pool side effects. Read at
-/// most `len` bytes (caller should cap to ~16 for ASCII schemes) and return
-/// just the UrlClass enum. Designed for the hot path on long URLs where
-/// encoding the full string into scratch is wasteful — JS encodes only the
-/// scheme region. Schemes are ASCII (RFC 3986), so 16 bytes covers every
-/// well-known scheme plus margin (longest match here: "javascript:" = 11).
+/// Scheme-only classification without interning or pool side effects. Reads at
+/// most `len` bytes (callers typically cap at 16 bytes for ASCII schemes) and
+/// returns the `UrlClass` value.
 ///
-/// `about:` differentiation between "blank" and other is preserved if the
-/// caller passes at least ~12 bytes (e.g. "about:blank" = 11). Truncated
-/// inputs may classify as AboutOther — acceptable since policy treats both
-/// AboutBlank and AboutOther identically for blocking decisions.
+/// `about:` differentiation between `blank` and other targets is preserved when
+/// the caller passes at least 12 bytes (`about:blank` is 11 bytes); shorter
+/// inputs classify as `AboutOther`.
 #[no_mangle]
 pub extern "C" fn url_classify_scheme_only(ptr: u32, len: u32) -> u32 {
     if len == 0 || len > 256 {
@@ -405,31 +387,10 @@ pub extern "C" fn url_classify_scheme_only(ptr: u32, len: u32) -> u32 {
     classify_scheme(bytes) as u32
 }
 
-// ---------------------------------------------------------------------------
-// Batch ABI — amortise WASM call setup over many URLs. The MutationObserver
-// strategy submits all mutations from one tick in one call.
-//
-// Input layout (caller fills scratch):
-//   [u32 len0] [u32 len1] ... [u32 lenN-1] [byte0..byteM]
-//
-// Calls write `lens` table first (4 * count bytes), then bytes, then call
-// bulk_intern_and_classify(lens_ptr, count, bytes_ptr).
-//
-// Output: caller-allocated u32 array of length count, written via the same
-// scratch starting at `out_ptr`. Each slot = (class << 16) | (handle_low_16).
-// For the bench we just return the count of items processed; in real use
-// JS reads back via a Uint32Array view.
-// ---------------------------------------------------------------------------
-
 /// Process `count` URLs whose lengths are at `lens_ptr` (u32 each) and whose
 /// concatenated bytes start at `bytes_ptr`. Writes `count` u32 results to
-/// `out_ptr`. Each result = (class << 16) | (handle & 0xFFFF). Returns the
-/// number of items processed (0 if any input is malformed).
-///
-/// Truncating handle to 16 bits is intentional for the bench: real callers
-/// either follow up with view by full handle (in which case out should be
-/// u64) or only need the class. Keeping it u32 lets JS read with a single
-/// Uint32Array view.
+/// `out_ptr`. Each result = `(class << 16) | (handle & 0xFFFF)`. Returns the
+/// number of items processed (0 if `count == 0`).
 #[no_mangle]
 pub extern "C" fn bulk_intern_and_classify(
     lens_ptr: u32,
@@ -460,13 +421,3 @@ pub extern "C" fn bulk_intern_and_classify(
         count
     })
 }
-
-// ---------------------------------------------------------------------------
-// Tests (run on host with --target native, behind cfg(test) — wasm guard
-// above prevents host compile of the module itself, so put tests under
-// a separate cfg gate).
-// ---------------------------------------------------------------------------
-
-// Tests intentionally omitted: this crate is cdylib-only and compiles for
-// wasm32-unknown-unknown. Parity tests live in test/js/url-classify.test.js
-// (planned) which exercise the wasm artifact directly.

@@ -1,183 +1,183 @@
-# Service Worker Integration Regressions — 역사적 범주별 요약
+# Service Worker Integration Regressions: Historical Category Summary
 
-`web/sw.js`의 classify / handleFetch / runtimeAPI / transportFetch / 메시지 라우팅에 관한 **과거 사건 요약이며 현행 승인 명세가 아니다**. 측정·검증은 당시 기록이고, 이번 문서 편집에서는 런타임 실행이나 신규 측정을 하지 않았다. 옛 테스트 제안·구현 공백은 역사적/미검증 기록이지 현재 TODO가 아니다. 후속 정정이 앞선 가설을 대체하며, 개별 수정이 GitHub·CF/Cloudflare·CNN 전체 호환성 해결을 뜻하지 않는다.
+Historical incident summaries for `classify`, `handleFetch`, `runtimeAPI`, `transportFetch`, and message routing in `web/sw.js`; **not an active normative specification**. Measurements and verifications reflect results at the time of recording, with no new runtime executions during documentation edits. Past test proposals and implementation gaps are unverified historical notes rather than active TODOs. Later corrections supersede earlier hypotheses, and individual fixes do not imply full compatibility across GitHub, Cloudflare, or CNN.
 
-<a id="2026-08-21--go-의-응답-헤더-정책-전체가-죽은-코드였다-호출자-0-go-가-막고-있다-는-믿음이-실제-탈출을-낳았다"></a>
-## 2026-08-21 — Go 응답 헤더 정책은 미호출 코드
+<a id="2026-08-21-go-call-0-go"></a>
+## 2026-08-21: Go response header policy was dead code
 
-- **원인·정정:** `ConstructorPolicy` / `HiddenHeader` / `ApplyChallengeCompat` / `ChallengeSubresourceSkip`은 테스트 외 호출자가 없었다. `main.go`가 사용하는 `internal/headers` 기능은 `BuildCSP`뿐이었다. 8/20의 “문서만 Go 정책을 우회한다”는 설명은 틀렸으며 **어떤 응답도 그 정책을 거치지 않았다**.
-- **수정·규칙:** `policy.go`, `challenge.go`와 테스트를 삭제하고 `csp.go` 유지. `crates/zp-shared/testdata/response_header_policy.json`의 reporting/directive/hop_by_hop 목록을 빌드가 `__ZP_*_HEADERS__`에 주입하고 SW 삭제 루프도 공유한다. CORS의 무효 조합 `*` + credentials 허용은 구체 Origin을 반영할 때만 credentials를 켜도록 수정했다. Origin 없는 요청에서 발생했으나 피해는 관측되지 않았다.
-- **당시 검증:** 삭제 후 Go 빌드·테스트 영향 없음. `/zp/`, `/zp/api/sync-fetch`, `/__zp/*.wasm`에 `Access-Control-*` 없음. `/hdrprobe`에서 리포팅 헤더, `Link`, `Location`, `Clear-Site-Data` 잔존 없음; hole/static/cargo/Go 테스트 통과. 가드는 죽은 Go 목록 비교 대신 **픽스처의 실제 빌드 주입·Go 사본 부활 금지**를 검사하도록 변경했다. 가드 대상이 실행되는지 먼저 확인한다(`internal/htmltx` 죽은 사본도 같은 전례).
+- **Cause and correction:** `ConstructorPolicy`, `HiddenHeader`, `ApplyChallengeCompat`, and `ChallengeSubresourceSkip` had zero callers outside tests. The only `internal/headers` function called by `main.go` was `BuildCSP`. The August 20 note claiming that only document responses bypassed the Go policy was wrong: **no response ever passed through that policy**.
+- **Fix and rules:** Deleted `policy.go`, `challenge.go`, and their tests while keeping `csp.go`. The build injects the `reporting`, `directive`, and `hop_by_hop` header lists from `crates/zp-shared/testdata/response_header_policy.json` into `__ZP_*_HEADERS__`, shared by the Service Worker header-stripping loop. Fixed invalid CORS combinations (`*` with credentials) so `Access-Control-Allow-Credentials` is enabled only when reflecting a specific `Origin` (previously triggered on originless requests without observed breakage).
+- **Verification at the time:** Deleting the dead files had no impact on Go builds or tests. Confirmed no `Access-Control-*` headers on `/zp/`, `/zp/api/sync-fetch`, or `/__zp/*.wasm`, and no residual reporting headers, `Link`, `Location`, or `Clear-Site-Data` on `/hdrprobe`; hole, static, Cargo, and Go tests passed. Replaced the dead Go list comparison guard with a test that **verifies build injection from the shared fixture and forbids reintroducing the Go copy**. Always verify that guarded code paths actually execute (matching the earlier `internal/htmltx` dead-copy cleanup).
 
-<a id="2026-05-30--iframe-document-referer--parenttargeturl-광고-iframe-차단-해소"></a>
-## 2026-05-30 — iframe Referer에 부모 URL 사용
+<a id="2026-05-30-iframe-document-referer-parenttargeturl-ad-iframe-unblocked"></a>
+## 2026-05-30: Using parent target URL as iframe `Referer`
 
-- **원인:** NAVER `shopsquare.naver.com` 광고 문서가 embedder Referer를 요구했으나 `transportFetch`는 iframe 자신의 `entry.baseUrl`을 보내 `POLICY_BLOCKED`/404가 발생했다.
-- **수정:** `web/runtime-prelude.js`의 `activatedFrameURL`이 `ZP_FRAME_ROUTE`에 `parentTargetUrl: virtualURL.href`를 포함하고, `web/sw.js`가 canonicalize하여 저장. `opt.document && entry.parentTargetUrl`이면 이를 `X-ZP-Referer`로 사용했다.
-- **상태:** 광고 iframe 차단 해소로 기록됐다. 이는 당시 부모 참조 선택 수정이며, 이후 Referrer-Policy 처리까지 대체하는 일반 규칙은 아니다.
+- **Cause:** NAVER `shopsquare.naver.com` ad documents required the embedder `Referer`, but `transportFetch` sent the iframe's own `entry.baseUrl`, resulting in `POLICY_BLOCKED` or 404 responses.
+- **Fix:** `activatedFrameURL` in `web/runtime-prelude.js` includes `parentTargetUrl: virtualURL.href` in `ZP_FRAME_ROUTE`, which `web/sw.js` canonicalizes and stores. When `opt.document && entry.parentTargetUrl` holds, `transportFetch` sends `entry.parentTargetUrl` as `X-ZP-Referer`.
+- **Status:** Unblocked the ad iframe at the time. This recorded the parent referrer selection fix rather than a general replacement for later `Referrer-Policy` enforcement.
 
 <a id="2026-05-30--3xx-redirect-server-side-following-rtroundtrip--followredirects"></a>
-## 2026-05-30 — 서버 측 3xx 추적
+## 2026-05-30: Server-side 3xx redirect following
 
-- **원인:** `rt.RoundTrip`이 광고 iframe의 상대 `303 Location`을 그대로 반환해 브라우저가 프록시 오리진에 해소했고, SW UNKNOWN/차단으로 이어졌다.
-- **당시 수정:** `cmd/zeroproxy-server/relay.go`의 `followRedirects(ctx, rt, req, jar)`를 `bridgeRelayWS`와 `bridgeMuxRelayWS`에 적용. 당시 최대 10홉, 301/302/303 GET 변환, 307/308 본문 보존·재시도 불가 시 반환, 홉별 쿠키 수집, cross-host Authorization/Cookie 제거, 최종 Location 제거를 기록했다.
-- **정정·상태:** 브라우저로 원시 Location을 누출하지 않는 것이 핵심이다. 당시 메서드 설명을 현행 계약으로 삼지 않는다. 후속 상한 탈출 및 9/6 요청 계약 수정이 이 단순화된 설명을 보완·정정한다.
+- **Cause:** `rt.RoundTrip` returned raw relative `303 Location` headers from ad iframes directly to the browser, which resolved them against the proxy origin and triggered Service Worker `UNKNOWN` errors or blocks.
+- **Fix at the time:** Applied `followRedirects(ctx, rt, req, jar)` in `cmd/zeroproxy-server/relay.go` across both `bridgeRelayWS` and `bridgeMuxRelayWS`. At the time, it followed up to 10 hops, converted 301/302/303 to GET, preserved bodies on 307/308 (returning the response if not replayable), collected cookies per hop, stripped `Authorization` and `Cookie` across host changes, and stripped the final `Location` header.
+- **Correction and status:** Never leaking raw `Location` headers to the browser is the core invariant. Do not treat the method-conversion summary above as the active specification: later fixes for redirect cap escapes and the September 6 request contract refined and corrected those rules.
 
 <a id="2026-05-29--user-agent-forbidden-header-smuggle"></a>
-## 2026-05-29 — User-Agent 전달 누락
+## 2026-05-29: Missing `User-Agent` forwarding
 
-- **원인:** 당시 Request 경로에서 UA가 사라져 relay가 빈 값 또는 `Go-http-client/1.1`을 보냈고 Wikipedia 등의 봇 방어에 걸렸다. UA의 forbidden-header 동작은 브라우저별 차이가 있는 역사적 설명이다.
-- **수정:** [web/zp-core.js](../web/zp-core.js)의 `TARGET_USER_AGENT`를 공유. [web/sw.js](../web/sw.js)가 `X-ZP-User-Agent`를 설정하고 [cmd/zeroproxy-server/relay.go](../cmd/zeroproxy-server/relay.go)의 양 relay가 UA로 promote하며 동일 기본값 사용. [web/runtime-prelude.js](../web/runtime-prelude.js)의 JS-visible UA도 같은 상수로 통합했다.
-- **당시 검증:** Wikipedia 본문 렌더·NAVER 무회귀. `"Please set a user-agent"` 또는 서버의 Go UA는 회귀 신호였다. Cookie/Sec-Fetch 계열·클라이언트 힌트 등의 추가 전달은 당시 검토사항이며 Cloudflare 해결 증거는 아니다. [POST body + Referer/Origin](#2026-05-29--post-body--refererorigin-누락) 참조.
+- **Cause:** `Request` construction dropped the `User-Agent` header so the relay sent either an empty value or `Go-http-client/1.1`, triggering bot blocks on sites such as Wikipedia. Browser treatment of `User-Agent` as a forbidden header varies across engines.
+- **Fix:** Shared `TARGET_USER_AGENT` from [web/zp-core.js](../web/zp-core.js). [web/sw.js](../web/sw.js) sets `X-ZP-User-Agent`, both relay paths in [cmd/zeroproxy-server/relay.go](../cmd/zeroproxy-server/relay.go) promote it to `User-Agent` with the same fallback constant, and [web/runtime-prelude.js](../web/runtime-prelude.js) exposes the identical constant to page JS.
+- **Verification at the time:** Wikipedia articles rendered and NAVER showed no regressions. `"Please set a user-agent"` responses or Go default UA strings served as regression signals. Forwarding `Cookie`, `Sec-Fetch-*`, and Client Hints was noted for follow-up and did not constitute proof of passing Cloudflare challenges. See [POST body + Referer/Origin](#2026-05-29-post-body-refererorigin-missing).
 
-<a id="2026-05-29--post-body--refererorigin-누락"></a>
-## 2026-05-29 — POST body + Referer/Origin 누락
+<a id="2026-05-29-post-body-refererorigin-missing"></a>
+## 2026-05-29: Missing POST body and `Referer`/`Origin`
 
-- **별도 원인 1·수정:** [crates/zp-kernel/src/lib.rs](../crates/zp-kernel/src/lib.rs)의 `kernel_fetch`가 항상 빈 body를 전달했다. GET/HEAD를 제외하고 `extract_body_bytes` 결과를 `sess.fetch`에 전달하도록 수정했다.
-- **별도 원인 2·수정:** [web/sw.js](../web/sw.js)에서 직접 설정한 Referer/Origin이 Request 생성 시 제거됐다. `X-ZP-Referer`, 비-GET/HEAD의 `X-ZP-Origin`으로 전달하고 relay에서 promote하되 **모든 `x-zp-*` 내부 헤더는 upstream 전달 전에 제거**했다.
-- **당시 검증:** NAVER recoshopping API 200 및 추천 위젯 렌더. `body-set=false`와 빈 referer가 두 결함을 구분하는 로그 신호였다. [build-deploy.md](build-deploy.md), [real-site-compat.md](real-site-compat.md#2026-05-29--naver-우측-상단-recoshopping-nextjs-iframe-application-error) 참조.
+- **Cause 1 and fix:** `kernel_fetch` in [crates/zp-kernel/src/lib.rs](../crates/zp-kernel/src/lib.rs) always passed an empty body. Fixed by passing the `extract_body_bytes` result to `sess.fetch` for all non-GET/HEAD requests.
+- **Cause 2 and fix:** Setting `Referer` and `Origin` directly on `new Request` in [web/sw.js](../web/sw.js) stripped both headers. Fixed by smuggling them via `X-ZP-Referer` and (for non-GET/HEAD) `X-ZP-Origin`, promoting them in the relay, and **stripping all internal `x-zp-*` headers before forwarding upstream**.
+- **Verification at the time:** NAVER `recoshopping` API returned 200 and rendered recommendation widgets. `body-set=false` and empty referer fields in relay logs distinguished the two defects. See [build-deploy.md](build-deploy.md) and [real-site-compat.md](real-site-compat.md#2026-05-29-naver-top-right-recoshopping-nextjs-iframe-application-error).
 
-<a id="2026-05-29--target-script-에러-diagnostics"></a>
-## 2026-05-29 — target 오류 diagnostics
+<a id="2026-05-29-target-script-error-diagnostics"></a>
+## 2026-05-29: Target script error diagnostics
 
-- **원인:** iframe 런타임의 silent throw/fallback은 콘솔 문맥 전환이 필요하고 reload 시 외부 hook이 사라져 추적이 어려웠다.
-- **수정:** [web/runtime-prelude.js](../web/runtime-prelude.js)가 window별 `__zp_diagnostics` ring buffer(최대 200개)에 capture-phase `error`, `unhandledrejection`, `console.error`를 기록. `Symbol.for('zeroproxy.runtime.installed')`로 중복 설치를 막는다.
-- **상태:** 설치 marker와 buffer 존재 여부를 회귀 신호로 제안했다. 페이지 덮어쓰기 또는 marker만 있고 buffer가 없는 경우를 감지 대상으로 기록했으며 별도 실행 검증은 제시되지 않았다.
+- **Cause:** Silent throws and fallbacks inside iframe runtimes required manual console context switching, and page reloads wiped externally attached hooks.
+- **Fix:** [web/runtime-prelude.js](../web/runtime-prelude.js) records capture-phase `error`, `unhandledrejection`, and `console.error` events into a per-window `__zp_diagnostics` ring buffer (capped at 200 entries), guarded against duplicate installation by `Symbol.for('zeroproxy.runtime.installed')`.
+- **Status:** Proposed checking the installation marker and ring buffer presence as regression signals to detect page overwrites or partial installs; no separate runtime test was added at the time.
 
 <a id="2026-05-29--ws-mux-1-ws--n-stream"></a>
-## 2026-05-29 — WS mux
+## 2026-05-29: WebSocket multiplexing (`1 WS = N streams`)
 
-- **원인:** `crates/zp-kernel/src/lib.rs`의 요청마다 `/zp/relay` WS를 새로 열고 서버도 응답 후 닫아, 서버 transport pool만으로는 upgrade 비용을 없애지 못했다.
-- **수정·불변식:** `/zp/relay-mux`의 binary frame은 BE u32 stream ID + type + payload(ENVELOPE/BODY_UP/HEAD/BODY_DOWN/ERROR/CANCEL). `cmd/zeroproxy-server/relay.go`의 단일 read loop가 stream별 goroutine/`chanBodyReader`로 분배하며 **모든 write는 `sendMu`로 직렬화**한다. `crates/zp-kernel/src/mux.rs`의 singleton `MuxSession`은 stream별 slot과 연결 전 pending queue를 관리한다.
-- **당시 검증·한계:** NAVER 로딩 개선과 WS 재사용 확인; 첫 navigation race의 legacy 연결은 남았다. 세션 획득 실패 시 `relay_fetch_owned` fallback, close 시 `mark_dead`로 pending reject 후 lazy 재연결. u32 wrap 충돌과 bounded upload buffer의 다른 stream 정체는 당시 잠재 한계였다. [서버 pool 수정](build-deploy.md#2026-05-29--upstream-connection-pool-누락) 참조.
+- **Cause:** `crates/zp-kernel/src/lib.rs` opened a new `/zp/relay` WebSocket for every request and the server closed it after each response, so server-side transport pooling alone could not eliminate WebSocket upgrade overhead.
+- **Fix and invariants:** Binary frames on `/zp/relay-mux` encode a big-endian `u32` stream ID, frame type (`ENVELOPE`, `BODY_UP`, `HEAD`, `BODY_DOWN`, `ERROR`, `CANCEL`), and payload. A single read loop in `cmd/zeroproxy-server/relay.go` dispatches frames to per-stream goroutines via `chanBodyReader`, while **all writes serialize through `sendMu`**. The singleton `MuxSession` in `crates/zp-kernel/src/mux.rs` manages per-stream slots and a pre-connection pending queue.
+- **Verification and limits at the time:** Confirmed faster NAVER loads and WebSocket reuse, though an initial navigation race could still open a legacy connection. Failed session acquisition falls back to `relay_fetch_owned`, and socket closure calls `mark_dead` to reject pending streams before reconnecting lazily. Potential `u32` stream ID wrap collisions and head-of-line blocking on bounded upload buffers remained known limits at the time. See the [server pool fix](build-deploy.md#2026-05-29-upstream-connection-pool-missing).
 
-<a id="2026-05-29--zpapifetch-가-script-destination-미감지"></a>
-## 2026-05-29 — `/zp/api/fetch` script destination 누락
+<a id="2026-05-29-zpapifetch-script-destination-undetected"></a>
+## 2026-05-29: Undetected script destination on `/zp/api/fetch`
 
-- **원인:** zp-htmltx가 absolute script URL도 `/zp/api/fetch`로 통합했으나 handler는 CSS/raw만 처리했다. raw JS가 native window/location에 접근해 `__zp_get` 멤브레인을 우회했다.
-- **수정:** [web/sw.js#L228](../../web/sw.js), [web/sw.js#L266](../../web/sw.js)의 GET 분기에 `req.destination` 또는 `Sec-Fetch-Dest`의 script/worker/sharedworker를 감지하고 `rewriteScriptResponse`와 `scriptKindFromRequest`를 적용했다.
-- **상태:** 응답의 `__zp_get` 확인 E2E와 `test/js/sw-runtime.test.js` 신설은 **당시 미검증 제안**이었다. classify→handler→rewrite가 분산된 다른 API 분기의 destination 누락도 당시 주의사항이다.
+- **Cause:** `zp-htmltx` unified absolute script URLs under `/zp/api/fetch`, but the handler only processed CSS and raw pass-through responses. Unrewritten JS accessed native `window` and `location` directly, bypassing the `__zp_get` membrane.
+- **Fix:** Updated the GET branch in [web/sw.js#L228](../../web/sw.js) and [web/sw.js#L266](../../web/sw.js) to detect `script`, `worker`, and `sharedworker` via `req.destination` or `Sec-Fetch-Dest` and route them through `rewriteScriptResponse` with `scriptKindFromRequest`.
+- **Status:** Proposed E2E assertions for `__zp_get` in responses and a new `test/js/sw-runtime.test.js` suite remained **unverified proposals at the time**. Watch for missing destination checks whenever `classify`, handlers, and rewrite paths are split across API routes.
 
-<a id="2026-05-29--iframe-boottargeturl-가-parent-의-url-로-잘못-등록되어-멤브레인-cascade-실패-p1"></a>
-## 2026-05-29 — iframe boot.targetUrl 부모 오등록 가설
+<a id="2026-05-29-iframe-boottargeturl-parent-url-misregistered-membrane-cascade-failure-p1"></a>
+## 2026-05-29: Hypothesis on iframe `boot.targetUrl` misregistration as parent URL
 
-- **증상:** NAVER 메뉴·쇼핑·광고 iframe이 비거나 Application error를 보였고, iframe의 `eval('location.href')`와 `documentBaseURI`가 부모 root를 반환했다.
-- **당시 가설:** `activatedFrameURL` fallback, `proxyDocument`의 부모 entry lookup, 가변 `tab.activeEntryId` 오염을 의심했다. 상대 URL을 부모 base로 해소하는 것 자체는 정상이며 원인으로 확정되지 않았다.
-- **후속 관계·상태:** 아래 `/zp/api/fetch` navigation entry 미생성이 구체 수정으로 기록됐다. 내부 상태 dump·전체 iframe URL E2E는 당시 제안일 뿐이고, “모든 iframe widget 동시 해결”은 검증되지 않은 기대였다.
+- **Symptom:** NAVER menu, shopping, and ad iframes rendered blank or showed `Application error`, and `eval('location.href')` and `documentBaseURI` inside the iframes returned the parent root URL.
+- **Hypothesis at the time:** Suspected `activatedFrameURL` fallbacks, parent entry lookup in `proxyDocument`, or mutable `tab.activeEntryId` pollution. Resolving relative URLs against the parent base URL is itself normal and was not confirmed as the failure cause.
+- **Follow-up and status:** The concrete fix was recorded under the missing `/zp/api/fetch` navigation entry below. Internal state dumps and full iframe URL E2E tests remained proposals at the time, and expecting a single fix to resolve all iframe widgets simultaneously was unverified.
 
-<a id="2026-05-29--iframe-zpapifetch-navigation-entry-미생성"></a>
-## 2026-05-29 — iframe navigation entry 미생성
+<a id="2026-05-29-iframe-zpapifetch-navigation-entry-not-created"></a>
+## 2026-05-29: Missing navigation entry creation for iframes on `/zp/api/fetch`
 
-- **원인:** [web/sw.js#L228](../../web/sw.js)의 runtime GET이 navigation까지 subresource로 처리해 부모 entry를 사용했다. 잘못된 baseURI 및 iframe clientContext 바인딩 전 subresource의 `SW_NOT_READY` race가 발생했다.
-- **수정:** [web/sw.js#L237](../../web/sw.js)에서 navigate/iframe/document/frame을 감지해 iframe 자체 entry 생성, clientContext 바인딩, document Accept 선택 및 `transformDocumentResponse`의 prelude/CSP 주입을 적용했다.
-- **상태:** cross-host iframe의 가상 URL·subresource 정상 로딩 E2E는 당시 미검증 제안이다. 부모 문서 정상만으로 iframe 경로를 검증할 수 없다.
+- **Cause:** The runtime GET handler in [web/sw.js#L228](../../web/sw.js) treated iframe navigations as subresources and reused the parent entry, causing wrong `baseURI` values and `SW_NOT_READY` races on subresources before iframe `clientContext` binding completed.
+- **Fix:** Updated [web/sw.js#L237](../../web/sw.js) to detect `navigate`, `iframe`, `document`, and `frame` requests, create a dedicated entry for the iframe, bind `clientContext`, select document `Accept` headers, and run `transformDocumentResponse` to inject the prelude and CSP.
+- **Status:** An E2E test verifying virtual URLs and subresource loading in cross-host iframes remained an unverified proposal at the time. Passing parent-document tests alone never proves iframe navigation paths.
 
-<a id="2026-08-20--축을-세우자마자-두-번째-진짜-탈출-refresh-응답-헤더"></a>
-## 2026-08-20 — `Refresh` 응답 헤더 탈출
+<a id="2026-08-20-real-refresh"></a>
+## 2026-08-20: Escape via `Refresh` response header
 
-- **원인·후속 정정:** meta refresh만 처리해 헤더판 Refresh가 프록시 밖 navigation을 일으켰다. `internal/headers/policy.go`의 hidden 목록을 믿었으나, 8/21 확인 결과 문서만 우회한 것이 아니라 Go 정책 전체가 미호출이었다.
-- **수정·금지:** SW의 `ZP_TARGET_POLICY_HEADERS`에 Refresh/Link/Clear-Site-Data/Alt-Svc/Service-Worker-Allowed/SourceMap/Set-Cookie 등을 처리했다. 직접 preload, 프록시 저장소 삭제, 연결 목적지 변경을 허용하면 안 된다. Refresh 단순 삭제는 착지를 깨므로 `url=`을 런처 `?via=`로 옮겼다.
-- **당시 검증·정정:** 직접 탈출과 착지 실패를 각각 재현한 뒤 탈출 없음+착지 성공 확인. Go hidden↔SW 비교 가드는 이후 폐기·대체됐다. 같은 기능의 meta/헤더 전달 경로와 격리/기능 보존을 함께 검증해야 한다.
+- **Cause and follow-up correction:** Only `<meta http-equiv="refresh">` was rewritten, allowing HTTP `Refresh` response headers to trigger unproxied navigations. Although `internal/headers/policy.go` listed `Refresh` as hidden, the August 21 audit showed that Go header policy was never called on any response.
+- **Fix and rule:** Handled `Refresh`, `Link`, `Clear-Site-Data`, `Alt-Svc`, `Service-Worker-Allowed`, `SourceMap`, and `Set-Cookie` in `ZP_TARGET_POLICY_HEADERS` inside the Service Worker. Never allow direct preloads, proxy storage wipes, or alternative endpoint redirects. Because stripping `Refresh` outright breaks expected page redirects, rewrite its `url=` target to the launcher `?via=` route.
+- **Verification and correction:** Reproduced both the direct escape and broken landing before confirming zero escapes and working landings after the fix. The comparison guard between Go hidden headers and the Service Worker was later retired and replaced. Always verify both `<meta>` and HTTP header delivery channels alongside containment and landing behavior.
 
-<a id="2026-08-21--해결-릴레이로-받은-css-안의-url-이-sw-less-문서에서-403"></a>
-## 2026-08-21 — SW-less CSS `url()` 403
+<a id="2026-08-21-css-in-url-sw-less-403"></a>
+## 2026-08-21: 403 on CSS `url()` inside Service-Worker-less documents
 
-- **원인:** SW client가 아닌 문서가 `/zp/api/sync-fetch`로 받은 CSS 내부 URL은 SW 전용 `/zp/api/fetch`로 남아 Go에서 403이 났다. 요소 속성용 blob 업그레이드는 CSS 텍스트를 처리하지 못했다.
-- **수정:** relay `kind=style` 응답에서 내부 fetch URL을 relay URL로 재변환. HTTP/1.1 연결 점유로 stylesheet가 밀려 `deadSheets`가 났던 전례 때문에 12개 상한과 초과 로그를 두었다. 초과분까지 처리됐다고 간주하면 안 된다.
-- **당시 검증:** `e6-adframe-css-link`는 시트 도착만 확인했다. NAVER 무오류 실행은 광고 이미지 경로 자체가 없어 증거가 아니었다. `e7-adframe-css-image` 고정 픽스처에서 빌드 SW 수정 줄을 끄면 실패, 켜면 성공해 인과를 확인했다.
+- **Cause:** CSS fetched via `/zp/api/sync-fetch` inside documents not controlled by the Service Worker kept Service-Worker-only `/zp/api/fetch` URLs inside `url(...)`, which the Go server rejected with 403. Element-attribute blob upgrades did not rewrite stylesheet text.
+- **Fix:** Rewrote internal `/zp/api/fetch` URLs inside relay `kind=style` responses to relay URLs. Capped concurrent rewrites at 12 with overflow logging because HTTP/1.1 connection exhaustion had previously delayed stylesheets and caused `deadSheets`. Never assume URLs beyond the cap were rewritten.
+- **Verification at the time:** `e6-adframe-css-link` only verified stylesheet arrival, and error-free NAVER runs proved nothing when ad image paths were absent. Toggling the Service Worker fix line on the deterministic `e7-adframe-css-image` fixture confirmed causality (failing when disabled, passing when enabled).
 
-<a id="2026-08-21--버그가-다른-버그의-증상을-가리고-있었다-리다이렉트-상한"></a>
-## 2026-08-21 — 리다이렉트 상한 탈출과 가려진 호환성 결함
+<a id="2026-08-21-redirect-cap-masked-underlying-bug"></a>
+## 2026-08-21: Redirect cap escape and masked compatibility limit
 
-- **원인:** 상한 초과의 마지막 3xx/Location을 브라우저에 넘겼다. 절대 URL은 직접 탈출하고 상대 URL도 프록시 비라우트로 나가 share 문맥을 잃는다. connection/keep-alive/trailer/proxy-authenticate도 헤더 프로브에서 살아남았다. Go가 방어한다는 설명은 위 8/21 정정으로 폐기됐다.
-- **수정·규칙:** 상한 초과 응답을 그대로 넘기면 안 된다. 차단하자 기존 5홉 제한의 기능 결함이 드러나 20으로 늘렸다. 이전에는 브라우저가 이어 따라가 낮은 상한을 가렸으므로, 수정 직후 드러난 결함을 곧바로 회귀로 해석하면 안 된다.
-- **당시 검증·차이:** 탈출 및 `n13` 착지 실패를 관측했다. 대조군 Chrome은 알려진 “20홉 상한”과 달리 25홉도 완료했다. 프록시가 20에서 멈추는 긴 체인 차이는 당시 수용했으며 브라우저와 동등하다는 증거가 아니다.
+- **Cause:** When a redirect chain exceeded the hop limit, the final `3xx` response and raw `Location` header were returned to the browser. Absolute URLs escaped directly to the target host, while relative URLs hit unrouted proxy paths and lost their share context. `Connection`, `Keep-Alive`, `Trailer`, and `Proxy-Authenticate` also survived header probes. The assumption that Go stripped these headers was refuted by the August 21 dead-code audit above.
+- **Fix and rule:** Never pass an over-cap `3xx` response to the browser. Blocking over-cap redirects exposed that the previous 5-hop limit was too low for real sites, so the cap was raised to 20 hops. Because the browser had previously masked the low cap by following the leaked `3xx` natively, do not misdiagnose failures exposed immediately after closing a leak as new regressions.
+- **Verification and divergence:** Observed both the raw escape and the `n13` landing failure. Control-group Chrome completed 25 hops despite the standard 20-hop spec limit; stopping at 20 hops in the proxy was accepted as a known bound rather than exact browser parity.
 
-## 서브리소스 redirect가 문서 entry를 오염 (2026-08-25) {#리다이렉트-entry}
+## Subresource redirects corrupting the document entry (2026-08-25) {#redirect-entry}
 
-- **원인:** `transportFetch`의 무조건적인 entry URL 갱신으로 추적 픽셀 redirect가 문서 entry를 덮었다. 올바른 `opt.refOverride`도 오염된 entry와 same-origin이 아니어서 버려졌다. `micro.rubiconproject.com`은 Referer로 prebid 빌드를 골랐고 CNN adfuel이 기대하는 v11 대신 v4를 받아 경매가 멈췄다. 다른 embed의 쿼리 URL을 제3자에게 보내는 **정보 유출**이기도 했다.
-- **수정:** URL 갱신을 `if (entry && opt.document)`로 제한. `/zp/api/script`, `/zp/api/worker-script`도 최근 `tab.activeEntryId` 대신 요청 client ctx를 우선 사용하도록 수정했다. same-origin 가드 자체가 아니라 기반 상태가 잘못됐다.
-- **당시 검증·미해결:** entry 선택만 수정하면 v4 그대로였고 문서 조건 추가 후 v11·경매·입찰이 회복됐다. **CNN 프레임은 여전히 대조군보다 적었다.** `scratchpad/redir2.mjs`에서 발견한 cross-origin 전체 Referer 유출은 당시 미수정이었으나 다음 정책 수정으로 이어졌다.
+- **Cause:** Unconditional entry URL updates in `transportFetch` allowed tracking-pixel redirects to overwrite the document entry URL. Valid `opt.refOverride` values were then discarded as cross-origin against the corrupted entry. `micro.rubiconproject.com` selected its Prebid bundle based on `Referer`, serving v4 instead of the v11 bundle expected by CNN `adfuel` and halting the ad auction. Overwriting the entry also caused an **information leak** by sending another embed's query URL as `Referer` to third-party hosts.
+- **Fix:** Restricted entry URL updates to `if (entry && opt.document)`. Updated `/zp/api/script` and `/zp/api/worker-script` to prefer the requesting client context over the mutable `tab.activeEntryId`. The bug lay in the mutated base state rather than the same-origin guard itself.
+- **Verification and residual gap:** Fixing entry selection alone still served Prebid v4; adding the `opt.document` guard restored Prebid v11, ad auctions, and bid requests. **Total CNN frame counts still remained below the control group.** Cross-origin full-URL `Referer` leaks observed in `scratchpad/redir2.mjs` were addressed in the `Referrer-Policy` fix below.
 
-## Referrer-Policy 무시 (2026-08-25) {#referrer-policy}
+## Ignored `Referrer-Policy` headers and attributes (2026-08-25) {#referrer-policy}
 
-- **원인:** 기본 정책뿐 아니라 `no-referrer`, `origin`, `same-origin`, 요소 정책도 무시하고 전체 URL을 보냈다. 금지된 쿼리 정보 유출이며 브라우저와 다른 신호였다. Go의 프록시 `no-referrer`가 타깃 정책을 항상 덮는다는 우려는 실측으로 기각됐다.
-- **수정:** `refererForPolicy`에 8개 정책과 강등 처리를 구현하고 전체 URL에서도 자격증명·fragment를 제거. 정책 우선순위는 페이지 명시값→브라우저 계산값→entry의 응답 헤더→기본값. 페이지 fetch의 프록시 요청 정책은 타깃 계산값이 아니므로 prelude가 `init.referrerPolicy`를 전달한다.
-- **당시 검증·후속:** 여러 subresource 종류에서 기본/네 정책 및 요소 예외가 대조군과 일치했고 CNN prebid 무회귀. meta-only 페이지 fetch와 최상위 자기 Referer는 당시 남았으나 8/26 별도 항목에서 수정·검증됐다. CNN 전체 해결은 아니다.
+- **Cause:** The proxy ignored both the default referrer policy and explicit `no-referrer`, `origin`, `same-origin`, and element-level policies, sending full URLs across origins. That leaked sensitive query parameters and diverged from browser behavior. The concern that Go's proxy-level `no-referrer` header always overwrote target policies was disproved by measurement.
+- **Fix:** Implemented all 8 referrer policies and HTTPS-to-HTTP downgrade rules in `refererForPolicy`, stripping credentials and fragments even when sending full URLs. Policy precedence follows: explicit page override, browser-computed request policy, document entry response header, and default policy. Because proxy-bound `fetch` requests carry proxy-origin computed policies, the prelude forwards `init.referrerPolicy` explicitly.
+- **Verification and follow-up:** Matched control-group behavior across subresource types for default, four explicit policies, and element overrides without regressing CNN Prebid. Meta-only page `fetch` policies and top-level self-referential `Referer` headers remained open on August 25 and were fixed on August 26 below. Does not represent full CNN parity.
 
-### nav-matrix 대조군 오염 정정 {#nav-matrix-대조군}
+### Control-group contamination correction in `nav-matrix` {#nav-matrix-control-group}
 
-- **기각된 진단:** 대조군 착지 누락을 옛 러너 계측 결함으로 설명했으나 틀렸다. 수동 재현 및 코드 변경 없는 재실행에서 정상 착지와 재현성 결함 없음이 확인됐다. 남은 미착지는 팝업 차단 등 실제 브라우저 제한이었다.
-- **실제 원인·규칙:** 공유 `--id zp` 데몬에서 CNN 프로브를 동시에 실행해 측정을 오염시켰다. nav-matrix/hole-matrix/rendercheck는 단독 실행하며 다른 인스턴스의 브라우저 조작도 금지한다.
-- **측정 주의:** 옛 주석과 증상 모양만으로 원인을 재사용하지 않는다. `nohup … &`가 부모와 함께 종료돼 생긴 빈 로그도 통과 증거가 아니다.
+- **Refuted diagnosis:** Missing control-group landings were initially blamed on a legacy runner instrumentation bug. Manual reproduction and reruns without code changes confirmed clean landings and reproducible results; the remaining non-landings were genuine browser popup blocks.
+- **Actual cause and rule:** Running a CNN probe concurrently against the shared `--id zp` daemon contaminated the `nav-matrix` measurement. Always run `nav-matrix`, `hole-matrix`, and `rendercheck` exclusively, and never manipulate the shared browser instance from another process.
+- **Measurement rule:** Do not reuse historical root causes based on superficial symptom similarity. Empty log files produced when `nohup ... &` terminates with its parent shell are never proof of a passing run.
 
-## <a id="clients-get-교착"></a>`clients.get` 응답 교착 (2026-08-25, CNN)
+## <a id="clients-get-deadlock"></a>`clients.get` response deadlock (2026-08-25, CNN)
 
-- **원인:** `reportEncodedSize`가 응답 경로에서 resulting client의 `clients.get`을 await했다. client 생성은 응답 커밋을 기다려 순환 대기가 생겼다. SW는 200을 만들었지만 버퍼 문서 iframe만 about:blank에 머물고 load/error도 없었다. await를 타지 않는 스트리밍 경로는 정상이었다.
-- **수정·검증:** **응답 경로에서 `clients.get()`을 await하지 않는다.** 진단 메시지는 비동기 발송하고 `recordEncoded` pull 경로를 사용한다. `static-policy.test.js` 금지 검사 및 영원히 resolve하지 않는 mock으로 응답 완료를 검증했다. 클린 빌드 CNN에서 미응답 문서가 두 번 연속 사라졌으나 전체 CNN 해결을 뜻하지 않는다.
-- **계측 정정:** dist 래퍼는 원본보다 정체를 늘렸고 전역 `self.__ZPNAV_REC`는 동시 요청 기록을 덮었다. “tf-pre-kernelFetch 정지” 진단은 오답이었다. 원본 지표와 비교하고 요청별 레코드를 전달해야 한다.
-- **별도 수정:** 같은 커밋의 transport 데드라인은 기존 Rust 주석에만 있던 caller timeout을 구현했다. 이 교착에서는 발화하지 않아 커널 밖 원인임을 뒷받침했다. 당시 20초 예산은 다음 항목에서 정정된다.
+- **Cause:** `reportEncodedSize` awaited `clients.get(resultingClientId)` on the response path, creating a circular wait because client creation blocks on response commit. Although the Service Worker built a 200 response, buffered document iframes stayed at `about:blank` without firing `load` or `error`. Streaming responses did not hit the `await` and completed normally.
+- **Fix and verification:** **Never `await clients.get()` on the response commit path.** Dispatch diagnostic messages asynchronously and record encoded sizes through the pull stream path. Verified with a `static-policy.test.js` ban and a unit test using a never-resolving `clients.get` mock. Unresponsive document frames disappeared across two consecutive clean-build CNN runs, though this did not resolve all CNN issues.
+- **Instrumentation correction:** The instrumented `dist` wrapper increased contention compared to the uninstrumented bundle, and the global `self.__ZPNAV_REC` overwritten concurrent request records, producing the false `"tf-pre-kernelFetch hang"` diagnosis. Always compare against uninstrumented baselines and pass per-request trace records.
+- **Related fix:** The transport deadline added in the same commit implemented the caller timeout previously only mentioned in Rust comments. The deadline never fired during this deadlock, confirming the hang lived outside the kernel. The initial 20-second budget was revised in the August 26 entry below.
 
-## <a id="자기-referer"></a>최상위 문서의 자기 Referer (2026-08-26)
+## <a id="self-referer"></a>Self-referential `Referer` on top-level documents (2026-08-26)
 
-- **원인:** 부모가 없을 때 `entry.targetUrl`을 참조 base로 삼아 주소창 첫 로드도 자기 URL을 보냈다. 헤더만 읽는 중간 수정은 반대로 링크 클릭 Referer까지 없앴다.
-- **수정·규칙:** navigation의 참조는 `request.headers.get('Referer')`가 아니라 **`request.referrer`**에서 읽고 프록시 라우트를 타깃 URL로 복원한다. 참조가 없으면 보내지 않으며 `about:client`를 URL로 사용하지 않는다.
-- **당시 검증:** 로컬 에코 서버 18211에서 주소창은 Referer 없음, 링크 클릭은 직전 페이지 URL로 대조군과 일치했다. 8/25의 해당 미해결 기록을 대체한다.
+- **Cause:** When no parent entry existed, the Service Worker fell back to `entry.targetUrl` as the referrer base, causing initial address-bar loads to send their own target URL as `Referer`. An intermediate fix that read only the `Referer` request header stripped legitimate link-click referrers instead.
+- **Fix and rule:** Read navigation referrers from **`request.referrer`** rather than `request.headers.get('Referer')` and deproxy routed URLs back to the target URL. Omit `Referer` when `request.referrer` is empty or `about:client`.
+- **Verification at the time:** Verified against local echo server `:18211` that address-bar loads sent no `Referer` while link clicks sent the previous page URL, matching the control group and closing the August 25 gap.
 
-## <a id="meta-referrer"></a>meta 정책이 페이지 fetch에 누락 (2026-08-26)
+## <a id="meta-referrer"></a>Missing `<meta name="referrer">` policy on page `fetch` calls (2026-08-26)
 
-- **원인:** 직접 이미지/스크립트 요청에는 브라우저의 meta 정책 계산값이 왔으나, 페이지 fetch의 `Request.referrerPolicy`에는 문서 정책이 반영되지 않았다. `ZP_REFERRER_POLICY`를 DOMContentLoaded/load/타이머에 보내는 초기 수정도 파싱 중 첫 fetch보다 늦었다.
-- **수정:** 요청 생성 시 `req.referrerPolicy || documentReferrerPolicy()`로 문서를 즉시 읽는다. 메시지는 XHR 등 정책을 전달하지 못하는 경로의 보조로 유지하고 SW는 알려진 정책 토큰만 수락한다.
-- **당시 검증:** meta-only 로컬 fetch에서 `no-referrer`/`origin`/`unsafe-url` 모두 대조군과 일치했다. 8/25의 해당 공백을 대체하며, 임의 문자열의 default fallback을 정책 준수로 오인하면 안 된다.
+- **Cause:** Browser-initiated image and script requests carried the computed `<meta name="referrer">` policy, but page `fetch` calls left `Request.referrerPolicy` empty. Sending `ZP_REFERRER_POLICY` on `DOMContentLoaded`, `load`, or a timer still arrived after early `fetch` calls executed during HTML parsing.
+- **Fix:** Read `req.referrerPolicy || documentReferrerPolicy()` synchronously from the DOM when constructing the request. Keep the async message as a fallback for XHR and other paths that cannot attach request metadata directly, and accept only valid policy tokens in the Service Worker.
+- **Verification at the time:** Local meta-only `fetch` tests matched the control group across `no-referrer`, `origin`, and `unsafe-url`, closing the August 25 gap. Never mistake a default fallback on unrecognized policy strings for actual policy enforcement.
 
-## <a id="csp-스트리밍-정정"></a>정정: 스트리밍도 CSP 헤더 강제 (2026-08-26)
+## <a id="csp-streaming-correction"></a>Correction: streaming responses also enforce CSP headers (2026-08-26)
 
-- **기각된 가설:** “SW 스트리밍 응답은 CSP 헤더가 무시된다”는 `sw.js` 설명은 틀렸다. 당시 taskweaver 기본 `Page.setBypassCSP` 때문에 CSP 전체가 꺼져 있었다.
-- **당시 검증·정정:** meta를 제거한 dist에서 `--enforce-csp` 사용 시 스트리밍 외부 fetch/이미지 및 버퍼 외부 fetch가 차단됐다. 기본 bypass 데몬에서는 허용됐다. 헤더가 정본이고 meta는 헤더 무효의 대안이 아니라 추가 방어라는 정정이다.
-- **측정 규칙:** `taskweaver list`의 `csp_bypassed`를 먼저 확인한다. 강제 시험은 stop 후 `start --enforce-csp`로 새 데몬에서 수행해야 한다. 격리 월드도 페이지 CSP를 받으므로 리라이터를 거치지 않는 fetch/img로 정책만 시험할 수 있다.
+- **Refuted hypothesis:** The comment in `sw.js` claiming that browsers ignore CSP headers on Service Worker streaming responses was wrong. CSP was inactive only because `taskweaver` enabled `Page.setBypassCSP` by default.
+- **Verification and correction:** In a build with `<meta>` CSP removed, running with `--enforce-csp` blocked both streaming external fetches/images and buffered external fetches, whereas the default bypass daemon allowed them. The HTTP response header is the primary enforcement mechanism, and `<meta>` CSP is defense-in-depth rather than a workaround for ignored headers.
+- **Measurement rule:** Check `csp_bypassed` in `taskweaver list` before testing CSP. Stop the daemon and start a fresh instance with `start --enforce-csp` for enforcement tests. Because isolated worlds still obey page CSP, raw `fetch` or `<img>` probes in an isolated world test CSP enforcement without rewriter interference.
 
-## <a id="transport-데드라인-실측"></a>데드라인은 H1 응답 전체를 제한 (2026-08-26)
+## <a id="transport-deadline-measurement"></a>Transport deadline bounds the entire HTTP/1.1 response (2026-08-26)
 
-- **원인·정정:** `1bcae09`의 `kernelFetch` 데드라인은 단순 TTFB 제한이 아니다. 헤더 즉시 resolve하는 스트리밍은 HTTP/2의 `finish_h2_response` 경로뿐이며 HTTP/1.1은 본문 완료까지 기다려 느린 정상 전송도 예산에 걸렸다.
-- **수정·당시 검증:** 로컬 지연 헤더/느린 본문/침묵 상류로 확인했다. 20초가 정상 본문을 504로 잘라 90초로 늘렸고 느린 본문 완료와 침묵 상류의 유한 종료를 확인했다. 목적은 느린 다운로드 금지가 아니라 무한 대기 방지였다.
-- **당시 미해결:** H1 헤더 수신 통지 없이는 TTFB 기준으로 짧게 제한할 수 없다. JS timeout은 Rust future를 취소하지 않아 요청이 커널에 남는다. 사용자 코드는 `TARGET_CONNECT_FAILED`여서 연결 거절과 같고 refusalLog의 `TRANSPORT_DEADLINE`만 구분한다.
+- **Cause and correction:** The `kernelFetch` deadline introduced in `1bcae09` was not a time-to-first-byte (TTFB) timeout. Only HTTP/2 (`finish_h2_response`) resolved headers before body completion; HTTP/1.1 buffered the entire response body before resolving, so slow transfers hit the deadline.
+- **Fix and verification:** Tested against local fixtures with delayed headers, slow bodies, and silent upstreams. Raised the budget from 20 seconds (which truncated valid slow bodies with 504) to 90 seconds, confirming that slow downloads completed while silent upstreams still terminated cleanly. The deadline exists to prevent infinite hangs rather than penalize slow downloads.
+- **Unresolved limits at the time:** Bounding TTFB separately required header-arrival notifications in the HTTP/1.1 path (later addressed on September 6). A JS-side timeout did not cancel the underlying Rust future, and user-facing error codes mapped to `TARGET_CONNECT_FAILED` (distinguished only by `TRANSPORT_DEADLINE` in `refusalLog`).
 
-## <a id="request-context-redirect"></a>redirect 경계의 요청 문맥·body view 소실 (2026-09-06)
+## <a id="request-context-redirect"></a>Lost request context and body view across redirect boundaries (2026-09-06)
 
-- **원인:** `bodyU8.buffer`가 subarray 범위를 무시했다. redirect 재귀는 307/308 외 메서드를 모두 GET으로 바꾸고 수동 options 재조립으로 header/referrer 정책을 잃었다. runtime POST는 전달받은 credentials/redirect/mode를 소비하지 않았고 문서 문맥은 비동기 초기화 뒤 가변 active entry에서 읽었다.
-- **수정·규칙:** `transportFetch`가 entry/referrer snapshot·body를 먼저 정규화하고 `transportFetchHop`이 같은 문맥을 유지한다. 301/302의 POST 변환과 303의 GET/HEAD 예외, entity header 제거, cross-origin Authorization 제거, credentials별 Cookie/Set-Cookie, manual/error redirect를 명시했다. page/worker 응답은 native Response를 유지하며 내부 metadata로 URL/type/redirected/clone을 복원한다. decoder 상태는 top-level 설치 호출 전에 선언해 prelude TDZ를 피한다.
-- **실제 검증:** `test/js/request-policy.test.js`의 수정 전 PUT 회귀 실패 및 수정 후 경량 JS 전체 통과. [CI run 34020783071](https://github.com/gosuda/zeroproxy/actions/runs/34020783071)의 Chromium에서 `test/e2e/request-contract.js` 요청 계약 4그룹(method/body, credentials, error/manual, history/referrer)과 직접 egress 검사가 통과했다. **같은 run의 다른 WASM/E1 실패로 전체 CI는 실패**였다.
-- **경계:** 초기 재현은 커널 대체 경량 회귀이지 실사이트 재현이 아니다. 로컬 Rust/Go 컴파일·Chromium은 메모리 부족 정책으로 실행하지 않았다. SW 재시작 복구, PSL/SameSite/partition, 완전한 CORS는 당시 별도 로드맵이며 이 기록으로 해결을 주장하지 않는다. **타깃 direct egress 또는 CSP 완화로 우회하지 않는다.**
+- **Cause:** Reading `bodyU8.buffer` ignored `Uint8Array` subarray offsets and lengths. Recursive redirect handling converted all non-307/308 methods to GET and dropped header and referrer policies when reassembling options manually. Runtime POST requests ignored caller-supplied `credentials`, `redirect`, and `mode`, and resolved document context from the mutable active entry after async initialization.
+- **Fix and rules:** `transportFetch` normalizes the entry/referrer snapshot and byte slice up front, and `transportFetchHop` preserves that context across hops. Implemented exact method transitions (301/302 POST-to-GET conversion, 303 GET/HEAD rules), entity-header stripping on body drop, cross-origin `Authorization` stripping, `credentials`-scoped `Cookie`/`Set-Cookie` handling, and `manual`/`error` redirect modes. Page and worker responses keep a native `Response` while restoring `url`, `type`, `redirected`, and `clone` behavior from internal metadata. Declare decoder state before top-level install calls to avoid prelude TDZ errors.
+- **Verification:** Reproduced the pre-fix PUT regression in `test/js/request-policy.test.js` and passed the full lightweight JS suite after the fix. In Chromium on [CI run 34020783071](https://github.com/gosuda/zeroproxy/actions/runs/34020783071), all four groups in `test/e2e/request-contract.js` (method/body, credentials, error/manual, and history/referrer) plus direct-egress checks passed, though **the overall CI workflow failed due to unrelated WASM/E1 failures in the same run**.
+- **Scope boundary:** Initial reproduction used a lightweight kernel double rather than a live site, and local Rust/Go compilation and Chromium runs were skipped under host memory limits. Service Worker restart recovery, Public Suffix List / `SameSite` / cookie partitioning, and full CORS enforcement remained separate roadmap items. **Never work around request failures by allowing direct target egress or weakening CSP.**
 
-## <a id="pull-stream-lifetime"></a>첫 바이트와 취소를 보존하는 응답 수명 (2026-09-06)
-- **원인:** H1 전체 buffering으로 첫 chunk가 늦었다. H2 codec 종료를 HTTP 종료로 취급하는 우회는 무결성 검증을 생략했고, SW 응답 재생성은 HTML의 완료 promise를 잃었다.
-- **수정:** H1/H2 pull stream·backpressure·Abortable 취소를 공유한다. framing과 압축 검증 완료 후에만 H1 연결을 풀에 반환한다. gzip/deflate는 증분 검증, br/zstd·실행 코드는 bounded buffering. SW 최종 응답 경계에서 EOF/error/cancel까지 waitUntil을 유지한다.
-- **계약:** `X-ZP-Body-Stream`은 본문 수명, `X-ZP-Stream`은 HTML 변환 선택에만 사용하고 모두 페이지 전달 전에 지운다. HEAD/204/304·trailer·잘린 본문·idle cancel 회귀를 CI에서 확인한다.
-- **Response 재생성:** 브라우저가 빈 stream을 노출하더라도 204/205/304를 새 Response로 만들 때는 body를 null로 전달해야 한다.
+## <a id="pull-stream-lifetime"></a>Response lifetime preserving time-to-first-byte and cancellation (2026-09-06)
+- **Cause:** Full-response buffering in HTTP/1.1 delayed the first chunk. Treating HTTP/2 codec completion as HTTP framing completion skipped integrity checks, and reconstructing `Response` objects in the Service Worker dropped the HTML stream completion promise.
+- **Fix:** Unified HTTP/1.1 and HTTP/2 pull streams with backpressure and `Abortable` cancellation. Return HTTP/1.1 connections to the pool only after framing and decompression verification succeed. Verify `gzip` and `deflate` incrementally, keep bounded buffering for `br`, `zstd`, and executable scripts, and hold `event.waitUntil` at the final Service Worker response boundary until EOF, error, or cancellation.
+- **Contract:** Reserve `X-ZP-Body-Stream` for body stream lifetime and `X-ZP-Stream` for progressive HTML transformation, stripping both before delivering the response to the page. CI covers `HEAD`, `204`, `304`, trailers, truncated bodies, and idle cancellation.
+- **Response reconstruction:** Even when the browser exposes an empty `ReadableStream` on incoming `204`, `205`, or `304` responses, pass `null` as the body when constructing a new `Response`.
 
-## <a id="websocket-request-identity"></a>WebSocket handshake의 문서 신원 (2026-09-06)
-- **원인:** WS handshake에 User-Agent/Cookie가 없고 Origin은 요청 문서 대신 WS 서버 기준이었다.
-- **수정:** SW가 검증된 entry의 Origin·고정 browser persona·목적지 jar 쿠키를 초기화 전에 캡처해 커널로 전달한다. 커널은 지정된 헤더만 허용하고 CR/LF/NUL을 거절한다.
-- **검증:** 실제 E2E handshake의 UA·Origin·쿠키와 subprotocol echo/명시 close 결과를 확인한다. 헤더 신원 수정은 원격 anti-bot 통과 보장이 아니다.
-- **Close 경계:** Close frame 직후 yamux FIN을 보내면 Go relay의 양방향 종료가 peer echo를 잘라 1006이 된다. frame을 flush한 뒤 실제 peer Close를 받고 종료한다. peer code/reason만 보고하며 실패·조기 취소는 1006/unclean이다.
-- **검증:** [a484e7b CI](https://github.com/gosuda/zeroproxy/actions/runs/34025734224)에서 WS echo/UA/Origin/Cookie, 정상 1000·명시 3001/finished 종료, 조기 취소 1006/unclean 통과. 같은 run의 H1 첫 chunk는 3.3ms였고 framing·압축 오류·idle cancel 검사도 통과했다.
+## <a id="websocket-request-identity"></a>Document identity on WebSocket handshakes (2026-09-06)
+- **Cause:** WebSocket handshakes omitted `User-Agent` and `Cookie` headers and derived `Origin` from the WebSocket server URL instead of the requesting document.
+- **Fix:** The Service Worker captures the verified document entry's `Origin`, the fixed browser persona `User-Agent`, and destination cookie jar entries before handshake initialization and passes them to the kernel. The kernel allowlists permitted headers and rejects values containing `CR`, `LF`, or `NUL`.
+- **Verification:** Verify `User-Agent`, `Origin`, `Cookie`, subprotocol echoing, and explicit close codes in E2E handshakes. Accurate handshake headers do not by themselves guarantee passing remote anti-bot checks.
+- **Close boundary:** Sending a yamux `FIN` immediately after a WebSocket Close frame caused the Go relay's bidirectional teardown to truncate the peer's Close echo and surface code `1006`. Flush the Close frame first and wait for the peer Close frame before closing the stream, reporting only the peer's code and reason (or `1006` / `wasClean: false` on transport failure or early cancellation).
+- **CI verification:** In [a484e7b CI](https://github.com/gosuda/zeroproxy/actions/runs/34025734224), WebSocket echo, `User-Agent`, `Origin`, `Cookie`, clean `1000` closure, explicit `3001`/`finished` closure, and early-cancel `1006`/unclean closure all passed. In the same run, HTTP/1.1 time-to-first-chunk measured 3.3 ms and framing, decompression error, and idle cancellation tests passed.
 
-## <a id="stream-marker-ownership"></a>상류 헤더가 커널 스트림 표식을 오염 (2026-09-08)
+## <a id="stream-marker-ownership"></a>Upstream headers polluting kernel stream markers (2026-09-08)
 
-- **원인·재현:** 상류 `X-ZP-Body-Stream`을 복사한 뒤 커널이 `1`을 append하면 `untrusted, 1`이 된다. 실제 SW와 공유 응답 정책을 실행한 경량 Node 재현에서 `completeBodyResponse`가 완료 promise 생성과 표식 삭제를 건너뛰었다. 이는 실제 SW 종료·본문 절단을 측정한 결과는 아니다.
-- **수정:** 공통 커널 응답 헤더 복사 경계에서 `X-ZP-Body-Stream`과 `X-ZP-Stream`을 대소문자 무관하게 거절한다. buffered 응답도 위조 표식을 받지 않으며, streaming 응답에는 실제 본문 수명·HTML 여부에 맞춰 커널이 표식을 설정한다.
-- **구별·금지:** HTML 표식만 충돌하면 progressive 분기를 잃지만 정상 body 표식의 완료 추적까지 사라지는 것은 아니다. `includes('1')` 같은 느슨한 판정이나 SW 소비 전 무조건 삭제로 우회하지 않는다.
-- **실제 검증:** [cef5e7d CI](https://github.com/gosuda/zeroproxy/actions/runs/34201550912)에서 buffered Brotli·raw streaming·잘린 본문·progressive HTML의 표식 은폐와 본문/종료 동작이 통과했다.
+- **Cause and reproduction:** Copying an upstream `X-ZP-Body-Stream` header before appending `1` in the kernel produced `untrusted, 1`. In a lightweight Node reproduction running the real Service Worker and shared response policy, `completeBodyResponse` skipped completion promise attachment and marker stripping when the header value was not `'1'`. (This reproduced the logic bug in Node rather than measuring premature Service Worker termination in a live browser.)
+- **Fix:** Reject upstream `X-ZP-Body-Stream` and `X-ZP-Stream` headers case-insensitively at the shared kernel response-header copy boundary. Buffered responses never carry forged markers, and streaming responses set markers strictly from kernel body lifetime and HTML classification.
+- **Distinction and rule:** A forged `X-ZP-Stream` header alone only disables progressive HTML streaming without dropping body completion tracking. Never work around marker collisions with loose substring checks (`includes('1')`) or by stripping markers before the Service Worker consumes them.
+- **Verification:** In [cef5e7d CI](https://github.com/gosuda/zeroproxy/actions/runs/34201550912), marker hiding and body completion passed across buffered Brotli, raw streaming, truncated bodies, and progressive HTML responses.
 
-## <a id="websocket-close-deadline"></a>페이지 Close guard가 실제 연결을 닫지 않았다 (2026-09-08)
+## <a id="websocket-close-deadline"></a>Page Close guard did not close the underlying connection (2026-09-08)
 
-- **원인:** Close frame 뒤 peer 응답을 기다리도록 바꾸면서 무응답 peer의 유한 종료 경로가 사라졌다. 페이지의 30초 guard는 이벤트만 보내고 Rust reader/writer와 SW `streams` 등록을 남겼다.
-- **수정:** SW가 첫 Close부터 30초만 기다린 뒤 `WsClient.abort()`로 기존 `surface_close(1006)`·두 abort handle·terminal callback을 실행한다. 반복 Close는 상한을 연장하지 않으며 정상 peer 응답은 deadline을 지우고 실제 code/reason을 보존한다. page guard와 늦게 도착한 취소된 opening도 abort를 요청한다.
-- **검증:** 실제 SW 코드의 경량 Node 실행에서 수정 전 30초 뒤 drivers 유지/abort 0회, 수정 후 해제/abort 1회/1006 이벤트를 확인했다. 커널 대체 검사는 경량 JS 58/58 통과에 포함된다. [cef5e7d Chromium CI](https://github.com/gosuda/zeroproxy/actions/runs/34201550912)에서는 무응답 peer가 받은 Close 뒤 30,001ms에 실제 upstream TCP EOF·socket close가 각각 한 번 발생했고 페이지의 1006/unclean 종료도 통과했다.
-- **금지:** 열린 소켓의 idle timeout, Close 직후 FIN, 공유 yamux 세션 종료, Rust timer Future race로 대체하지 않는다. SW 중단·타이머 throttling이 있는 환경에서 벽시계 30초 보장을 주장하지 않는다.
+- **Cause:** Waiting for the peer's Close echo before tearing down the stream removed bounded termination when the peer never responded. The page-side 30-second timer only synthesized a local `CloseEvent` while leaving the Rust reader/writer tasks and Service Worker `streams` entry alive.
+- **Fix:** The Service Worker starts a single 30-second deadline on the first Close request and calls `WsClient.abort()` on expiry, invoking `surface_close(1006)`, both abort handles, and the terminal cleanup callback. Repeated `close()` calls do not extend the deadline, whereas a timely peer Close response clears the timer and preserves the peer's status code and reason. Both the page guard and late-arriving cancelled open handshakes trigger `abort()`.
+- **Verification:** Executing the real Service Worker code in a lightweight Node test confirmed that before the fix, drivers remained active with 0 aborts after 30 seconds, and after the fix, streams were released with 1 abort and a `1006` event (included in the 58/58 lightweight JS suite). In [cef5e7d Chromium CI](https://github.com/gosuda/zeroproxy/actions/runs/34201550912), an unresponsive peer observed one upstream TCP EOF and one socket close at 30,001 ms after receiving Close, and the page received `1006` with `wasClean: false`.
+- **Prohibitions:** Never replace the close deadline with an idle timeout on open sockets, an immediate `FIN` after Close, termination of the shared yamux session, or a Rust timer `Future` race. Do not claim hard 30-second wall-clock guarantees in environments that suspend Service Workers or throttle timers.
 
-## <a id="upgraded-socket-eof"></a>무응답 WS fixture가 TCP EOF를 종료로 관측하지 않았다 (2026-09-08)
+## <a id="upgraded-socket-eof"></a>Unresponsive WebSocket fixture did not observe TCP EOF as closure (2026-09-08)
 
-- **실패:** [ec307ee CI](https://github.com/gosuda/zeroproxy/actions/runs/34200315989)의 실제 WASM 12/12와 모듈·receiver·표식 회귀는 통과했으나, WS 검사는 페이지 1006 이후 upstream `close`가 없어 실패했다. 이 결과만으로 커널 취소 실패를 확정하지 않는다.
-- **원인·대조:** Node HTTP upgrade socket은 `allowHalfOpen=true`이며 HTTP의 자동 EOF 정리가 제거된다. 기존 fixture를 직접 실행해 클라이언트 TCP FIN을 보낸 Node probe에서 `readableEnded=true`, `writableEnded=false`, `close=false`였다. close 이벤트만 기록하면 상대가 이미 EOF를 보냈어도 자기 쓰기 half 때문에 실패한다.
-- **수정·검증:** fixture가 `end`를 먼저 기록한 뒤 `socket.end()`로 자기 half를 종료한다. 같은 probe는 `writableEnded=true`, `close=true`로 바뀌었다. E2E의 실제 소켓 종료·30초 대기·한 번 종료 assertion은 유지하고 **상대 TCP EOF 수신** assertion도 추가했다. Close frame에는 계속 응답하지 않으며 타이머나 context teardown으로 성공을 만들지 않는다. [cef5e7d CI](https://github.com/gosuda/zeroproxy/actions/runs/34201550912)에서 TCP EOF·socket close 관측과 전체 E2E 117/117이 통과했다.
+- **Symptom:** In [ec307ee CI](https://github.com/gosuda/zeroproxy/actions/runs/34200315989), all 12 WASM tests and the module, receiver, and stream-marker regressions passed, but the WebSocket close-deadline test failed because the upstream fixture never recorded a `close` event after the page received `1006`. That fixture failure did not mean kernel cancellation failed.
+- **Cause and comparison:** Node HTTP `upgrade` sockets enable `allowHalfOpen=true` and disable automatic EOF teardown. Sending a client TCP `FIN` to the fixture in a standalone Node probe left `readableEnded=true`, `writableEnded=false`, and `close=false`. Recording only `close` events missed the peer's EOF because the fixture kept its own write half open.
+- **Fix and verification:** Updated the fixture to record `end` on the readable stream and call `socket.end()` to close its write half, transitioning the probe to `writableEnded=true` and `close=true`. Preserved the E2E assertions for socket closure, the 30-second wait bound, and single termination while adding an explicit assertion that **the upstream server received the client TCP EOF**. The fixture still withholds WebSocket Close frames and never fabricates passes via fixture timers or context teardown. In [cef5e7d CI](https://github.com/gosuda/zeroproxy/actions/runs/34201550912), both TCP EOF and socket close were observed and all 117/117 E2E tests passed.

@@ -1,17 +1,12 @@
 {
   "__doc": [
-    "srcset 후보 분해 파리티 픽스처. Rust split_srcset_candidates (zp-htmltx) 와",
-    "페이지 realm 의 splitSrcsetCandidates (runtime-prelude) 가 같은 입력에 같은",
-    "분해를 내는지 잰다.",
+    "Parity fixture for `srcset` candidate splitting across Rust `split_srcset_candidates`",
+    "(`zp-htmltx`) and page-realm `splitSrcsetCandidates` (`runtime-prelude`).",
     "",
-    "왜 이게 픽스처여야 하나: srcset 은 'URL 하나'가 아니라 후보 목록이고, 이걸",
-    "쉼표로 자르는 구현이 JS 에 셋 있었다. data: URL 은 본문에 쉼표를 담으므로",
-    "(`;base64,`, `utf8,<svg …>`) 쉼표 분할은 데이터 URL 을 반토막 낸다. 실측:",
-    "뒷조각 `<svg`가 상대 URL 로 오인돼 프록시 경로로 치환됐다(2026-08-21).",
-    "",
-    "candidates 는 [lead, url, tail]. lead 는 URL 앞의 구분자 런(공백/여분 쉼표),",
-    "tail 은 디스크립터(`1x`/`320w`)를 다음 쉼표 직전까지. 이어 붙이면 입력이",
-    "바이트 단위로 복원돼야 한다 — 양쪽 테스트가 그 왕복도 함께 단언한다."
+    "Each candidate entry is `[lead, url, tail]`, where `lead` is the leading whitespace",
+    "and separator run, `url` is the candidate URL token, and `tail` is the descriptor",
+    "(`1x`, `320w`) up to the next candidate separator. Concatenating all triples",
+    "reconstructs the input string byte-for-byte."
   ],
   "cases": [
     {
@@ -203,7 +198,7 @@
     },
     {
       "id": "query-commas-cnn",
-      "__why": "CNN 실측: 이미지 쿼리에 쉼표가 들어 있다(q=h_1080,w_1920,c_fill). 첫 쉼표에서 끊으면 URL 이 반토막 나고 다음 후보와 이어 붙는다 — 400 56건.",
+      "__why": "Image query strings may contain commas (q=h_1080,w_1920,c_fill); splitting at the first comma truncates the URL.",
       "input": "https://media.cnn.com/a.jpg?c=16x9&q=h_1080,w_1920,c_fill 1x, https://media.cnn.com/b.jpg?c=16x9&q=h_2160,w_3840,c_fill 2x",
       "candidates": [
         [
@@ -220,7 +215,7 @@
     },
     {
       "id": "trailing-comma-no-space",
-      "__why": "쉼표가 URL 뒤에 붙었을 때만 구분자다. 붙은 쉼표는 URL 이 아니라 구분자 쪽으로 간다.",
+      "__why": "A comma inside a non-whitespace token is part of the URL; only a trailing comma separates candidates.",
       "input": "a.png,b.png 2x",
       "candidates": [
         [
@@ -232,7 +227,7 @@
     },
     {
       "id": "comma-then-space",
-      "__why": "공백이 뒤따르면 그 쉼표는 후보 구분자다.",
+      "__why": "A comma followed by whitespace terminates the candidate URL and separates candidates.",
       "input": "a.png, b.png 2x",
       "candidates": [
         [

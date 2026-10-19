@@ -1,9 +1,7 @@
-//! Server-side throughput bench for `zp-htmltx::transform`.
+//! Server-side throughput benchmark for `zp-htmltx::transform`.
 //!
-//! Synthetic large HTML fixture (typical mix of scripts / links / imgs /
-//! anchors) to measure end-to-end transform cost. Use after U round to
-//! quantify the helper-chain dedup + per-attribute alloc removal effect,
-//! and to find remaining hot paths via flamegraph/criterion histogram.
+//! Uses a synthetic HTML fixture (scripts, links, images, and anchors) to
+//! measure end-to-end transform cost.
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use zp_htmltx::{transform, TransformOptions};
@@ -34,7 +32,7 @@ fn make_page_with_inline(
             i
         ));
     }
-    // configurable inline scripts (rewriter path — OXC parse hot path)
+    // Configurable inline scripts (rewriter OXC parse hot path).
     for i in 0..n_inline {
         s.push_str(&format!(
             "<script>window.__init_{} = function(){{ var x = 1; var y = x + 2; return y; }};</script>",
@@ -92,8 +90,8 @@ fn bench_large(c: &mut Criterion) {
 }
 
 fn bench_subresource_heavy(c: &mut Criterion) {
-    // imgs + links dominated, exercises proxied_subresource_url + absolute_target_url
-    // hot path (the helpers U round optimized).
+    // Dominated by images and links to exercise `proxied_subresource_url` and
+    // `absolute_target_url`.
     let html = make_page(20, 500, 500, 50);
     let o = opts();
     println!("subresource-heavy fixture size: {} bytes", html.len());
@@ -103,8 +101,8 @@ fn bench_subresource_heavy(c: &mut Criterion) {
 }
 
 fn bench_no_inline_scripts(c: &mut Criterion) {
-    // Same as typical but ZERO inline scripts — isolates the
-    // zp-rewriter::rewrite_script (OXC parse) cost vs the rest.
+    // Same as typical without inline scripts, isolating HTML attribute rewriting
+    // from `zp-rewriter::rewrite_script` (OXC parse).
     let html = make_page_with_inline(50, 30, 100, 200, 0);
     let o = opts();
     c.bench_function("transform_typical_no_inline", |b| {

@@ -1,22 +1,14 @@
-// Listener — ZeroProxy server-side WebTransport gateway (HTTP/3 + QUIC).
+// Listener implements the server-side WebTransport gateway (HTTP/3 over QUIC).
 //
-// Routes a virtual `new WebTransport(target_url)` from a proxied page out
-// to the real target server. Per-session topology:
-//
-//     page realm  ─(virtual WT, SW shim)─►  SW
-//     SW          ─(WT CONNECT to gateway)─►  this listener
-//     listener    ─(outbound WT to target)─►  target origin
-//
-// The listener accepts a single HTTPS CONNECT upgrade on the path
-// configured via `-wt-path` (default `/__zp/wt`). The page-supplied
-// target URL travels in a request header (`X-ZP-WT-Target`) — that way
-// the QUIC ALPN + WebTransport extension is untouched and any future
-// browser-native WT client interoperates without ZP-internal extras.
-//
-// Bidi streams + uni streams + datagrams are forwarded in both
-// directions until either side closes the session. Errors propagate as
-// `SessionErrorCode`s so the page can distinguish gateway failures from
-// target-origin failures.
+// Routes a virtual `new WebTransport(target_url)` session from a proxied page
+// to the target server:
+//   - The page realm opens a WebTransport CONNECT request to this listener on
+//     `-wt-path` (default `/__zp/wt`).
+//   - The target URL is passed via the `X-ZP-WT-Target` request header or the
+//     `?target=` query parameter, preserving standard QUIC ALPN and
+//     WebTransport negotiation.
+//   - Bidirectional streams, unidirectional streams, and datagrams are relayed
+//     in both directions until either side closes the session.
 package wtproxy
 
 import (
@@ -57,11 +49,9 @@ type Config struct {
 	// Path is the URL path on which clients send the WebTransport
 	// CONNECT request. Defaults to "/__zp/wt".
 	Path string
-	// CertFile + KeyFile are the TLS cert/key paths. If both are empty
+	// CertFile and KeyFile are the TLS cert/key paths. If both are empty,
 	// the listener falls back to a self-signed in-memory dev cert
-	// (suitable for local dogfood — browsers WILL reject it unless the
-	// operator imports it into the trust store, but our own client
-	// helper trusts any cert when DevAcceptAnyCert is true).
+	// when AllowInsecureDevCert is true.
 	CertFile string
 	KeyFile  string
 	// AllowInsecureDevCert controls whether the listener will boot when
@@ -69,24 +59,23 @@ type Config struct {
 	// production-style configs to force an explicit cert.
 	AllowInsecureDevCert bool
 	// AllowedTargetOrigins, when non-empty, restricts the set of
-	// `X-ZP-WT-Target` origins that the gateway will dial. Useful for
-	// production hardening — leave empty in dev so dogfood can exercise
-	// arbitrary upstreams.
+	// `X-ZP-WT-Target` origins that the gateway will dial.
 	AllowedTargetOrigins map[string]struct{}
 	// AllowPrivateTargets permits targets that resolve to loopback, private,
-	// link-local or otherwise non-public addresses. The gateway dials
-	// directly — QUIC cannot ride the SOCKS upstream — so it must not reach
-	// more than the HTTP path does: the server enables this only with
-	// `-socks internal`, whose direct dialer reaches those networks too.
+	// link-local, or otherwise non-public addresses. Because QUIC cannot ride
+	// the SOCKS upstream, the gateway dials directly and must not reach more
+	// than the HTTP path does (`-socks internal`).
 	AllowPrivateTargets bool
-	// PageHosts are the hostnames whose pages may open sessions — the
-	// proxy's own page origin, compared without scheme or port.
+	// PageHosts are the hostnames whose pages may open sessions (the
+	// proxy's own page origin, compared without scheme or port).
 	// webtransport-go's default accepts an Origin only when its host equals
-	// the gateway's Host, which the proxy page (another port) never does:
-	// every browser CONNECT was refused. Requests without an Origin
-	// (non-browser clients) pass, as they did under that default.
+	// the gateway's Host, which fails when the proxy page runs on another port.
+	// Requests without an Origin pass unless RequireOrigin is set.
 	PageHosts []string
-	// Logger receives one line per session lifecycle event. nil → log.Default.
+	// RequireOrigin rejects WebTransport CONNECT requests that omit the
+	// Origin header.
+	RequireOrigin bool
+	// Logger receives one line per session lifecycle event. nil defaults to log.Default.
 	Logger *log.Logger
 }
 
@@ -104,7 +93,7 @@ type Listener struct {
 	devHash [sha256.Size]byte
 }
 
-// New builds a Listener but does not yet bind the socket — call Run().
+// New builds a Listener without binding the socket; call Run() to start serving.
 func New(cfg Config) (*Listener, error) {
 	if cfg.Path == "" {
 		cfg.Path = "/__zp/wt"
@@ -191,12 +180,10 @@ func (l *Listener) Close() error {
 	return l.srv.Close()
 }
 
-// handleUpgrade is the CONNECT entry point. It pulls the target URL out
-// of `X-ZP-WT-Target` (preferred — used by host-test / curl-style
-// clients) or `?target=` query string (used by browser `new
-// WebTransport(...)` since the JS API doesn't allow custom request
-// headers), optionally checks the allowlist, dials the target, and
-// bridges the two sessions until either side closes.
+// handleUpgrade handles the WebTransport CONNECT request. It reads the target
+// URL from `X-ZP-WT-Target` or the `?target=` query parameter, validates the
+// target against the allowlist and private-IP policy, dials the upstream
+// target, and bridges both sessions until either side closes.
 func (l *Listener) handleUpgrade(w http.ResponseWriter, r *http.Request) {
 	targetURL := r.Header.Get("X-ZP-WT-Target")
 	if targetURL == "" {
@@ -226,9 +213,8 @@ func (l *Listener) handleUpgrade(w http.ResponseWriter, r *http.Request) {
 	}
 
 	q := r.URL.Query()
-	// `pinned=1` means the page passed `serverCertificateHashes` at all — an
-	// empty or all-malformed list still pins (nothing matches), exactly as
-	// the browser treats it; it must not fall back to CA validation.
+	// `pinned=1` means the page passed `serverCertificateHashes` (even if
+	// empty or malformed), disabling fallback to standard CA validation.
 	pinned := q.Get("pinned") == "1" || len(q["certhash"]) > 0
 	pins := parseCertHashes(q["certhash"])
 	dialTo, err := l.targetAddr(r.Context(), parsed)
@@ -237,24 +223,19 @@ func (l *Listener) handleUpgrade(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// The target is dialed BEFORE the page's session is accepted: a target
-	// that cannot be reached fails the page's CONNECT, so its `ready`
-	// rejects as it would natively (it used to resolve and then close).
-	// The order also lets the target's choice of subprotocol ride back.
+	// Dial the target before accepting the page session so an unreachable
+	// target fails the CONNECT handshake and propagates subprotocol selection.
 	tlsCfg := &tls.Config{NextProtos: []string{"h3"}, ServerName: parsed.Hostname()}
 	if pinned {
-		// The page pinned the TARGET by hash. The browser would accept
-		// exactly that certificate — no chain, no name — so the gateway does
-		// the same; without pins the system roots verify as usual.
+		// When the page pins the target by hash, verify the leaf certificate
+		// against those hashes instead of system roots or hostname checks.
 		tlsCfg.InsecureSkipVerify = true
 		tlsCfg.VerifyPeerCertificate = func(raw [][]byte, _ [][]*x509.Certificate) error {
 			return verifyPinned(raw, pins, time.Now())
 		}
 	}
-	// ★webtransport-go 는 DATAGRAM 지원이 없는 QUIC 설정으로는 Dial 을
-	// 거부한다("DATAGRAM support required"). 이 두 필드가 빠져 있어서 게이트웨이는
-	// **어떤 타깃에도** 붙지 못했다 — 데이터 경로 테스트가 하나도 없어서 D4 가
-	// "end-to-end" 로 닫힌 채 몰랐다(2026-09-29, TestGatewayBridgesToRealTarget).
+	// webtransport-go requires EnableDatagrams and EnableStreamResetPartialDelivery
+	// on the outbound QUICConfig.
 	dialer := &webtransport.Dialer{
 		TLSClientConfig: tlsCfg,
 		QUICConfig: &quic.Config{
@@ -262,8 +243,8 @@ func (l *Listener) handleUpgrade(w http.ResponseWriter, r *http.Request) {
 			EnableDatagrams:                  true,
 			EnableStreamResetPartialDelivery: true,
 		},
-		// Dial the address that passed the private-target check — a second
-		// lookup inside the dialer could answer differently (DNS rebinding).
+		// Dial the pre-vetted address directly to prevent DNS rebinding between
+		// targetAddr validation and connection establishment.
 		DialAddr: func(ctx context.Context, _ string, tc *tls.Config, qc *quic.Config) (*quic.Conn, error) {
 			return quic.DialAddrEarly(ctx, dialTo, tc, qc)
 		},
@@ -371,10 +352,9 @@ func pumpBidi(ctx context.Context, src, dst *webtransport.Session, logger *log.L
 			logger.Printf("wtproxy %s: open: %v", tag, err)
 			return
 		}
-		// ★스트림은 방향별로 따로 닫힌다(half-close). 예전에는 먼저 끝난 방향을
-		// 보고 양쪽을 다 닫아서, 요청을 FIN 으로 끝낸 클라이언트는 타깃의 응답이
-		// 오기도 전에 EOF 를 받았다 — 에코가 빈 문자열이었다. 각 방향은 읽기 쪽
-		// EOF 에서 자기 쓰기 쪽만 닫고, 오류면 상대에게 리셋을 전한다.
+		// Half-close each direction of the bidirectional stream independently so
+		// the client can finish reading the target response after sending a
+		// request FIN.
 		go func() {
 			var cwg sync.WaitGroup
 			cwg.Add(2)
@@ -433,10 +413,9 @@ func pumpDatagrams(ctx context.Context, src, dst *webtransport.Session, logger *
 	}
 }
 
-// CertHashes returns the base64url SHA-256 of the in-memory dev certificate —
-// the `serverCertificateHashes` pin a browser needs to reach this gateway —
-// or nil when the operator configured a real certificate, which browsers
-// validate against their roots as usual.
+// CertHashes returns the base64url SHA-256 of the in-memory dev certificate
+// (the `serverCertificateHashes` pin a browser needs to reach this gateway),
+// or nil when an operator certificate is configured.
 func (l *Listener) CertHashes() []string {
 	if l.devCert == nil {
 		return nil
@@ -444,15 +423,16 @@ func (l *Listener) CertHashes() []string {
 	return []string{base64.RawURLEncoding.EncodeToString(l.devHash[:])}
 }
 
-// pageOriginAllowed admits the proxy's own pages (see Config.PageHosts) and
-// clients that send no Origin; other sites' pages cannot drive the gateway.
+// pageOriginAllowed admits the proxy's own pages (see Config.PageHosts) and,
+// unless RequireOrigin is true, clients that send no Origin; other sites'
+// pages cannot drive the gateway.
 func (l *Listener) pageOriginAllowed(r *http.Request) bool {
 	origin := r.Header.Get("Origin")
 	if origin == "" {
-		return true
+		return !l.cfg.RequireOrigin
 	}
 	u, err := url.Parse(origin)
-	if err != nil {
+	if err != nil || u.Hostname() == "" {
 		return false
 	}
 	for _, h := range l.cfg.PageHosts {
@@ -461,6 +441,10 @@ func (l *Listener) pageOriginAllowed(r *http.Request) bool {
 		}
 	}
 	return false
+}
+
+func (l *Listener) admitsPageOrigin(r *http.Request) bool {
+	return l.pageOriginAllowed(r)
 }
 
 // maxPinnedValidity is the browser's ceiling for a hash-pinned certificate.
@@ -544,7 +528,7 @@ func (l *Listener) targetAddr(ctx context.Context, u *url.URL) (string, error) {
 // selfSignedDevCert returns an in-memory ECDSA P-256 leaf for local dev.
 // Browsers accept a self-signed WebTransport server only through a
 // `serverCertificateHashes` pin, and pin only certificates valid for at
-// most two weeks — so 13 days, and a plain leaf (it signs nothing).
+// most two weeks (13 days here, non-CA leaf).
 func selfSignedDevCert() (tls.Certificate, error) {
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {

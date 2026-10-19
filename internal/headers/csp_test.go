@@ -31,7 +31,7 @@ func TestCSPArmedGolden(t *testing.T) {
 }
 
 // TestCSPDefaultMatchesLegacy pins that BuildCSPWith(zero) equals the legacy
-// BuildCSP signature byte-for-byte — callers that have not opted into
+// BuildCSP signature byte-for-byte: callers that have not opted into
 // CSPOptions see no change.
 func TestCSPDefaultMatchesLegacy(t *testing.T) {
 	legacy := BuildCSP("wss://proxy.example")
@@ -73,8 +73,8 @@ func TestCSPStrictNoWildcards(t *testing.T) {
 
 // TestCSPArmedAddsOnlyChallengeHostToFourDirectives pins that the armed
 // projection adds exactly one origin (https://challenges.cloudflare.com) to
-// exactly four directives (script/frame/child/connect-src) — no wildcards,
-// no nonces, no extra eval, no leakage into style/img/font/media/worker.
+// four directives (script/frame/child/connect-src): no wildcards,
+// no nonces, no extra eval, and no leakage into style/img/font/media/worker.
 func TestCSPArmedAddsOnlyChallengeHostToFourDirectives(t *testing.T) {
 	armed := BuildCSPWith("wss://proxy.example", CSPOptions{ChallengeCompat: true})
 	if got := strings.Count(armed, "https://challenges.cloudflare.com"); got != 4 {

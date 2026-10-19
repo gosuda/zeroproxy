@@ -1,4 +1,4 @@
-//! ZeroProxy HTML transformer. Replaces Go `internal/htmltx`.
+//! ZeroProxy HTML transformer.
 //!
 //! Uses `lol_html` (Cloudflare's streaming HTML rewriter) to:
 //! - rewrite inline `<script>` bodies via `zp-rewriter::rewrite_script` (classic
@@ -8,7 +8,7 @@
 //!   with `ScriptKind::EventHandler`
 //! - in strict mode, fail-closed: a script that fails to parse is replaced
 //!   with a safe `throw new DOMException(...)` (callable from the original
-//!   call sites), and event handler attributes are removed entirely.
+//!   call sites), and event handler attributes are removed.
 
 use lol_html::{doc_text, element, end, html_content::ContentType, text, HtmlRewriter, Settings};
 use std::cell::RefCell;
@@ -29,13 +29,12 @@ pub struct TransformOptions {
     pub target_url: String,
     pub strict: bool,
     /// Emit target scripts as `text/zp-pending` so prelude can execute them
-    /// post-OXC-init. Reserved for Phase B3 foreground bootstrap; currently
-    /// unused (scripts execute inline after rewrite).
+    /// post-OXC-init. Currently unused (scripts execute inline after rewrite).
     pub pending_gate: bool,
     /// Proxy origin (e.g. `http://proxy.localhost:18080`) used to build
     /// absolute SW-routable URLs for subresources. Empty falls back to a
     /// root-relative path, which only works when the page's virtual baseURI
-    /// is not overridden — production callers MUST supply this.
+    /// is not overridden; production callers MUST supply this.
     pub proxy_origin: String,
 }
 
@@ -56,8 +55,6 @@ pub enum TransformError {
 const BLOCKED_SCRIPT: &str =
     "throw new DOMException('Blocked by ZeroProxy rewrite policy','NotSupportedError');";
 
-/// Transform target HTML — rewrites inline scripts and `on*` event handlers
-/// through `zp-rewriter`. In strict mode failures become safe placeholders.
 /// Streaming `Settings` for the attribute / URL pass (Pass 1). Holds the single
 /// `element!("*")` handler that rewrites href/src/action/formaction URLs and
 /// `on*` / `javascript:` handler bodies. Shared by the buffered `transform`
@@ -70,21 +67,14 @@ fn attr_settings(
 ) -> Settings<'static, 'static> {
     let diags_for_attr = diagnostics;
     let target_for_attr = target;
-    // ★`<base href>` 는 그 뒤에 파싱되는 모든 상대 URL 의 기준이 된다.
-    // 지금까지는 무시하고 항상 문서 URL(target)에 대고 풀었다. 실측
-    // (2026-08-21, `/basepage`): `<base href="http://cdn/deep/">` + 
-    // `<img src="rel.png">` 를 대조군은 `cdn/deep/rel.png` 로 가져오는데
-    // 프록시는 **문서 오리진의 `/rel.png`** 를 불렀다 — 오리진도 경로도 틀렸다.
-    // 유출은 아니지만(프록시를 통해 엉뚱한 곳으로 간다) 재현성 결함이다.
-    //
-    // lol_html 은 스트리밍이라 문서 순서대로 온다 — `<head>` 의 `<base>` 가
-    // 본문 서브리소스보다 먼저 도착한다. 명세도 "`<base>` 뒤에 파싱된 것" 에만
-    // 적용하므로 이 순서 의미가 맞다.
+    // `<base href>` sets the base URL for all subsequent relative URLs in document
+    // order. `lol_html` streams in document order, so `<base>` in `<head>` arrives
+    // before body subresources, matching the HTML specification.
     let base_for_attr = Rc::new(RefCell::new(target_for_attr.clone()));
     Settings {
         element_content_handlers: vec![
                 // on* event handler attributes + javascript: URL attributes.
-                // D1: <a href="javascript:CODE">, <form action="javascript:...">,
+                // <a href="javascript:CODE">, <form action="javascript:...">,
                 // <iframe src="javascript:..."> become harmless `javascript:void(0)`
                 // with `data-zp-jsurl` carrying the OXC-rewritten body, executed
                 // later by runtime-prelude's delegated click/submit handler.
@@ -93,9 +83,9 @@ fn attr_settings(
                     // (it normalizes element names). Cache once per element
                     // instead of recomputing inside the per-attribute loop.
                     let tag = el.tag_name();
-                    // `<base href>` 자체는 리라이트하지 않는다 — 페이지 realm 의
-                    // `updateVirtualBase` 가 원본 값을 읽어 가상 base 를 세운다.
-                    // 여기서는 **이후 상대 URL 의 해석 기준**으로만 기억한다.
+                    // Leave `<base href>` untouched in the markup so the page realm's
+                    // `updateVirtualBase` can read the original value, while recording
+                    // the resolved URL as the base for subsequent relative URLs here.
                     if tag == "base" {
                         if let Some(href) = el.get_attribute("href") {
                             let h = href.trim().to_string();
@@ -106,23 +96,12 @@ fn attr_settings(
                             }
                         }
                     }
-                    // ★SRI(`integrity`) 는 반드시 벗겨야 한다.
-                    //
-                    // 우리는 스크립트를 OXC 로 리라이트하고 CSS 도 다시 쓰므로
-                    // 본문이 원본과 다르다. 그러면 브라우저의 SRI 검증이 **항상**
-                    // 실패하고 리소스가 통째로 차단된다. 실측(2026-08-21,
-                    // `/sripage`): 대조군은 실행되는데 프록시에서는 크롬이
-                    // "Failed to find a valid digest in the 'integrity' attribute
-                    // … The resource has been blocked." 를 찍고 스크립트가 안 돌았다.
-                    // CDN 라이브러리에 SRI 를 다는 사이트가 흔해서 영향이 크다.
-                    //
-                    // 페이지 realm 프렐류드는 속성 훅·프로퍼티 훅·스윕 셋 다
-                    // 이 처리를 갖고 있는데 htmltx 에만 없었다 — 그리고 **정적
-                    // HTML 은 스윕으로 못 막는다**: 파서가 스크립트를 가져오는
-                    // 시점이 프렐류드 스윕보다 먼저다.
-                    //
-                    // 원본 값은 프렐류드와 **같은 백업 속성**에 넣는다. 그래야
-                    // 페이지가 `el.integrity` 로 되읽었을 때 자기가 쓴 값이 나온다.
+                    // Strip `integrity` (SRI) and back it up to `data-zp-integrity`.
+                    // Because scripts and stylesheets are rewritten by the proxy, their
+                    // byte contents differ from the original digest and browser SRI checks
+                    // would block the resource at parse time before any page-realm sweep runs.
+                    // Backing up to `data-zp-integrity` lets `el.integrity` return the
+                    // author-supplied value.
                     if matches!(tag.as_str(), "script" | "link") {
                         if let Some(integrity) = el.get_attribute("integrity") {
                             let _ = el.set_attribute("data-zp-integrity", &integrity);
@@ -130,21 +109,12 @@ fn attr_settings(
                         }
                     }
                     let attr_base = base_for_attr.borrow().clone();
-                    // 2026-08-14 — 타깃이 자기 CSP 를 `<meta http-equiv>` 로
-                    // 실어 보내면 그걸 무력화한다.
-                    //
-                    // 응답 헤더의 CSP 는 우리가 `h.set` 으로 교체하지만 meta 는
-                    // 그대로 통과하고 있었다. 그러면 **타깃의 정책이 우리 문서에
-                    // 그대로 적용된다.** NAVER 로그인 페이지에서 실측:
-                    //   Executing inline script violates … 'nonce-XI375…' *.nid.naver.com
-                    //   Evaluating a string as JavaScript violates … 'unsafe-eval' is not allowed
-                    // 즉 그들의 nonce 정책이 **우리가 리라이트한 인라인 스크립트와
-                    // 멤브레인의 eval 경로를 막는다.** 우리는 그들의 nonce 를
-                    // 재현할 수 없으므로 (그리고 재현해서도 안 된다) 이 meta 는
-                    // 반드시 죽여야 한다. 우리 정책이 그 자리를 대신한다.
-                    //
-                    // 삭제 대신 이름만 바꾼다: 페이지 JS 가 자기 CSP 를 읽어
-                    // 확인하는 경우가 있어 값은 남겨 둔다.
+                    // Filter or neutralize target `<meta http-equiv="Content-Security-Policy">`
+                    // tags. Unlike response headers, `<meta>` CSP tags in markup would be enforced
+                    // by the browser alongside the proxy header policy, blocking rewritten inline
+                    // scripts and membrane `eval` calls when the target specifies a nonce or omits
+                    // `'unsafe-eval'`. Original values are preserved in `data-zp-blocked-*` attributes
+                    // for page scripts that inspect the DOM.
                     if tag == "meta" {
                         let equiv = el
                             .get_attribute("http-equiv")
@@ -154,15 +124,11 @@ fn attr_settings(
                         if equiv == "content-security-policy"
                             || equiv == "content-security-policy-report-only"
                         {
-                            // E2: meta CSP 는 헤더 CSP 와 합성 적용이라 살려 둬도
-                            // 엄격화만 가능하다 — filter_meta_csp 가 배관 필수
-                            // 소스를 얹은 교집합을 만들고, 남는 지시어가 없으면
-                            // 예전처럼 무력화한다.
-                            // `get_attribute` is the raw attribute text: entities are not decoded. A
-                            // policy written `default-src &#39;none&#39;; …` (Cloudflare's challenge
-                            // template) was split at the `;` inside `&#39;`, and every quoted source
-                            // list came back as a lone `'` (`invalid source: '''`). Filter what the
-                            // browser would read.
+                            // Intersect the meta CSP with required proxy infrastructure sources via
+                            // `filter_meta_csp`, or strip `http-equiv`/`content` if no directives remain.
+                            // `get_attribute` returns raw attribute text with unescaped HTML entities
+                            // (e.g. `default-src &#39;none&#39;;`), so decode entities before filtering
+                            // to avoid splitting directives on the `;` inside `&#39;`.
                             let content = decode_url_html_entities(&el.get_attribute("content").unwrap_or_default()).into_owned();
                             let _ = el.set_attribute("data-zp-blocked-http-equiv", &equiv);
                             let _ = el.set_attribute("data-zp-blocked-content", &content);
@@ -174,11 +140,8 @@ fn attr_settings(
                                 let _ = el.set_attribute("content", &filtered);
                             }
                         } else if equiv == "origin-trial" {
-                            // `origin-trial`: 토큰은 등록 오리진에 서명된다 —
-                            // 그런데 오리진 트라이얼은 **누구든 아무 오리진이나**
-                            // 등록할 수 있다. 타깃이 proxy 오리진용 토큰을 실어
-                            // 오면 우리 realm 에서 기능이 켜진다. CSP 와 같은
-                            // 이유로 무력화.
+                            // Neutralize `origin-trial` meta tags so a target cannot enable
+                            // origin trials signed for the proxy origin inside our realm.
                             let content = el.get_attribute("content").unwrap_or_default();
                             let _ = el.remove_attribute("http-equiv");
                             let _ = el.set_attribute("data-zp-blocked-http-equiv", &equiv);
@@ -186,41 +149,19 @@ fn attr_settings(
                             let _ = el.remove_attribute("content");
                         }
                     }
-                    // `srcdoc` 문서는 **파싱 시점에 멤브레인 없이** 만들어진다.
-                    // 우리는 여기(서버)에서 srcdoc 안을 변환하지 않았고, 페이지
-                    // realm 의 `injectSrcdoc` 은 JS 로 srcdoc 을 **대입할 때만**
-                    // 걸리므로, 타깃 HTML 에 그대로 박혀 온 srcdoc 은 프렐류드도
-                    // URL 리라이트도 없이 그냥 파싱됐다. 실측: 자식 문서에
-                    // script 0개, `<img src="/img/x.png">` 가 원본 그대로 남아
-                    // 프록시 오리진으로 요청 → SW 가 탭에 귀속시키지 못해
-                    // UNCLASSIFIED 거절(`ref:""`). 교차 오리진이면 CSP 만이
-                    // 유일한 방어선이 된다(실측: 브라우저 직접 요청 0 — 격리는
-                    // 버텼지만 리소스는 전부 실패).
-                    //
-                    // 이름만 옮겨 둔다. 페이지 realm 의 백스톱이 후킹된 `srcdoc`
-                    // 세터로 되돌리고, 그 경로가 이미 프렐류드 주입 +
-                    // transformHTML 을 한다 — 검증된 코드를 재사용하는 쪽이
-                    // Rust 에 HTML 변환을 한 벌 더 만드는 것보다 안전하다.
+                    // Move `srcdoc` to `data-zp-srcdoc` so the browser parser does not
+                    // instantiate an uninstrumented child document before the page-realm
+                    // hook runs. The page-realm backstop re-applies the value through the
+                    // hooked `srcdoc` setter, which injects the prelude and transforms the HTML.
                     if (tag == "iframe" || tag == "frame") && el.has_attribute("srcdoc") {
                         let doc = el.get_attribute("srcdoc").unwrap_or_default();
                         let _ = el.set_attribute("data-zp-srcdoc", &doc);
                         let _ = el.remove_attribute("srcdoc");
                     }
-                    // `<iframe src>` 도 같은 이유로 이름을 옮긴다.
-                    //
-                    // 서브리소스 리라이트 목록에 iframe/frame 이 없어서 마크업에
-                    // 박혀 온 절대 URL 이 **그대로 남았다**. 파서가 그걸 보고
-                    // 타깃 오리진으로 직접 프레임을 띄우려 하고, 지금까지는
-                    // `frame-src 'self'` 가 막아 줬을 뿐이다 — 구멍 매트릭스
-                    // 용어로 `csp-only`. (실측: CSP 를 켜면 frame-src 차단
-                    // 1건, 끄면 shopsquare.naver.com 으로 실제 요청이 나간다.)
-                    //
-                    // 서브리소스처럼 `/zp/api/fetch?url=` 로 바꾸면 안 된다.
-                    // 그 경로는 문서 파이프라인이 아니라 프렐류드가 주입되지
-                    // 않은 **멤브레인 없는 문서**를 만든다. 프레임은 share 경로로
-                    // 활성화해야 하는데 그건 세션 상태가 필요하므로 여기서는
-                    // 이름만 옮기고 페이지 realm 이 기존 세터 경로로 되돌린다 —
-                    // srcdoc 과 같은 전략이고, 검증된 코드를 재사용한다.
+                    // Move `iframe`/`frame` `src` to `data-zp-frame-src`. Rewriting frame `src`
+                    // to `/zp/api/fetch?url=` would bypass the document pipeline and create a
+                    // frame without the prelude membrane. The page realm activates the frame
+                    // through the share route using its session state.
                     if tag == "iframe" || tag == "frame" {
                         if let Some(src) = el.get_attribute("src") {
                             let t = src.trim();
@@ -230,25 +171,9 @@ fn attr_settings(
                             }
                         }
                     }
-                    // `ping` 은 클릭 시 브라우저가 **직접** POST 하는 추적 비콘
-                    // 목록이다(공백 구분 URL 여러 개). 우리는 이걸 지원하지
-                    // 않기로 했는데(README: 통과시키는 것 자체가 목적에 반한다),
-                    // 지금까지는 **리라이트가 놓치고 CSP 만 막고 있었다** —
-                    // 구멍 매트릭스에서 유일한 `csp-only` 칸이었다. CSP 는 2선
-                    // 방어지 1선이 아니므로, 속성 자체를 걷어내 브라우저가
-                    // 애초에 요청을 만들지 않게 한다. 값은 진단용으로 남긴다.
-                    // ★`<meta http-equiv="refresh" content="0;url=…">` — 이건
-                    // 서브리소스가 아니라 **최상위 내비게이션**이다. 리라이트를
-                    // 놓치면 브라우저가 타깃 오리진으로 문서째 이동한다 = 감옥
-                    // 탈출(실제 IP 유출). CSP 로도 못 막는다 — `navigate-to` 는
-                    // 표준에서 빠졌고 `form-action` 은 폼에만 걸린다.
-                    //
-                    // 실측(2026-08-20, 픽스처): 프록시로 연 문서가 meta refresh
-                    // 하나로 `127.0.0.1:18098` 로 이동했고 타깃 서버에 요청이
-                    // 도착했다. 지금까지 매트릭스에 이 칸이 없어서 안 보였다.
-                    //
-                    // `content` 는 `<delay>[;[ ]url=<url>]` 문법이다. URL 부분만
-                    // share 경로(`?via=`)로 바꾼다 — 앵커/폼과 같은 처리다.
+                    // `<meta http-equiv="refresh" content="0;url=...">` triggers a top-level
+                    // navigation that CSP cannot block. Rewrite the `url=` target to the
+                    // proxy `?via=` navigation route.
                     if tag == "meta" {
                         let is_refresh = el
                             .get_attribute("http-equiv")
@@ -268,17 +193,18 @@ fn attr_settings(
                             }
                         }
                     }
+                    // Strip `ping` hyperlink auditing attributes so the browser never issues
+                    // direct background POST beacons on click; preserve the value in
+                    // `data-zp-blocked-ping` for diagnostics.
                     if tag == "a" || tag == "area" {
                         if let Some(ping) = el.get_attribute("ping") {
                             let _ = el.set_attribute("data-zp-blocked-ping", &ping);
                             let _ = el.remove_attribute("ping");
                         }
                     }
-                    // Lazy filter: only snapshot attributes we actually care about
+                    // Lazy filter: only snapshot attributes we care about
                     // (URL-bearing href/src/action/formaction or on* handlers).
-                    // Avoids cloning ALL attributes on the vast majority of
-                    // elements that have neither (div, span, p, td, …) — saves
-                    // ~1000+ (String, String) tuple allocations per typical page.
+                    // Avoids cloning all attributes on elements that have neither.
                     // Attribute names from lol_html are already lowercase for HTML.
                     let attrs_snapshot: Vec<(String, String)> = el
                         .attributes()
@@ -286,10 +212,6 @@ fn attr_settings(
                         .filter_map(|a| {
                             let name = a.name();
                             let lower_view = name.as_str();
-                            // `srcset`/`imagesrcset` must be here too — the lazy
-                            // filter is what decides which attributes the rewrite
-                            // loop below can even see. Leaving them out is why
-                            // `<source srcset>` shipped raw target URLs.
                             let is_url_attr = matches!(
                                 lower_view,
                                 "href"
@@ -316,8 +238,7 @@ fn attr_settings(
                     for (name, value) in attrs_snapshot {
                         let lower = name.as_str();
                         let is_on_handler = lower.starts_with("on") && lower.len() > 2;
-                        // 위 lazy filter 와 **같은 목록**이어야 한다. 두 곳이
-                        // 갈라지면 스냅샷은 됐는데 여기서 걸러져 조용히 누락된다.
+                        // Must match the attribute list in the lazy filter above.
                         let is_url_attr = matches!(
                             lower,
                             "href"
@@ -336,24 +257,16 @@ fn attr_settings(
                             continue;
                         }
                         if is_url_attr {
-                            // lol_html 2.x's `Attribute::value()` returns the
-                            // raw attribute body — HTML entities (`&amp;`,
-                            // `&lt;`, …) stay literal. Wikipedia's stylesheet
-                            // href is `https://…/load.php?lang=en&amp;modules=…`;
-                            // percent-encoding `&amp;` produces a URL the
-                            // upstream server interprets as `&amp;modules=…`
-                            // (literal `&amp;` key) → empty response → blank
-                            // page. Decode the named entities every URL
-                            // realistically carries before further processing.
-                            // Cow::Borrowed in the common case (no `&` in URL)
-                            // → zero allocation on every subresource.
+                            // `lol_html` 2.x `Attribute::value()` returns raw attribute text
+                            // with literal HTML entities (`&amp;`, `&lt;`, etc.). Decode
+                            // entities before percent-encoding so `&amp;` in query strings is
+                            // not double-encoded into `%26amp%3B`. Returns `Cow::Borrowed`
+                            // when no `&` is present.
                             let decoded = decode_url_html_entities(&value);
                             let trimmed = decoded.trim_start();
                             if !starts_with_ascii_ci(trimmed, "javascript:") {
-                                // Absolute URL on subresource tags must be
-                                // rewritten to a same-origin SW route — the
-                                // strict CSP would otherwise block external
-                                // origins before the SW gets to intercept.
+                                // Subresource URLs must be rewritten to a same-origin SW route
+                                // so strict CSP does not block external origins before SW interception.
                                 let is_subresource = matches!(
                                     (tag.as_str(), lower),
                                     ("link", "href")
@@ -364,96 +277,47 @@ fn attr_settings(
                                         | ("audio", "src")
                                         | ("track", "src")
                                         | ("embed", "src")
-                                        // ★2026-08-21 — `object[data]` 도 리라이트한다.
-                                        // "로드를 허용하는가"(정책: `object-src 'none'` 으로
-                                        // **금지**)와 "원본 URL 이 DOM 에 남아도 되는가"(위생:
-                                        // **안 된다**)는 다른 질문이다. 리라이트해도 plugin 표면은
-                                        // 그대로 막힌다 — CSP 는 URL 이 무엇이든 object 로드를
-                                        // 거부하므로, 바뀌는 것은 위반 메시지에 찍히는 URL 이
-                                        // 프록시 경로가 된다는 것뿐이다.
-                                        //
-                                        // 페이지 realm(`isURLBearing`)은 이미 이렇게 하고 있었고
-                                        // htmltx 만 안 하고 있었다. 정적 cross-origin 칸이 없어서
-                                        // 안 보였다 — 매트릭스에 `a23-static-object-cross` 를
-                                        // 넣자마자 `csp-only` 로 찍혔다.
+                                        // Rewrite `object[data]` so raw target URLs do not remain in
+                                        // the DOM; actual plugin loading remains blocked by CSP `object-src 'none'`.
                                         | ("object", "data")
-                                        // 2026-08-20 — 매트릭스에 파싱 시점 칸을 채워
-                                        // 넣고 나서 드러난 자리들. 전부 이 (tag, attr)
-                                        // 목록에 조합이 없어 원본 URL 이 그대로 나갔다
-                                        // (CSP 만 막고 있던 자리 = csp-only).
-                                        // `<input type=image src>` 는 진짜 이미지 요청을
-                                        // 내고, `<image>` 는 파서가 img 로 만들지만
-                                        // 토크나이저가 보는 이름은 image 라 목록을 비껴갔다.
+                                        // `<input type=image src>` and `<image>` (tokenized as `image`
+                                        // before the parser normalizes it to `img`) issue image requests.
                                         | ("input", "src")
                                         | ("image", "src")
                                         | ("image", "href")
                                         | ("image", "xlink:href")
                                         | ("use", "href")
                                         | ("use", "xlink:href")
-                                        // SVG `<script href>`/`<script xlink:href>` —
-                                        // HTML script 와 달리 SVG 스크립트는 src 가 아니라
-                                        // href 로 로드된다. 이 쌍이 없으면 실행 가능한
-                                        // 외부 스크립트가 원본 URL 로 직접 나간다.
+                                        // SVG `<script>` loads external scripts via `href` / `xlink:href`.
                                         | ("script", "href")
                                         | ("script", "xlink:href")
-                                        // SVG 필터의 이미지 입력. `<image>` 와 같은 부류다.
                                         | ("feimage", "href")
                                         | ("feimage", "xlink:href")
                                         | ("video", "poster")
-                                        // 레거시 background 속성 — 크롬이 아직 요청을 낸다.
                                         | ("body", "background")
                                         | ("table", "background")
                                         | ("td", "background")
                                         | ("th", "background")
                                         | ("tr", "background")
                                 );
-                                // Anchor / form / input / button URL attributes.
-                                // Previously left raw because the runtime-prelude
-                                // click handler intercepts normal left-clicks.
-                                // BUG (2026-06-06): the raw `<a href="https://target/...">`
-                                // still surfaces in browser-native UI:
-                                //   - hover → status bar shows target host
-                                //   - middle-click / ctrl-click → new tab navigates
-                                //     directly to target → real IP leak
-                                //   - target="_blank" → same as above
-                                //   - right-click → "open in new tab" /
-                                //     "copy link address" → same leak
-                                // Rewrite to a proxy-origin "via" URL so every
-                                // browser-native vector stays inside the proxy.
-                                // `data-zp-target-url` carries the absolute target
-                                // for the prelude click handler's fast path
-                                // (`clickNavigationTarget` already prefers it).
+                                // Rewrite anchor / form / input / button navigation URLs to a
+                                // proxy-origin `?via=` URL so browser-native UI actions (hover
+                                // status bar, middle-click, ctrl-click, `target="_blank"`, context
+                                // menu open/copy) stay inside the proxy. `data-zp-target-url`
+                                // stores the resolved target URL for the prelude click handler's
+                                // fast path.
                                 let is_navigation = matches!(
                                     (tag.as_str(), lower),
                                     ("a", "href")
-                                        // SVG `<a xlink:href>` — 같은 앵커,
-                                        // 다른 속성 이름.
                                         | ("a", "xlink:href")
                                         | ("area", "href")
                                         | ("form", "action")
                                         | ("input", "formaction")
                                         | ("button", "formaction")
                                 );
-                                // 2026-08-14 — `srcset` / `imagesrcset` 도 서브리소스다.
-                                //
-                                // 목록에 `("source","src")` 는 있는데 `srcset` 이 없었다.
-                                // NAVER 로그인의 소셜 아이콘이 정확히 이 형태다:
-                                //   <picture><source srcset="https://ssl.pstatic.net/…svg"
-                                //            media="(prefers-color-scheme: dark)">
-                                // 원본 URL 이 그대로 남아 CSP `img-src 'self'` 에 걸려
-                                // 차단됐다(`--enforce-csp` 로 처음 관측). 값이 콤마 구분
-                                // 후보 목록이라 단일 URL 리라이터를 그대로 못 쓴다.
-                                // 2026-08-14 — `style` **속성** 안의 `url()` 도 CSS 다.
-                                //
-                                // 인라인 `<style>` 요소는 앞서 닫았는데 속성 쪽은
-                                // 그대로였다. naver.com 실측: `<div style="…
-                                // background-image: url(https://s.pstatic.net/…)">`
-                                // 가 원본 URL 로 남아 `img-src 'self'` 에 걸렸다.
-                                //
-                                // 속성 값은 스타일시트가 아니라 **선언 목록**이라
-                                // 그대로 파싱되지 않는다. `a{…}` 로 감쌌다가 벗긴다.
-                                // `rewrite_css` 는 span 기반 치환이라 나머지 바이트를
-                                // 그대로 보존하므로 이 감쌌다 벗기기가 안전하다.
+                                // Inline `style` attributes contain a CSS declaration list rather
+                                // than a full stylesheet; wrap in `a{...}` for `rewrite_css` and
+                                // strip the wrapper afterward.
                                 if lower == "style" {
                                     let wrapped = format!("a{{{}}}", trimmed);
                                     let res = zp_css::rewrite_css(
@@ -469,8 +333,8 @@ fn attr_settings(
                                             .and_then(|s| s.strip_suffix('}'))
                                         {
                                             if inner != trimmed {
-                                                // 리터럴 stash — getAttribute('style')
-                                                // 은 작성자 원문을 돌려줘야 한다.
+                                                // Stash the author literal so `getAttribute('style')`
+                                                // returns the original text.
                                                 let _ = el.set_attribute(
                                                     &format!("data-zp-lit-{lower}"),
                                                     &decoded,
@@ -502,24 +366,13 @@ fn attr_settings(
                                     continue;
                                 }
                                 if is_subresource {
-                                    // ★2026-09-29 — 모듈 스크립트는 **URL 에 kind 를 싣는다.**
-                                    //
-                                    // SW 는 `destination: script` 요청이 classic 인지 module 인지
-                                    // 요청만 보고는 알 수 없다 — `crossorigin` 붙은 classic 과
-                                    // module 은 mode·credentials·헤더가 전부 같다. 그래서
-                                    // `/zp/api/fetch?url=` 로 온 스크립트는 전부 classic 으로
-                                    // 리라이트됐고, classic 전용 R1 렉시컬 레지스트리 프롤로그가
-                                    // 모듈에 붙었다. GitHub 실측: `high-contrast-cookie` 와
-                                    // `global-banner-disable` 은 둘 다 import/export 없이
-                                    // top-level `let e` 만 가진 모듈이다. 네이티브에선 모듈마다
-                                    // 스코프가 따로라 무해한데, 프록시에선 둘째가
-                                    // "Identifier 'e' has already been declared" 로 죽었다.
-                                    // `parse_for_kind` 는 import/export 가 있어야 모듈을 알아본다.
-                                    //
-                                    // 형태는 정적 `import` 와 importmap 이 쓰는 정규형 그대로다 —
-                                    // 한 모듈이 두 URL 이 되면 모듈 맵에 두 벌이 올라간다
-                                    // (15-scripts-css.js `scriptProxyPath` 주석의 React #321).
-                                    // `modulepreload` 도 같은 URL 이어야 import 가 그것을 쓴다.
+                                    // Encode module script kind into the proxy URL (`/zp/api/script?u=...&kind=module`).
+                                    // A Service Worker cannot distinguish module scripts from `crossorigin`
+                                    // classic scripts by request headers or mode alone, and `parse_for_kind`
+                                    // only detects module syntax when `import`/`export` tokens are present.
+                                    // Using the same canonical URL shape as static `import` and `importmap`
+                                    // also ensures `modulepreload` and module imports share a single module
+                                    // map entry.
                                     let module_fetch = match (tag.as_str(), lower) {
                                         ("script", "src") => el
                                             .get_attribute("type")
@@ -541,28 +394,22 @@ fn attr_settings(
                                         )
                                     };
                                     if let Some(next) = next {
-                                        // An icon link never carries a fetchable URL: the parser reports the icon
-                                        // to the browser as it inserts the element, before the prelude's observer
-                                        // can hide it, and the tab-icon download then went to the target (the
-                                        // e2e `favicon masking` flake). The target stays readable through the
-                                        // stashes below, which is what the membrane serves.
+                                        // Replace icon link `href` with an inert data URI so the browser
+                                        // parser does not initiate a direct tab-icon download before the
+                                        // prelude observer runs. The original URL remains readable via
+                                        // the stashes below.
                                         let icon = tag.as_str() == "link"
                                             && lower == "href"
                                             && el.get_attribute("rel").is_some_and(|r| is_icon_link_rel(&r));
                                         let _ = el.set_attribute(&name, if icon { HIDDEN_ICON_HREF } else { &next });
-                                        // 리터럴 stash — getAttribute('src') 가
-                                        // 절대 URL 이 아니라 작성자 원문을 돌려주도록.
+                                        // Stash the author literal so `getAttribute` returns the unrewritten value.
                                         let _ = el.set_attribute(
                                             &format!("data-zp-lit-{lower}"),
                                             &decoded,
                                         );
-                                        // Stash the original absolute URL so the runtime-
-                                        // prelude can return it when target code reads
-                                        // `script.src` / `link.href` / etc. Without this,
-                                        // webpack's automatic publicPath detection (which
-                                        // strips `?` query from `currentScript.src`) reduces
-                                        // the proxy URL to `/zp/api/` and all chunk loads
-                                        // 404 — observed on github.com.
+                                        // Stash the resolved absolute URL so the runtime-prelude can
+                                        // return it when target code reads `script.src` or `link.href`
+                                        // (e.g. webpack's automatic `publicPath` detection from `currentScript.src`).
                                         if matches!(tag.as_str(), "script" | "link") {
                                             if let Some(abs) =
                                                 absolute_target_url(trimmed, &attr_base)
@@ -658,12 +505,12 @@ fn attr_settings(
         }
 }
 
-/// Transform target HTML — rewrites inline scripts and `on*` event handlers
+/// Transform target HTML: rewrites inline scripts and `on*` event handlers
 /// through `zp-rewriter`. In strict mode failures become safe placeholders.
 ///
 /// Thin wrapper over the streaming [`HtmlTxn`]: it feeds the whole document as a
-/// single chunk, so the buffered and streaming paths share ONE implementation
-/// (no chance of divergence). `HtmlTxn`'s host test pins chunk-invariance.
+/// single chunk, so the buffered and streaming paths share one implementation.
+/// `HtmlTxn`'s host test pins chunk-invariance.
 pub fn transform(html: &str, opts: &TransformOptions) -> Result<TransformResult, TransformError> {
     let mut txn = HtmlTxn::new(opts, String::new());
     let mut out = txn.write(html.as_bytes())?;
@@ -677,9 +524,9 @@ pub fn transform(html: &str, opts: &TransformOptions) -> Result<TransformResult,
 
 /// Streaming `Settings` for the inline-script-body pass (Pass 2). Rewrites
 /// `<script>` bodies via `zp-rewriter`. When `prelude` is non-empty it is
-/// prepended right after the `<head>` start tag as raw HTML — lol_html does NOT
-/// re-tokenize inserted content, so our own bootstrap `<script>`s are never
-/// script-rewritten. Shared by the buffered `transform` path and [`HtmlTxn`].
+/// prepended into the document as raw HTML; `lol_html` does NOT re-tokenize
+/// inserted content, so bootstrap `<script>` tags are never script-rewritten.
+/// Shared by the buffered `transform` path and [`HtmlTxn`].
 fn script_settings(
     target_url: String,
     proxy_origin: String,
@@ -699,20 +546,12 @@ fn script_settings(
     let buf_for_end = current_buffer.clone();
     let target_for_end = target.clone();
     // Dynamic-import URLs inside inline scripts must be proxy-origin absolute
-    // (see RewriteOpts::proxy_origin) — the end handler rewrites those too.
+    // (see RewriteOpts::proxy_origin); the end handler rewrites those too.
     let origin_for_end = proxy_origin.clone();
     let diags_for_end = diags.clone();
-    // 2026-08-14 — 인라인 `<style>` 의 CSS 도 리라이트한다.
-    //
-    // 외부 스타일시트는 SW 의 `rewriteCSSResponse` 가 처리하는데 문서 안에
-    // 인라인으로 박힌 CSS 는 아무도 안 건드리고 있었다. `--enforce-csp` 로 CSP 를
-    // 실제로 켜자 드러났다: `@font-face { src: url(https://wtm.pstatic.net/fonts/
-    // ncap-probe-*.woff2) }` 가 원본 URL 로 남아 `font-src 'self'` 에 걸린다.
-    // (initiator 가 `parser` 인데 문서 HTML 에서 URL 이 안 나오면 인라인 CSS 를
-    // 의심할 것 — CSSOM 조회로는 다른 프레임의 것을 못 본다.)
-    //
-    // 스크립트와 같은 방식으로 텍스트 노드를 모았다가 `last_in_text_node` 에서
-    // 한 번에 리라이트한다. 청크 단위로 파싱하면 규칙이 중간에 잘린다.
+    // Buffer inline `<style>` text nodes and rewrite embedded URLs (such as
+    // `@font-face` `src: url(...)`) at `last_in_text_node` so CSS rules are not
+    // split across streaming chunks.
     let style_buffer: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new()));
     let style_buf_for_text = style_buffer.clone();
     let style_target = target.clone();
@@ -727,11 +566,9 @@ fn script_settings(
                     }
                     let kind = match el.get_attribute("type").as_deref() {
                         Some(t) if is_module_type(&t) => Some(InlineKind::Script(ScriptKind::Module)),
-                        // `<script type="importmap">` / `speculationrules` carry
-                        // JSON, not code — the JSON still embeds URLs that the
-                        // browser would fetch directly (module resolution,
-                        // prefetch/prerender), so they go through the JSON URL
-                        // rewriter instead of the script rewriter.
+                        // `<script type="importmap">` and `speculationrules` carry
+                        // JSON rather than executable code; rewrite their embedded URLs
+                        // through the JSON URL rewriters instead of the JS rewriter.
                         Some(t) if t.trim().eq_ignore_ascii_case("importmap") => Some(InlineKind::Importmap),
                         Some(t) if t.trim().eq_ignore_ascii_case("speculationrules") => Some(InlineKind::Speculationrules),
                         Some(t) if !t.is_empty() && !is_javascript_type(t) => None,
@@ -746,23 +583,14 @@ fn script_settings(
                     if chunk.last_in_text_node() {
                         let css = style_buf_for_text.borrow().clone();
                         style_buf_for_text.borrow_mut().clear();
-                        // 파서가 실패하면 `rewrite_css` 가 원본을 그대로 돌려준다
-                        // (외부 스타일시트 경로와 동일한 fail-open). CSS 는 실행
-                        // 가능한 코드가 아니라 URL 참조만 문제이므로, 여기서
-                        // fail-closed 로 가면 멀쩡한 페이지의 스타일을 날린다.
+                        // If CSS parsing fails, `rewrite_css` returns the original CSS
+                        // (fail-open, matching external stylesheet handling).
                         let res = zp_css::rewrite_css(&css, &style_target, "/zp/", &style_origin);
                         let rewritten = if res.ok { res.code } else { css };
-                        // ★`<style>` 은 raw text 다 — `ContentType::Text` 로
-                        // 내보내면 lol_html 이 HTML 이스케이프를 건다.
-                        // 실측(CNN, 2026-08-26): 자식 결합자 `>` 가 전부
-                        // `&gt;` 로 바뀌었다(671건). `<style>` 안에서는 엔티티가
-                        // 풀리지 않으므로 그 선택자를 쓴 규칙이 통째로 파싱
-                        // 실패로 버려졌다 — 4,644 → 4,546 (98개). 하필 그것이
-                        // 폭을 주는 규칙(`…&gt;div:nth-child(3){width:calc(...)}`)
-                        // 이라 3열 그리드가 세로로 쌓이고 홈 화면 높이가
-                        // 7,760 → 22,590px 이 됐다. 그 결과 라이브 플레이어가
-                        // 화면 밖(y=5073)으로 밀려 **재생이 시작되지 않았다.**
-                        // 스크립트 경로가 이미 같은 이유로 Html 을 쓴다.
+                        // Emit with `ContentType::Html` (raw passthrough) because `<style>` is raw
+                        // text in HTML and does not entity-decode its contents; `ContentType::Text`
+                        // would escape `>` child combinators and `<` media-query range operators into
+                        // `&gt;`/`&lt;`, invalidating the CSS rules.
                         chunk.after(&rewritten, ContentType::Html);
                     }
                     Ok(())
@@ -776,11 +604,8 @@ fn script_settings(
                         if let Some(inline_kind) = *kind_for_end.borrow() {
                             let src = buf_for_end.borrow().clone();
                             buf_for_end.borrow_mut().clear();
-                            // JSON-carrying script types are DATA, not code —
-                            // rewrite the embedded URLs and emit the JSON back
-                            // verbatim (raw text, no wrapper). A parse failure
-                            // leaves the source untouched — the browser then
-                            // ignores the malformed map the same as direct.
+                            // JSON-carrying script types are data rather than executable code;
+                            // rewrite embedded URLs and emit raw JSON without a JS wrapper.
                             match inline_kind {
                                 InlineKind::Importmap | InlineKind::Speculationrules => {
                                     let next = match inline_kind {
@@ -800,43 +625,19 @@ fn script_settings(
                                 InlineKind::Script(k) => k,
                                 _ => unreachable!(),
                             };
-                            // Emit the rewriter's output directly, wrapped in
-                            // `__ZP_EXEC_INLINE_REWRITTEN(<code>)` which the prelude
-                            // executes WITHOUT going through the page-side rewriter
-                            // again. NAVER's main page ships ~200KB + ~150KB
-                            // EAGER-DATA inline scripts; rewriting them twice
-                            // (once here, once in prelude) wedges the main thread
-                            // for tens of seconds. The `_REWRITTEN` wrapper is the
-                            // single-rewrite path — its prelude handler is a thin
-                            // `Native.FunctionCtor(code)` call. Dynamic injection
-                            // (createElement('script').textContent = …) still
-                            // uses `__ZP_EXEC_INLINE_SCRIPT(<source>)` because the
-                            // page only sees raw source at that point.
-                            // Trap-notebook (2026-05-29 double rewrite) describes
-                            // the historical reason this was a re-rewrite loop;
-                            // the new wrapper sidesteps it by NOT going through
-                            // `rewriteWithPageRewriter` on the prelude side.
                             let opts = RewriteOpts {
                                 kind,
                                 target_url: target_for_end.clone(),
                                 strict,
                                 proxy_origin: origin_for_end.clone(),
                             };
-                            // ★2026-08-22 — 서버가 미리 리라이트하면 **원본이 사라진다**.
-                            // 래퍼 페이로드가 리라이트된 코드라 페이지가 자기 인라인
-                            // 스크립트를 다시 읽으면 `__zp_get(…)` 가 그대로 보인다
-                            // (자기 소스를 읽는 건 흔한 anti-debug 관용구다).
-                            //
-                            // 이 경로가 생긴 이유는 "두 번 리라이트하면 메인 스레드가
-                            // 수십 초 멈춘다" 였는데, **오늘 재보니 사실이 아니다**:
-                            // NAVER 메인의 실제 최대 인라인(178KB)을 페이지측 리라이터로
-                            // 돌리면 **6.7ms** 다(2026-08-22, 브라우저에서 직접 측정).
-                            // 그 숫자는 옛 리라이터 시절 것이 주석으로 굳은 것이었다.
-                            //
-                            // 그래서 기본은 **원본을 그대로 실어 보내고 페이지가
-                            // 리라이트하는 경로**(`__ZP_EXEC_INLINE_SCRIPT`, 동적 주입이 쓰는
-                            // 것과 같은 경로)다. 병적으로 큰 입력에서만 서버측 단일
-                            // 리라이트로 돌아간다 — 그때는 재현성보다 멈춤이 더 나쁘다.
+                            // Inline scripts up to `MAX_PAGE_REWRITE_INLINE_BYTES` are wrapped with
+                            // their unrewritten source in `__ZP_EXEC_INLINE_SCRIPT` /
+                            // `__ZP_EXEC_INLINE_MODULE` and rewritten by the page-side rewriter at
+                            // execution time, preserving original source text for scripts that inspect
+                            // their own `<script>` DOM nodes. Larger scripts are rewritten once here
+                            // and wrapped in `__ZP_EXEC_INLINE_REWRITTEN` / `_MODULE` so the prelude
+                            // executes them directly without a page-side rewrite.
                             let replacement = if src.len() <= MAX_PAGE_REWRITE_INLINE_BYTES {
                                 let wrapper_name = match kind {
                                     ScriptKind::Module => "__ZP_EXEC_INLINE_MODULE",
@@ -863,12 +664,9 @@ fn script_settings(
                                     }
                                 }
                             } };
-                            // ContentType::Html → raw passthrough (no HTML
-                            // escaping). The browser parses <script> bodies as
-                            // raw text and does NOT entity-decode them, so any
-                            // `&` we let lol_html turn into `&amp;` lands
-                            // verbatim in the JS source and produces
-                            // SyntaxError: Unexpected token '&'.
+                            // Use `ContentType::Html` for raw passthrough without HTML escaping;
+                            // `<script>` bodies are parsed as raw text and not entity-decoded by
+                            // the browser, so escaping `&` into `&amp;` would cause a JS syntax error.
                             chunk.before(&replacement, ContentType::Html);
                         }
                     }
@@ -876,40 +674,13 @@ fn script_settings(
                 }),
     ];
     if !prelude.is_empty() {
-        // Prepend = insert as the FIRST child of <head> (right after the start
-        // tag), matching the SW's regex `injectPrelude`. ContentType::Html →
-        // emitted verbatim, never re-parsed by these script handlers.
-        //
-        // 2026-08-13 — `<head>` 하나만 앵커로 쓰면 **머리 없는 문서에서 통째로
-        // 안 들어간다.** 우리는 브라우저 파서가 아니라 원본 바이트를 스트리밍으로
-        // 보므로, 브라우저가 자동 생성해 주는 `<head>` 는 여기 없다.
-        // NAVER 로그인 결과처럼 `<script>location.replace(...)</script>` 만 든
-        // 미니 문서가 실제로 그랬다: 인라인 스크립트는 `__ZP_EXEC_INLINE_REWRITTEN`
-        // 호출로 바뀌는데 그 헬퍼를 정의할 프렐류드가 없어 흰 화면이 됐다.
-        //
-        // 그래서 앵커를 단계적으로 둔다 — `html` → `head` → `body` → 첫 `script` 앞.
-        // 마지막 것이 중요하다: 프렐류드가 **자기를 필요로 하는 첫 스크립트보다
-        // 먼저** 들어간다는 보장이 거기서 나온다.
-        //
-        // 2026-08-26 — `html` 을 맨 앞에 넣었다. `head` 가 없는 문서에서는
-        // 프렐류드가 `<body>` 안으로 들어갔는데, 프렐류드에는 **CSP meta 가
-        // 들어 있고 body 안의 CSP meta 는 브라우저가 무시한다.** 스트리밍
-        // 응답에서는 CSP 헤더도 강제되지 않는다는 것을 이미 측정해 뒀으므로
-        // (그래서 meta 를 박기 시작했다) 그 조합에서는 정책이 **하나도**
-        // 안 걸린다.
-        //
-        // `<html>` 바로 뒤는 언제나 유효한 자리다: 파서는 "before head" 상태에서
-        // meta/script 를 만나면 head 를 암묵적으로 만들어 거기 넣는다. 뒤따라
-        // 오는 진짜 `<head>` 시작 태그는 무시되고 속성만 병합된다. 즉 head 가
-        // 있든 없든 결과는 "head 안" 으로 같고, 오히려 더 이르다.
-        //
-        // 2026-10-01 — 네 앵커 중 아무것도 없는 문서(`<title>t</title><p>x</p>`)
-        // 에는 **프렐류드가 아예 안 들어갔다.** 버퍼 경로(`injectPrelude`)는
-        // 문서 맨 앞으로 떨어지는데 스트리밍 경로만 빈손이었다. 그런 문서는
-        // 자기 멤브레인도 CSP meta 도 없이 떴고, `src` 로 보낸 프레임이면 부모가
-        // containment 도 건너뛰어 `iframe.contentWindow.eval` 이 프록시 오리진에서
-        // 날 코드를 돌렸다. 마지막 단계를 셋 더 둔다: 어떤 요소든 첫 요소 앞,
-        // (요소보다 먼저 오는) 공백 아닌 첫 텍스트 앞, 그래도 없으면 문서 끝.
+        // Inject the prelude once at the earliest valid anchor in the document:
+        // inside `<html>` (before `<head>` and `<body>`), inside `<head>`, inside `<body>`,
+        // before the first `<script>`, before the first element of any kind, before the
+        // first non-whitespace text node, or at the end of the document if empty.
+        // Prepending immediately after `<html>` places the prelude's CSP `<meta>` tag in
+        // the implicit `<head>` even when the source HTML omits `<head>`, ensuring the
+        // browser enforces the meta CSP before any `<body>` element or inline script runs.
         let injected = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         for (selector, before_element) in [("html", false), ("head", false), ("body", false), ("script", true), ("*", true)] {
             let prelude = prelude.clone();
@@ -951,11 +722,11 @@ fn script_settings(
 }
 
 /// The streaming HTML transform: two chained `lol_html` rewriters (attribute
-/// pass → inline-script-body pass) fed incrementally. `write` returns the bytes
-/// produced so far; `end` flushes and returns the tail + collected diagnostics.
-/// Byte output is independent of chunk boundaries (lol_html's streaming
-/// guarantee + a full intermediate buffer between the two passes), so it equals
-/// the whole-string `transform`. NO timer, NO whole-input buffering.
+/// pass followed by inline-script-body pass) fed incrementally. `write` returns
+/// the bytes produced so far; `end` flushes and returns the tail + collected
+/// diagnostics. Byte output is independent of chunk boundaries (lol_html's
+/// streaming guarantee + a full intermediate buffer between the two passes), so
+/// it equals the whole-string `transform`.
 pub struct HtmlTxn {
     r1: HtmlRewriter<'static, Sink>,
     r2: HtmlRewriter<'static, Sink>,
@@ -968,7 +739,7 @@ pub struct HtmlTxn {
 
 impl HtmlTxn {
     /// Build a streaming transform for `opts`. A non-empty `prelude` is injected
-    /// right after `<head>` (see [`script_settings`]); the buffered `transform`
+    /// at the start of the document (see [`script_settings`]); the buffered `transform`
     /// passes an empty prelude (the SW injects separately on that path).
     pub fn new(opts: &TransformOptions, prelude: String) -> Self {
         let diagnostics: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
@@ -1044,16 +815,14 @@ impl HtmlTxn {
     }
 }
 
-/// Serialise a script body as a JSON string literal suitable for embedding as
-/// the argument to `__ZP_EXEC_INLINE_SCRIPT(...)`. Escapes `</` to prevent
-/// the closing `</script>` sequence from terminating the wrapper.
-/// 이 크기 이하의 인라인 스크립트는 **원본 그대로** 내려보내고 페이지가
-/// 리라이트한다 — 그래야 페이지가 자기 소스를 다시 읽을 때 우리 흔적이
-/// 안 보인다. 256KB 는 실측 근거로 잡은 값이다: 현재 최악의 실사이트
-/// 사례(NAVER 메인 178KB)가 페이지측에서 6.7ms 였고, 그보다 큰 것은
-/// 현실 문서에서 본 적이 없다. 넘으면 서버측 단일 리라이트로 돌아간다.
+/// Maximum inline script size (256 KiB) wrapped raw for page-side rewriting.
+/// Scripts at or below this threshold preserve their unrewritten text in the DOM;
+/// larger scripts are rewritten once on the server/SW side.
 const MAX_PAGE_REWRITE_INLINE_BYTES: usize = 256 * 1024;
 
+/// Serialise a script body as a JSON string literal suitable for embedding as
+/// the argument to `__ZP_EXEC_INLINE_SCRIPT(...)`. Escapes `<` to prevent
+/// a closing `</script>` sequence from terminating the wrapper.
 fn inline_script_payload(src: &str) -> String {
     let mut out = String::with_capacity(src.len() + 2);
     out.push('"');
@@ -1077,24 +846,11 @@ fn inline_script_payload(src: &str) -> String {
     out
 }
 
-/// Resolve a relative URL against an absolute target base. Handles the three
-/// common relative forms (host-absolute `/path`, query/fragment-only, and
-/// path-relative) — enough for what we hit inside iframes. Returns None when
-/// the base is not http(s) absolute or when the relative form can't be
-/// interpreted (we'd rather emit nothing than a wrong URL).
-/// `..` / `.` 세그먼트를 RFC 3986 §5.2.4 대로 접는다.
-///
-/// 2026-08-21 — `resolve_against_base` 는 손으로 쓴 문자열 결합이라 이걸 안
-/// 했다. 나머지 리졸버 넷(`new URL()`, `url::Url::join`)은 전부 정규화하므로,
-/// 같은 상대 URL에서 **서로 다른 절대 URL**이 나왔다.
-///
-/// 실측(2026-08-21): 밖으로 나가는 요청은 SW 의 `canonicalTargetURL` 이 다시
-/// 정규화하므로 타깃은 정상 경로를 받는다 — 404 가 나거나 격리가 깨지지는
-/// 않는다. 문제는 `?url=` 파라미터 문자열이 페이지 realm 이 계산한 것과
-/// 달라진다는 것이다: 같은 리소스에 키가 둘 생겨 `alreadyMapped` 단축과
-/// 컨텍스트 키가 어긋난다.
+/// Fold `.` and `..` path segments per RFC 3986 section 5.2.4 so URLs resolved
+/// here match the canonical URLs produced by `new URL()` and `url::Url::join` in
+/// the page realm and Service Worker.
 fn normalize_dot_segments(path: &str) -> String {
-    // 쿼리/프래그먼트는 건드리지 않는다 — 경로만 접는다.
+    // Only fold the path component; leave query and fragment untouched.
     let (path_part, tail) = match path.find(['?', '#']) {
         Some(i) => (&path[..i], &path[i..]),
         None => (path, ""),
@@ -1119,7 +875,7 @@ fn normalize_dot_segments(path: &str) -> String {
         s.push('/');
     }
     s.push_str(&out.join("/"));
-    // 원본이 `/` 로 끝났거나 마지막 세그먼트가 `.`/`..` 였으면 디렉터리다.
+    // Preserve directory trailing slash if the input ended with `/`, `/.`, or `/..`.
     if (trailing_slash || path_part.ends_with("/.") || path_part.ends_with("/.."))
         && !s.ends_with('/')
     {
@@ -1129,9 +885,11 @@ fn normalize_dot_segments(path: &str) -> String {
     s
 }
 
+/// Resolve a relative URL against an absolute target base. Handles host-absolute
+/// `/path`, query/fragment-only, and path-relative forms. Returns `None` when
+/// the base is not `http(s)` absolute.
 fn resolve_against_base(rel: &str, base: &str) -> Option<String> {
-    // ASCII CI check on the scheme — saves the `base.to_ascii_lowercase()`
-    // alloc on every URL resolve. Called ~N URL-bearing-elements per page.
+    // ASCII case-insensitive check on the scheme avoids allocating a lowercase copy.
     if !(starts_with_ascii_ci(base, "http://") || starts_with_ascii_ci(base, "https://")) {
         return None;
     }
@@ -1180,17 +938,7 @@ fn resolve_against_base(rel: &str, base: &str) -> Option<String> {
     Some(out)
 }
 
-/// Decode the handful of named HTML entities that realistically appear in
-/// URL attribute values produced by mainstream encoders. `lol_html` does not
-/// decode entities for `Attribute::value()`; without this step `&amp;` makes
-/// it through percent-encoding as a literal substring and the upstream
-/// server reads keys like `&amp;modules=…` instead of `&modules=…`.
-///
-/// Returns `Cow::Borrowed` for the common case (no `&` in URL) so the caller
-/// doesn't pay an allocation on every URL attribute. The slow path only fires
-/// on Wikipedia-style entity-bearing URLs (~few per page).
-/// `&#61;` / `&#x3D;` 같은 숫자 엔티티. 이름 있는 엔티티는 표로 두더라도
-/// 숫자 쪽은 무한하므로 표로 따라갈 수 없다.
+/// Decode decimal (`&#61;`) and hexadecimal (`&#x3D;`) numeric HTML character references.
 fn numeric_entity_char(entity: &str) -> Option<char> {
     let body = entity.strip_prefix("&#")?.strip_suffix(';')?;
     if body.is_empty() {
@@ -1203,6 +951,10 @@ fn numeric_entity_char(entity: &str) -> Option<char> {
     char::from_u32(code)
 }
 
+/// Decode common named HTML entities and numeric character references in URL
+/// attribute values. `lol_html` does not decode entities in `Attribute::value()`;
+/// without this step `&amp;` or `&#x3D;` would be percent-encoded literally.
+/// Returns `Cow::Borrowed` when `src` contains no `&`.
 fn decode_url_html_entities(src: &str) -> std::borrow::Cow<'_, str> {
     if !src.contains('&') {
         return std::borrow::Cow::Borrowed(src);
@@ -1241,12 +993,6 @@ fn decode_url_html_entities(src: &str) -> std::borrow::Cow<'_, str> {
                 rest = &tail[off + 1..];
                 continue;
             }
-            // ★손으로 적은 표는 반드시 뚫린다 — 숫자 엔티티는 **규칙**으로 푼다.
-            // CNN 실측(2026-08-24): `<source src="…mp4?c&#x3D;original">` 의
-            // `&#x3D;`(=)가 표에 없어서 엔티티가 안 풀렸고, 그 상태로 URL 을
-            // 인코딩하니 `&` 는 %26 이 되고 남은 `#x3D;original` 이
-            // **프래그먼트로** 흘러 `…mp4%3Fc%26#x3D;original` 이 나갔다.
-            // 대조군에는 그런 요청이 0건이고 프록시에서만 5건이 400 이었다.
             if let Some(ch) = numeric_entity_char(entity) {
                 out.push(ch);
                 rest = &tail[off + 1..];
@@ -1260,30 +1006,12 @@ fn decode_url_html_entities(src: &str) -> std::borrow::Cow<'_, str> {
     std::borrow::Cow::Owned(out)
 }
 
-/// Percent-encoding set for the `url=` / `via=` query values.
-///
-/// `NON_ALPHANUMERIC` also escapes the RFC 3986 *unreserved* bytes `-._~`.
-/// That is legal but self-defeating: an SDK that locates its own `<script>`
-/// tag with a CSS attribute selector (`script[src*="ncaptcha-api.js"]`) is
-/// matched by the engine against the RAW attribute, and CSS selectors sit
-/// BELOW the membrane — our `getAttribute`/`.src` masking cannot reach them.
-/// With `.`/`-` escaped the attribute reads `ncaptcha%2Dapi%2Ejs`, the
-/// selector never matches, and the SDK silently never boots. Observed on
-/// NAVER's WTM captcha: `ncaptcha-onload` was never invoked, so `wtmncapt`
-/// stayed undefined and every submit carried
-/// `wtoken=error1|ReferenceError|wtmncapt is not defined`.
-///
-/// Leaving unreserved bytes raw is parse-neutral — none of `-._~` can
-/// terminate a query value or introduce a parameter, so no escape hatch opens.
-// 인코딩 집합도 zp-shared 단일 소스. `?via=` 빌더가 아직 여기 있어서 필요하다.
+/// Percent-encoding set for `url=` and `via=` query values, shared via `zp-shared`.
+/// Leaves RFC 3986 unreserved bytes (`-._~`) unescaped so CSS attribute selectors
+/// (such as `script[src*="ncaptcha-api.js"]`, which match against the raw DOM
+/// attribute below the JS membrane) continue to match.
 use zp_shared::URL_PARAM_ENCODE;
 
-/// Convert a subresource URL to the SW-routable `/zp/api/fetch?url=<encoded>`
-/// form. Relative URLs are first resolved against `target_url` so the browser
-/// doesn't end up fetching `/_next/image?...` from the proxy origin (which is
-/// where it would resolve without a base — exactly the failure mode observed
-/// inside NAVER's `shopsquare.naver.com` iframe). Returns None for fragment-
-/// only refs and inert schemes (data:/blob:/about:/mailto:).
 /// What an inline `<script>` element contains: executable JS of a given
 /// kind, or a JSON document type whose embedded URLs need rewriting but
 /// which never goes through the script rewriter.
@@ -1294,13 +1022,9 @@ enum InlineKind {
     Speculationrules,
 }
 
-/// `<script type="importmap">` — every value in `imports` and in each
-/// `scopes` map is a module specifier the browser resolves + fetches
-/// natively. Left raw, the fetch would go straight to the target host —
-/// no SW, no transport, no rewrite. Values become the same
-/// `/zp/api/script?u=…&kind=module` form the JS rewriter emits for static
-/// `import` specifiers, so resolution lands in the rewritten-module
-/// pipeline. `integrity` values are SRI hashes and stay untouched.
+/// Rewrite `<script type="importmap">` JSON: every specifier target in `imports`
+/// and `scopes` is rewritten to `/zp/api/script?u=...&kind=module` (matching
+/// static `import` specifier rewriting), while `integrity` hashes stay untouched.
 fn rewrite_importmap_json(raw: &str, target_url: &str, proxy_origin: &str) -> Option<String> {
     let mut doc: serde_json::Value = serde_json::from_str(raw).ok()?;
     let mut changed = false;
@@ -1329,12 +1053,10 @@ fn rewrite_importmap_json(raw: &str, target_url: &str, proxy_origin: &str) -> Op
     }
 }
 
-/// `<script type="speculationrules">` — `prefetch`/`prerender` `urls`
-/// lists make the browser fetch/navigate natively. `prefetch` entries are
-/// subresource GETs → `/zp/api/fetch?url=…`; `prerender` entries are top
-/// navigations → the `?via=` launcher form (the swap navigates the tab to
-/// a URL the SW then serves as the proxied document). Rules referencing
-/// documents (`"source": "document"`) carry no URL list to rewrite.
+/// Rewrite `<script type="speculationrules">` JSON: `prefetch` `urls` lists are
+/// rewritten to `/zp/api/fetch?url=...`, and `prerender` `urls` lists are
+/// rewritten to the `?via=` navigation launcher route. Rules with `"source": "document"`
+/// carry no URL list to rewrite.
 fn rewrite_speculationrules_json(raw: &str, target_url: &str, proxy_origin: &str) -> Option<String> {
     let mut doc: serde_json::Value = serde_json::from_str(raw).ok()?;
     let mut changed = false;
@@ -1364,18 +1086,17 @@ fn rewrite_speculationrules_json(raw: &str, target_url: &str, proxy_origin: &str
     }
 }
 
-/// Resolve an importmap value to the proxy script route — identical in
-/// shape to what the JS rewriter emits for static import specifiers, so a
-/// module fetched via the map and one fetched via `import` share the
-/// cache key and the rewritten-module path.
+/// Resolve a module URL or importmap target to the proxy script route, matching
+/// the exact URL shape emitted by the JS rewriter for static `import` specifiers
+/// so both share the same module map entry and cache key.
 fn proxied_module_script_url(raw: &str, target_url: &str, proxy_origin: &str) -> Option<String> {
     if proxy_origin.is_empty() {
         return None;
     }
     let abs = absolute_target_url(raw, target_url)?;
     use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
-    // Same encode set as zp-rewriter::proxied_module_url — the two forms
-    // must produce identical URLs or the browser fetches the module twice.
+    // Same encode set as zp-rewriter::proxied_module_url so the two forms
+    // produce identical URLs.
     const QUERY_ENC: &AsciiSet = &CONTROLS
         .add(b' ').add(b'"').add(b'#').add(b'<').add(b'>').add(b'&').add(b'=')
         .add(b'+').add(b'%').add(b'?').add(b'/').add(b':').add(b';').add(b'\'')
@@ -1388,11 +1109,10 @@ fn proxied_module_script_url(raw: &str, target_url: &str, proxy_origin: &str) ->
 /// descriptors (`2x`, `640w`) and the list shape intact. Returns `None` when
 /// nothing changed, so the caller can skip the attribute write.
 ///
-/// **Why a hand-rolled scanner instead of `split(',')`:** a candidate may be a
-/// `data:` URL, and those contain commas (`data:image/gif;base64,R0lGOD…`).
-/// Splitting on commas would cut them in half. A `srcset` URL cannot contain
-/// whitespace, so "read until whitespace" is the correct way to take a URL;
-/// only *after* the URL do commas act as separators.
+/// Uses a dedicated scanner instead of `split(',')` because a candidate URL may
+/// be a `data:` URI or query string containing commas. Per the HTML `srcset`
+/// grammar, a URL is a non-whitespace run and only trailing commas act as
+/// candidate separators.
 fn proxied_srcset(
     raw: &str,
     proxy_origin: &str,
@@ -1423,18 +1143,16 @@ fn proxied_srcset(
 /// a single byte of the surrounding text. `lead` is the separator run before
 /// the URL (whitespace and stray commas), `tail` is the descriptor (`1x` /
 /// `320w`) up to the next candidate. Concatenating `lead + url + tail` over
-/// every candidate reproduces the input exactly — the parity fixture asserts it.
+/// every candidate reproduces the input exactly.
 pub(crate) struct SrcsetCandidate<'a> {
     pub lead: &'a str,
     pub url: &'a str,
     pub tail: &'a str,
 }
 
-/// 쉼표로 자르면 안 된다. `data:` URL 은 본문에 쉼표를 담는다
-/// (`data:image/svg+xml;utf8,<svg …>`, `;base64,`). 그래서 `data:` 후보는
-/// 공백만이 URL 을 끝낸다 — 이 조건이 없으면 데이터 URL 이 두 조각으로 갈리고
-/// 뒷조각(`<svg …`)이 상대 URL 로 오인돼 프록시 경로로 치환된다. 페이지 realm
-/// 의 JS 사본 셋이 정확히 그렇게 깨져 있었다(2026-08-21 실측).
+/// Parse an HTML `srcset` attribute into `(lead, url, tail)` candidates.
+/// Commas inside a URL (such as `data:` payloads or comma-separated query parameters)
+/// do not split the URL; only whitespace or trailing commas terminate the URL token.
 pub(crate) fn split_srcset_candidates(raw: &str) -> Vec<SrcsetCandidate<'_>> {
     let bytes = raw.as_bytes();
     let mut list = Vec::new();
@@ -1453,11 +1171,8 @@ pub(crate) fn split_srcset_candidates(raw: &str) -> Vec<SrcsetCandidate<'_>> {
             }
             break;
         }
-        // ★URL 은 **공백까지의 비공백 런**이고, 쉼표는 URL **뒤에 붙었을 때만**
-        // 구분자다(HTML srcset 문법). 예전에는 첫 쉼표에서 끊고 `data:` 만
-        // 예외로 뒀는데, 그러면 쿼리에 쉼표가 든 평범한 URL 이 반토막 난다.
-        // CNN 실측(2026-08-24): `?c=16x9&q=h_1080,w_1920,c_fill` 가 잘려
-        // 이미지 56건이 400 이었다. JS 쪽 splitSrcsetCandidates 와 같은 규칙.
+        // In HTML `srcset` syntax, the URL is a non-whitespace run and only trailing
+        // commas at the end of that token act as candidate separators.
         let url_start = i;
         while i < bytes.len() && !bytes[i].is_ascii_whitespace() {
             i += 1;
@@ -1477,10 +1192,10 @@ pub(crate) fn split_srcset_candidates(raw: &str) -> Vec<SrcsetCandidate<'_>> {
     list
 }
 
-/// The href an icon link carries in the browser (the membrane's `hiddenIconHref`): nothing the browser would fetch.
+/// Inert href assigned to icon `<link>` elements in markup (matching the membrane's `hiddenIconHref`).
 const HIDDEN_ICON_HREF: &str = "data:application/x-zeroproxy-icon,1";
 
-/// The `rel` tokens the browser fetches an icon for — the membrane's `isIconLinkRelValue`.
+/// Return true if `rel` contains an icon link relation token (matching the membrane's `isIconLinkRelValue`).
 fn is_icon_link_rel(rel: &str) -> bool {
     rel.split(|c: char| c.is_ascii_whitespace() || c == ',').any(|t| {
         let t = t.to_ascii_lowercase();
@@ -1491,6 +1206,9 @@ fn is_icon_link_rel(rel: &str) -> bool {
     })
 }
 
+/// Convert a subresource URL to the SW-routable `/zp/api/fetch?url=<encoded>`
+/// form after resolving relative URLs against `target_url`. Returns `None` for
+/// fragment-only references and inert schemes (`data:`, `blob:`, `about:`, `mailto:`).
 fn proxied_subresource_url(
     raw: &str,
     proxy_origin: &str,
@@ -1507,8 +1225,7 @@ fn proxied_subresource_url(
     let absolute = if starts_with_ascii_ci(s, "http://") || starts_with_ascii_ci(s, "https://") {
         s.to_string()
     } else if s.starts_with("//") {
-        // `format!` per scheme-relative URL avoided — push_str chain
-        // is ~1.5-2× faster than `format!` in micro-benches.
+        // Avoid `format!` overhead on scheme-relative URLs.
         let mut a = String::with_capacity(6 + s.len());
         a.push_str("https:");
         a.push_str(s);
@@ -1518,8 +1235,6 @@ fn proxied_subresource_url(
     } else {
         return None;
     };
-    // 프래그먼트/인코딩/`&tab=` 규칙은 zp-shared 가 단일 소스다 —
-    // 예전에는 htmltx·zp-css·프렐류드가 각자 만들었고 셋의 출력이 달랐다.
     if zp_shared::split_fragment(&absolute).0.is_empty() {
         return None;
     }
@@ -1554,27 +1269,10 @@ fn absolute_target_url(raw: &str, target_url: &str) -> Option<String> {
     resolve_against_base(s, target_url)
 }
 
-/// Build the proxy-origin "go-via launcher" URL used to rewrite anchor /
-/// form / formaction attributes. Output shape:
-///   `<proxy_origin><control_prefix>?via=<percent_encoded_absolute_target>`
-///
-/// Why a launcher URL instead of leaving the raw target: hover, middle-click,
-/// ctrl-click, `target="_blank"`, "open in new tab" and "copy link address"
-/// all read the raw attribute value — leaving the target host on disk would
-/// leak it to the browser's native UI (and through "open in new tab" trigger
-/// a real direct fetch to the target, bypassing the proxy entirely).
-///
-/// The runtime-prelude click handler reads `data-zp-target-url` first
-/// (`clickNavigationTarget` in `web/runtime-prelude.js`), so normal in-page
-/// left-clicks still take the share-encrypt fast path. The `?via=` URL is
-/// the slow-path fallback consumed by the launcher when the browser performs
-/// a native navigation (new tab, etc.).
-///
-/// Returns `None` if `proxy_origin` was not supplied (host-test fallback).
-/// `<meta http-equiv="refresh">` 의 `content` 에서 URL 부분만 프록시 내비게이션
-/// 경로로 바꾼다. 문법은 `<delay>[;[ ]url=<url>]` 이고 `url=` 는 대소문자 무시,
-/// 값에 따옴표가 붙을 수 있다. delay 만 있는 형태(`content="5"`)는 자기 자신을
-/// 다시 부르는 것이라 건드릴 필요가 없다.
+/// Rewrite the `url=` target of a `<meta http-equiv="refresh">` `content`
+/// attribute (`<delay>[;[ ]url=<url>]`, case-insensitive, optionally quoted)
+/// to the proxy navigation route. Delay-only values (`content="5"`) reload the
+/// current document and return `None`.
 fn proxied_meta_refresh(
     content: &str,
     proxy_origin: &str,
@@ -1585,7 +1283,7 @@ fn proxied_meta_refresh(
     let at = lower.find("url=")?;
     let head = &content[..at];
     let mut raw = content[at + 4..].trim();
-    // 따옴표는 벗기고 나중에 다시 씌우지 않는다 — 우리 URL 에는 공백이 없다.
+    // Strip surrounding quotes; the rewritten proxy URL contains no whitespace.
     if (raw.starts_with('"') && raw.ends_with('"') && raw.len() >= 2)
         || (raw.starts_with('\'') && raw.ends_with('\'') && raw.len() >= 2)
     {
@@ -1600,6 +1298,15 @@ fn proxied_meta_refresh(
     Some(format!("{head}url={next}"))
 }
 
+/// Build the proxy-origin `?via=` navigation URL used to rewrite anchor, form,
+/// and `formaction` attributes:
+///   `<proxy_origin><control_prefix>?via=<percent_encoded_absolute_target>`
+///
+/// Rewriting the raw attribute prevents browser-native UI actions (hover status
+/// bar, middle-click, ctrl-click, `target="_blank"`, "open in new tab", "copy link
+/// address") from exposing or navigating directly to the target origin. Normal
+/// in-page left-clicks read `data-zp-target-url` first via `clickNavigationTarget`.
+/// Returns `None` if `proxy_origin` is empty.
 fn proxied_navigation_url(
     absolute: &str,
     proxy_origin: &str,
@@ -1643,10 +1350,9 @@ fn is_inert_scheme(s: &str) -> bool {
         || starts_with_ascii_ci(s, "vbscript:")
 }
 
-/// Minimal percent-decoder for URL bodies. Avoids the `percent_encoding`
-/// crate dependency for now; we handle the common ASCII pairs target sites
-/// produce (e.g. %22, %20, %3B). Non-decodable sequences are left as-is so
-/// the rewriter receives best-effort JavaScript text.
+/// Minimal percent-decoder for URL bodies. Handles ASCII hex pairs (`%22`, `%20`,
+/// `%3B`, etc.) while leaving non-decodable sequences intact so the rewriter
+/// receives best-effort JavaScript text.
 fn percent_decode(input: &str) -> String {
     let bytes = input.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
@@ -1673,8 +1379,7 @@ fn hex_val(b: u8) -> Option<u8> {
     }
 }
 
-/// HTML 은 `type` 을 ASCII 공백으로 트림한 뒤 대소문자 무시로 "module" 과 비교한다.
-/// `" module "` 을 classic 으로 보면 모듈에 classic 리라이트가 붙는다.
+/// Match `"module"` after trimming ASCII whitespace and ignoring ASCII case per the HTML specification.
 fn is_module_type(t: &str) -> bool {
     t.trim_matches(|c: char| c.is_ascii_whitespace()).eq_ignore_ascii_case("module")
 }
@@ -1708,11 +1413,11 @@ mod tests {
         }
     }
 
-    /// R6: `data-zp-lit-*` 스태시는 getAttribute parity 를 위해 **작성된
-    /// 리터럴을 의도적으로 보존**한다. "원본 URL 이 출력에 남으면 안 된다"
-    /// 류 단언은 스태시를 제거한 뒤 검사해야 의도된 보존분에 걸리지 않는다.
-    /// lol_html 은 속성값의 `"` 를 `&quot;` 로 이스케이프하므로 첫 닫는
-    /// 따옴표까지가 스태시 범위다.
+    /// Strip `data-zp-lit-*` attribute stashes, which preserve the author's
+    /// literal attribute value for `getAttribute` parity, before asserting that
+    /// no unrewritten target URL remains in active attributes. `lol_html` escapes
+    /// `"` inside attribute values as `&quot;`, so the stash spans up to the first
+    /// closing quote.
     fn strip_lit(html: &str) -> String {
         let mut out = String::with_capacity(html.len());
         let mut rest = html;
@@ -1727,16 +1432,9 @@ mod tests {
         out
     }
 
-    // 파싱 시점 `srcdoc` 은 멤브레인 없는 문서를 만든다 — 이름을 옮겨 두고
-    // 페이지 realm 이 후킹된 세터로 되돌리게 한다. 옮기기만 하고 값을 잃으면
-    // iframe 이 통째로 비므로 **값 보존까지** 확인한다.
-    // 2026-08-20 — 파싱 시점 서브리소스 표면 전수. 여기 있는 조합은 전부
-    // htmltx 의 (tag, attr) 목록에 **없어서** 원본 URL 이 그대로 나가던 자리다.
-    // 브라우저 매트릭스에 정적 칸(a11~a20)을 채워 넣고 나서야 드러났다.
     #[test]
     fn parse_time_subresource_surfaces_are_rewritten() {
         let cases: &[(&str, &str)] = &[
-            // <input type=image> 는 진짜 이미지 요청을 낸다.
             ("input-image", "<input type=\"image\" src=\"http://t.example/a.png\">"),
             ("video-poster", "<video poster=\"http://t.example/a.png\"></video>"),
             ("svg-image-href", "<svg><image href=\"http://t.example/a.png\"></image></svg>"),
@@ -1744,7 +1442,8 @@ mod tests {
                 "svg-image-xlink",
                 "<svg><image xlink:href=\"http://t.example/a.png\"></image></svg>",
             ),
-            // 파서는 img 로 만들지만 토크나이저가 보는 이름은 image 다.
+            // The HTML parser normalizes `<image>` to `<img>`, but the streaming
+            // tokenizer sees the tag name `image`.
             ("legacy-image", "<image src=\"http://t.example/a.png\">"),
             (
                 "td-background",
@@ -1756,19 +1455,19 @@ mod tests {
             let r = transform(html, &opts()).unwrap();
             assert!(
                 !strip_lit(&r.html).contains("t.example/a.png"),
-                "{name}: 원본 URL 이 남았다 -> {}",
+                "{name}: original URL survived: {}",
                 r.html
             );
             assert!(
                 r.html.contains("/zp/api/fetch?url="),
-                "{name}: 프록시 경로로 안 바뀌었다 -> {}",
+                "{name}: was not rewritten to proxy path: {}",
                 r.html
             );
         }
     }
 
-    // 스프라이트 참조는 프래그먼트가 의미다. 통째로 인코딩하면 브라우저가
-    // 조각을 못 골라 외부 <use> 가 빈 채로 렌더된다.
+    // Preserve URL fragments outside the encoded `?url=` parameter so SVG sprite
+    // `<use href="...#icon">` references resolve the target fragment in the browser.
     #[test]
     fn subresource_fragment_survives_outside_the_proxy_url() {
         let r = transform(
@@ -1778,41 +1477,30 @@ mod tests {
         .unwrap();
         assert!(
             r.html.contains("api/fetch?url=http%3A%2F%2Ft.example%2Fs.svg#icon"),
-            "프래그먼트가 프록시 URL 바깥에 남아야 한다 -> {}",
+            "fragment must remain outside the proxy URL: {}",
             r.html
         );
     }
 
-    // ★2026-08-21 정책 정정 — plugin 표면은 **CSP 가** 막는다, 리라이트가 아니라.
-    //
-    // 예전엔 `object[data]` 를 일부러 리라이트하지 않았다. 그런데 그건 두 질문을
-    // 섞은 것이었다: "로드를 허용하는가"(금지)와 "원본 URL 이 DOM 에 남아도
-    // 되는가"(안 됨). 안 고치면 정적 cross-origin object 가 `csp-only` 로 남는다
-    // (매트릭스 `a23-static-object-cross` 로 실측). 리라이트해도 `object-src 'none'`
-    // 이 URL 과 무관하게 로드를 거부하므로 표면이 되살아나지 않는다.
+    // `object[data]` is rewritten so raw target URLs do not remain in the DOM,
+    // while plugin execution remains blocked by CSP `object-src 'none'`.
     #[test]
     fn plugin_surface_url_is_rewritten_but_load_stays_blocked() {
         let r = transform("<object data=\"http://t.example/a.png\"></object>", &opts()).unwrap();
         assert!(
             !strip_lit(&r.html).contains("data=\"http://t.example"),
-            "원본 URL 이 data 속성에 그대로 남았다 -> {}",
+            "original URL remained in data attribute: {}",
             r.html
         );
         assert!(
             r.html.contains("/zp/api/fetch?url="),
-            "프록시 경로로 안 바뀌었다 -> {}",
+            "was not rewritten to proxy path: {}",
             r.html
         );
-        // 정책은 CSP 가 지킨다 — 이 목록이 사라지면 표면이 되살아난다.
         let csp = zp_shared::build_proxied_csp("");
-        assert!(csp.contains("object-src 'none'"), "object-src 'none' 이 사라졌다: {csp}");
+        assert!(csp.contains("object-src 'none'"), "object-src 'none' missing: {csp}");
     }
 
-
-    // ★`<meta http-equiv=refresh>` 는 서브리소스가 아니라 최상위 내비게이션이다.
-    // 놓치면 브라우저가 타깃 오리진으로 문서째 이동한다 = 감옥 탈출. CSP 로도
-    // 못 막는다(`navigate-to` 는 표준에서 빠졌다). 2026-08-20 픽스처 실측으로
-    // 실제 탈출을 확인하고 넣은 자리다.
     #[test]
     fn meta_refresh_url_is_routed_through_proxy() {
         let r = transform(
@@ -1822,37 +1510,36 @@ mod tests {
         .unwrap();
         assert!(
             !r.html.contains("content=\"0;url=http://t.example"),
-            "원본 URL 이 content 에 남았다 -> {}",
+            "original URL remained in content attribute: {}",
             r.html
         );
-        assert!(r.html.contains("?via="), "프록시 내비게이션 경로가 아니다 -> {}", r.html);
+        assert!(r.html.contains("?via="), "expected proxy navigation path: {}", r.html);
         assert!(
             r.html.contains("data-zp-target-url"),
-            "원본 content 를 진단용으로 남겨야 한다 -> {}",
+            "original content must be preserved for diagnostics: {}",
             r.html
         );
     }
 
     #[test]
     fn meta_refresh_variants() {
-        // 대소문자 / 공백 / 따옴표 / 상대경로
         for html in [
             "<meta http-equiv=\"REFRESH\" content=\"3; URL='http://t.example/a'\">",
             "<meta http-equiv=\"refresh\" content=\"0;url=/rel/path\">",
         ] {
             let r = transform(html, &opts()).unwrap();
-            assert!(r.html.contains("?via="), "리라이트 안 됨: {} -> {}", html, r.html);
+            assert!(r.html.contains("?via="), "not rewritten: {} -> {}", html, r.html);
         }
-        // delay 만 있는 형태는 자기 자신 재로드다 — 건드리지 않는다.
+        // Delay-only refresh reloads the current document and is left untouched.
         let r = transform("<meta http-equiv=\"refresh\" content=\"5\">", &opts()).unwrap();
-        assert!(r.html.contains("content=\"5\""), "delay-only 를 건드렸다 -> {}", r.html);
-        // refresh 가 아닌 meta 는 그대로.
+        assert!(r.html.contains("content=\"5\""), "delay-only refresh was modified: {}", r.html);
+        // Unrelated `http-equiv` values are left untouched.
         let r = transform(
             "<meta http-equiv=\"content-type\" content=\"text/html; charset=utf-8\">",
             &opts(),
         )
         .unwrap();
-        assert!(r.html.contains("charset=utf-8"), "무관한 meta 를 건드렸다 -> {}", r.html);
+        assert!(r.html.contains("charset=utf-8"), "unrelated meta tag was modified: {}", r.html);
     }
 
     #[test]
@@ -1867,16 +1554,15 @@ mod tests {
         let r = transform(html, &opts()).unwrap();
         assert!(
             r.html.contains("/zp/api/script?u="),
-            "importmap 값이 스크립트 경로로 안 갔다 -> {}",
+            "importmap values did not route to script endpoint: {}",
             r.html
         );
-        assert!(r.html.contains("kind=module"), "module kind 가 빠졌다 -> {}", r.html);
-        // SRI 해시는 URL 이 아니다 — 건드리면 integrity 검증이 깨진다.
-        assert!(r.html.contains("sha384-abc"), "integrity 해시를 건드렸다 -> {}", r.html);
-        // 원본 타깃 URL 이 남으면 브라우저가 직접 fetch 한다.
+        assert!(r.html.contains("kind=module"), "missing module kind parameter: {}", r.html);
+        // SRI digest values in `integrity` must remain untouched.
+        assert!(r.html.contains("sha384-abc"), "integrity hash was modified: {}", r.html);
         assert!(
             !r.html.contains("https://cdn.example.com/react.js") || r.html.contains("%3A%2F%2Fcdn.example.com"),
-            "raw target URL 이 남았다 -> {}",
+            "raw target URL survived: {}",
             r.html
         );
     }
@@ -1892,22 +1578,21 @@ mod tests {
         let r = transform(html, &opts()).unwrap();
         assert!(
             r.html.contains("/zp/api/fetch?url="),
-            "prefetch URL 이 fetch 경로로 안 갔다 -> {}",
+            "prefetch URL did not route to fetch endpoint: {}",
             r.html
         );
-        assert!(r.html.contains("?via="), "prerender URL 이 내비게이션 경로로 안 갔다 -> {}", r.html);
+        assert!(r.html.contains("?via="), "prerender URL did not route to navigation endpoint: {}", r.html);
     }
 
     #[test]
     fn nonjson_script_types_still_pass_through() {
-        // 템플릿 스크립트는 예전처럼 원본 유지.
         let html = "<script type=\"text/x-handlebars\">{{location}}</script>";
         let r = transform(html, &opts()).unwrap();
-        assert!(r.html.contains("{{location}}"), "템플릿을 건드렸다 -> {}", r.html);
-        // 깨진 JSON 도 그대로 — 브라우저가 어차피 같은 파싱으로 무시한다.
+        assert!(r.html.contains("{{location}}"), "template script was modified: {}", r.html);
+        // Malformed JSON in `importmap` is left unchanged.
         let bad = "<script type=\"importmap\">{not json</script>";
         let r = transform(bad, &opts()).unwrap();
-        assert!(r.html.contains("{not json"), "깨진 JSON 을 건드렸다 -> {}", r.html);
+        assert!(r.html.contains("{not json"), "malformed JSON was modified: {}", r.html);
     }
 
     #[test]
@@ -1917,22 +1602,17 @@ mod tests {
             &opts(),
         )
         .unwrap();
-        assert!(!strip_lit(&r.html).contains("t.example/a.png"), "원본 URL 이 남았다 -> {}", r.html);
+        assert!(!strip_lit(&r.html).contains("t.example/a.png"), "original URL survived: {}", r.html);
     }
 
-// `..`/`.` 정규화. 나머지 리졸버 넷(new URL / Url::join)과 같은 결과를
-    // 내야 한다 — 다르면 같은 리소스에 `?url=` 키가 둘 생긴다.
     #[test]
     fn dot_segments_are_folded() {
         let cases: &[(&str, &str, &str)] = &[
-            // (rel, base, 기대 절대 URL)
             ("../../img/x.png", "https://h/a/b/c.html", "https://h/img/x.png"),
             ("./sibling/../../y.png", "https://h/a/b/c.html", "https://h/a/y.png"),
             ("/a/./b/../c.png", "https://h/deep/page", "https://h/a/c.png"),
             ("../x.png?q=../keep", "https://h/a/b/c.html", "https://h/a/x.png?q=../keep"),
-            // 위로 더 올라가려 해도 루트를 넘지 않는다.
             ("../../../../x.png", "https://h/a/b.html", "https://h/x.png"),
-            // 점이 없으면 그대로.
             ("d/e.png", "https://h/a/b.html", "https://h/a/d/e.png"),
         ];
         for (rel, base, want) in cases {
@@ -1961,8 +1641,7 @@ mod tests {
             &r.html[..r.html.len().min(400)]
         );
     }
-    // `ping` 은 브라우저가 클릭 시 직접 POST 하는 추적 비콘이다. CSP 2선
-    // 방어에 기대지 않고 속성 자체를 걷어낸다 — 값은 진단용으로 남긴다.
+
     #[test]
     fn ping_attribute_is_stripped() {
         let html = r#"<html><body><a href="/x" ping="https://t.example/a https://t.example/b">x</a></body></html>"#;
@@ -1978,10 +1657,10 @@ mod tests {
             &r.html[..r.html.len().min(400)]
         );
     }
-    // A representative document exercising every Pass-1 / Pass-2 path: head,
-    // inline classic + module scripts, external script (src), a stylesheet
-    // link, an absolute anchor, an on* handler, and a javascript: URL — so
-    // chunk-invariance is stressed across all handler kinds.
+
+    // Representative document exercising Pass-1 and Pass-2 paths: head,
+    // inline classic + module scripts, external script (src), stylesheet
+    // link, absolute anchor, on* handler, and javascript: URL.
     const STREAM_SAMPLE: &str = concat!(
         "<!doctype html><html><head><meta charset=utf-8>",
         "<link rel=stylesheet href=\"https://cdn.example.com/app.css\">",
@@ -1996,10 +1675,8 @@ mod tests {
         "</body></html>",
     );
 
-    // Pin: streaming `HtmlTxn` in N chunks == the whole-string `transform`,
-    // for every chunk size — including size 1 (splits tags, scripts, and the
-    // gzip-realistic byte boundaries). This is THE correctness guarantee for
-    // the streaming HTML render: chunk boundaries must never change output.
+    // Streaming `HtmlTxn` in N chunks must match the whole-string `transform`
+    // for every chunk size, including size 1.
     #[test]
     fn streaming_htmltxn_is_chunk_invariant() {
         let o = opts();
@@ -2020,11 +1697,8 @@ mod tests {
         }
     }
 
-    // Repro: NAVER search.js `loadRemoteFrame` embeds search.naver.com/remote_frame
-    // (the CrossDomainStorage helper). It is XHTML (XHTML-1.0 doctype + xmlns +
-    // self-closing <meta/>). If transform() errors on it, the SW returns
-    // MALFORMED_HTML 502 for the iframe → search hydration stalls. This pins that
-    // the real content transforms cleanly.
+    // Verify that XHTML documents (XHTML-1.0 doctype + xmlns + self-closing
+    // `<meta/>`, such as NAVER's CrossDomainStorage helper frame) transform cleanly.
     #[test]
     fn naver_crossstorage_remote_frame_transforms() {
         let html = concat!(
@@ -2042,19 +1716,14 @@ mod tests {
         let r = transform(html, &o);
         assert!(r.is_ok(), "CrossStorage remote_frame failed to transform: {:?}", r.err());
         let out = r.unwrap().html;
-        // Inline scripts must be rewritten (membrane), external src proxied.
-        // 외부 스크립트는 프록시 경로로, 인라인은 실행 래퍼로 — 둘 중 하나는
-        // 있어야 이 문서가 멤브레인을 거친 것이다. (예전에는 소문자 `__zp` 를
-        // 찾았는데, 그건 서버측 리라이트 결과물에만 있는 모양이라 원본
-        // 보존 경로로 바뀌자 바로 깨졌다.)
         assert!(
             out.contains("/zp/api/script") || out.contains("__ZP_EXEC_INLINE"),
             "remote_frame not contained: {out}"
         );
     }
 
-    // Pin: a non-empty prelude is injected exactly once, right after <head>,
-    // and is NOT script-rewritten (our bootstrap must survive verbatim).
+    // A non-empty prelude is injected once inside `<html>` before `<head>` and `<body>`,
+    // and is not rewritten by Pass 2.
     #[test]
     fn streaming_htmltxn_injects_prelude_after_head_unrewritten() {
         let o = opts();
@@ -2067,13 +1736,7 @@ mod tests {
         let (tail, _d) = txn.end().unwrap();
         out.extend_from_slice(&tail);
         let html = String::from_utf8(out).unwrap();
-        // Injected exactly once.
         assert_eq!(html.matches(prelude).count(), 1, "prelude count != 1: {html}");
-        // 2026-08-26 — 앵커가 `head` 에서 `html` 로 앞당겨졌다(머리 없는 문서에서
-        // 프렐류드가 body 안으로 들어가면 그 안의 CSP meta 가 무시되기 때문이다).
-        // 그래서 고정할 불변식은 "head 의 첫 자식" 이 아니라 **"문서 요소 맨 앞,
-        // head 와 body 보다 먼저"** 다. 파서는 `<html>` 직후의 meta/script 를
-        // 암묵적 head 에 넣으므로 결과는 같고 더 이르다.
         let p_at = html.find(prelude).unwrap();
         let html_open = html.to_lowercase().find("<html").expect("html start");
         assert!(p_at > html_open, "prelude must be inside <html>: {html}");
@@ -2082,45 +1745,13 @@ mod tests {
                 assert!(p_at < i, "prelude must precede {later}: {html}");
             }
         }
-        // The prelude's own `location.href` must remain raw (NOT wrapped in
-        // __ZP_EXEC_INLINE_REWRITTEN / membrane calls) — it bypassed Pass 2.
+        // The prelude's own `location.href` must remain raw (bypassing Pass 2).
         assert!(
             html.contains("var __zp_boot = location.href;"),
             "prelude script was rewritten (must be verbatim): {html}"
         );
     }
 
-    // Pin: `<head>` 가 없는 문서에도 프렐류드가 들어가야 한다.
-    //
-    // 실제 장애였다. NAVER 로그인 결과는 `<script>location.replace(...)</script>`
-    // 만 든 미니 문서로 오는데, 우리는 브라우저 파서가 아니라 원본 바이트를 보므로
-    // 브라우저가 자동 생성해 주는 `<head>` 가 여기엔 없다. 그런데 인라인 스크립트는
-    // `__ZP_EXEC_INLINE_REWRITTEN(...)` 호출로 바뀌므로, 프렐류드가 없으면
-    // `ReferenceError` 로 문서가 통째로 죽는다(흰 화면).
-    // 2026-08-14 — 타깃이 `<meta http-equiv="Content-Security-Policy">` 로 실어
-    // 보내는 자기 CSP 는 무력화해야 한다. 응답 헤더의 CSP 는 SW 가 교체하지만
-    // meta 는 그대로 통과하고 있었고, 그러면 **그들의 정책이 우리 문서에 적용된다.**
-    // NAVER 로그인 페이지 실측: 그들의 nonce 정책이 우리가 리라이트한 인라인
-    // 스크립트("Executing inline script violates … 'nonce-…'")와 멤브레인의 eval
-    // 경로("'unsafe-eval' is not an allowed source")를 둘 다 막았다. 우리는 그들의
-    // nonce 를 재현할 수 없으므로 이 meta 는 반드시 죽여야 한다.
-    // 2026-08-14 — `srcset` / `imagesrcset` 도 리라이트한다.
-    //
-    // 목록에 `("source","src")` 는 있는데 `srcset` 이 없어서, NAVER 로그인의
-    // 소셜 아이콘(`<picture><source srcset="https://ssl.pstatic.net/…svg">`)이
-    // 원본 URL 로 남아 CSP `img-src 'self'` 에 걸려 차단됐다. taskweaver
-    // `--enforce-csp` 로 CSP 를 실제로 켜기 전까지는 SW 가 받아 주는 바람에
-    // 증상이 보이지 않았다.
-    // 2026-08-14 — 인라인 `<style>` 안의 URL 도 리라이트한다.
-    //
-    // 외부 스타일시트는 SW 의 rewriteCSSResponse 가 처리하는데 문서에 인라인으로
-    // 박힌 CSS 는 아무도 안 건드리고 있었다. `--enforce-csp` 로 CSP 를 실제로
-    // 켜자 `@font-face` 의 폰트 URL 이 `font-src 'self'` 에 걸려 드러났다.
-    // 2026-08-14 — `style` **속성** 안의 url() 도 CSS 다.
-    //
-    // 인라인 `<style>` 요소를 닫은 뒤에도 naver.com 에서 CSP 위반이 남았다:
-    // `<div style="… background-image: url(https://s.pstatic.net/…)">`.
-    // 속성 값은 스타일시트가 아니라 선언 목록이라 `a{…}` 로 감쌌다 벗긴다.
     #[test]
     fn style_attribute_urls_are_rewritten() {
         let prelude = "<script nonce=zp></script>";
@@ -2138,10 +1769,8 @@ mod tests {
 
         assert!(!strip_lit(&html).contains("url(https://cdn.test/bg.png)"), "style attr url raw: {html}");
         assert!(html.contains("/zp/api/fetch?url="), "no proxied url emitted: {html}");
-        // 다른 선언은 그대로 남아야 한다 — 감쌌다 벗기기가 값을 갉아먹으면 안 된다.
         assert!(html.contains("position:absolute"), "sibling declaration lost: {html}");
         assert!(html.contains("color: red"), "unrelated style attr mangled: {html}");
-        // inert 스킴은 손대지 않는다.
         assert!(html.contains("data:image/gif;base64,"), "data: url touched: {html}");
     }
 
@@ -2163,10 +1792,8 @@ mod tests {
         assert!(!html.contains("https://cdn.test/probe.woff2"), "@font-face url raw: {html}");
         assert!(!html.contains("https://cdn.test/bg.png"), "background url raw: {html}");
         assert!(html.contains("/zp/api/fetch?url="), "no proxied url emitted: {html}");
-        // 선언 자체는 살아 있어야 한다 — CSS 를 통째로 날리면 페이지가 무너진다.
         assert!(html.contains("@font-face"), "@font-face dropped: {html}");
         assert!(html.contains("format("), "declaration mangled: {html}");
-        // inert 스킴은 그대로 — 네트워크로 나가지 않으므로 프록시할 이유가 없다.
         assert!(html.contains("data:image/gif;base64,"), "data: url touched: {html}");
     }
 
@@ -2185,14 +1812,11 @@ mod tests {
         out.extend_from_slice(&tail);
         let html = String::from_utf8(out).unwrap();
 
-        // 후보 URL 이 하나도 원본으로 남아선 안 된다.
         assert!(!strip_lit(&html).contains("\"https://cdn.test/a.svg\""), "source srcset raw: {html}");
         assert!(!strip_lit(&html).contains("https://cdn.test/1x.png 1x"), "img srcset raw: {html}");
         assert!(!strip_lit(&html).contains("https://cdn.test/2x.png 2x"), "img srcset 2x raw: {html}");
-        // 디스크립터와 목록 모양은 보존된다.
         assert!(html.contains(" 1x,"), "descriptor/comma lost: {html}");
         assert!(html.contains(" 2x\""), "descriptor lost: {html}");
-        // `data:` 는 그대로 통과해야 하고, 내부 콤마 때문에 잘리면 안 된다.
         assert!(
             html.contains("data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs= 1x"),
             "data: URL mangled: {html}"
@@ -2214,29 +1838,23 @@ mod tests {
         out.extend_from_slice(&tail);
         let html = String::from_utf8(out).unwrap();
 
-        // E2: meta CSP 는 헤더 CSP 와 합성 적용이라 살려 둬도 엄격화만 가능하다 —
-        // http-equiv 는 남되 content 가 배관 소스를 얹은 교집합으로 바뀐다.
         assert!(
             html.to_ascii_lowercase()
                 .contains(" http-equiv=\"content-security-policy\""),
             "CSP meta must survive filtered: {html}"
         );
-        // 배관 필수 소스가 얹혔다 — 'nonce-abc' 단독이면 인라인/eval 경로가 죽는다.
         assert!(
             html.contains("'nonce-abc' 'self' 'unsafe-inline' 'unsafe-eval'"),
             "infra sources not merged: {html}"
         );
-        // 원본 값은 진단 스태시에 남는다 — 페이지 JS 가 자기 정책을 읽는 경우 대비.
         assert!(html.contains("data-zp-blocked-http-equiv"), "no marker: {html}");
         assert!(html.contains("nonce-abc"), "policy value dropped: {html}");
-        // 무관한 http-equiv 는 건드리지 않는다.
         assert!(html.contains("X-UA-Compatible"), "unrelated meta touched: {html}");
     }
 
     #[test]
     fn target_csp_meta_with_entity_quotes_is_filtered_as_the_browser_reads_it() {
-        // Cloudflare's challenge template writes its policy with `&#39;` quotes. Read raw, the value split at the `;`
-        // inside each entity and every quoted source list became a lone `'`.
+        // Cloudflare's challenge template writes its policy with `&#39;` quotes.
         for quote in ["&#39;", "&apos;", "&#x27;"] {
             let policy = "default-src 'none'; script-src 'nonce-abc' https://challenges.cloudflare.com; img-src 'self'"
                 .replace('\'', quote);
@@ -2259,17 +1877,13 @@ mod tests {
     #[test]
     fn filter_meta_csp_intersects() {
         use zp_shared::csp::filter_meta_csp;
-        // INFRA 지시어: 타깃 소스 + 배관 최소치. 'none' 은 배관 위해 풀린다.
         let out = filter_meta_csp("script-src 'none'; connect-src https://api.t");
         assert!(out.contains("script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' blob:"), "{out}");
         assert!(out.contains("connect-src https://api.t 'self' blob: data:"), "{out}");
-        // 리소스 지시어: 'none' 존중, 아니면 'self' 얹기.
         assert_eq!(filter_meta_csp("img-src 'none'"), "img-src 'none'");
         assert_eq!(filter_meta_csp("img-src https:"), "img-src https: 'self'");
-        // DROP: 배관과 무관하게 위험/무의미한 지시어는 남지 않는다.
         assert_eq!(filter_meta_csp("sandbox allow-scripts"), "");
         assert_eq!(filter_meta_csp("report-uri /x; upgrade-insecure-requests; frame-ancestors *"), "");
-        // 모르는 지시어도 drop.
         assert_eq!(filter_meta_csp("some-future-directive https:"), "");
     }
 
@@ -2288,10 +1902,7 @@ mod tests {
             let html = String::from_utf8(out).unwrap();
 
             assert_eq!(html.matches(prelude).count(), 1, "prelude count != 1 for {doc}: {html}");
-            // 그리고 자기를 필요로 하는 호출보다 **앞에** 있어야 한다.
             let p = html.find(prelude).unwrap();
-            // 래퍼는 둘 중 하나다 — 작은 입력은 원본 보존 경로,
-            // 병적으로 큰 입력만 서버측 단일 리라이트다.
             let call = html
                 .find("__ZP_EXEC_INLINE_SCRIPT(")
                 .or_else(|| html.find("__ZP_EXEC_INLINE_REWRITTEN("))
@@ -2300,10 +1911,9 @@ mod tests {
         }
     }
 
-    /// None of the four anchors (`html`/`head`/`body`/`script`) in the source:
-    /// the streaming path used to emit NO prelude at all — a document with no
-    /// membrane and no CSP meta (2026-10-01). It must land before the first
-    /// element, else before the first non-blank text, else at the end.
+    /// When none of `html`/`head`/`body`/`script` appear in the source, the prelude
+    /// must still be injected before the first element, before the first non-blank
+    /// text node, or at the end of the document.
     #[test]
     fn prelude_is_injected_into_tagless_documents() {
         let prelude = "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'\"><script nonce=zp></script>";
@@ -2328,8 +1938,7 @@ mod tests {
             let html = run(doc);
             assert_eq!(html.matches(prelude).count(), 1, "prelude count != 1 for {doc:?}: {html}");
         }
-        // Blank text before `<html>` is not content: the prelude still goes
-        // inside `<html>`, exactly where it went before.
+        // Leading whitespace before `<html>` is not content; the prelude goes inside `<html>`.
         let html = run("\n\n<html><head></head><body>x</body></html>");
         assert_eq!(html.matches(prelude).count(), 1, "{html}");
         assert!(html.find("<html>").unwrap() < html.find(prelude).unwrap(), "prelude left <html>: {html}");
@@ -2337,10 +1946,8 @@ mod tests {
 
     #[test]
     fn prelude_lands_in_head_not_body() {
-        // 프렐류드에는 **CSP meta 가 들어 있다.** body 안의 CSP meta 는 브라우저가
-        // 무시하고, 스트리밍 응답에서는 CSP 헤더도 강제되지 않는다(측정 완료) —
-        // 그 조합이면 정책이 하나도 안 걸린다. 그래서 head 가 없는 문서에서도
-        // `<body>` **앞**에 들어가야 한다.
+        // The prelude contains a CSP `<meta>` tag, which browsers ignore if placed inside
+        // `<body>`. Ensure the prelude precedes `<body>` even when `<head>` is omitted.
         let prelude = "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'\">";
         for doc in [
             "<html><body><p>x</p></body></html>",
@@ -2357,7 +1964,7 @@ mod tests {
             assert_eq!(html.matches(prelude).count(), 1, "prelude count != 1 for {doc}: {html}");
             let p = html.find(prelude).unwrap();
             let body = html.to_lowercase().find("<body").expect("body start");
-            assert!(p < body, "프렐류드가 <body> 뒤로 갔다 — CSP meta 가 무시된다: {html}");
+            assert!(p < body, "prelude was emitted after <body>, where CSP meta is ignored: {html}");
         }
     }
 
@@ -2365,25 +1972,21 @@ mod tests {
     fn inline_script_rewrites_location() {
         let html = "<html><body><script>var u = location.href;</script></body></html>";
         let r = transform(html, &opts()).unwrap();
-        // ★2026-08-22 — 작은 인라인은 **원본 그대로** 실어 보내고 페이지가
-        // 리라이트한다. 그래야 페이지가 자기 소스를 다시 읽을 때 우리
-        // 흔적이 안 보인다. 봉쇄는 그대로다 — 래퍼를 거치지 않고는 실행될
-        // 수 없고, 래퍼 안에서 페이지 리라이터가 멤브레인을 입힌다.
+        // Small inline scripts are wrapped with their unrewritten source in
+        // `__ZP_EXEC_INLINE_SCRIPT` and rewritten by the page-side rewriter at execution time.
         assert!(
             r.html.contains("__ZP_EXEC_INLINE_SCRIPT("),
             "wrap missing: {}",
             r.html
         );
-        // 원본이 그대로 들어 있어야 한다(페이로드 = 원본).
         assert!(
             r.html.contains("var u = location.href;"),
-            "원본이 보존되지 않았다: {}",
+            "original source was not preserved: {}",
             r.html
         );
-        // 다만 **래퍼 밖**에서 맨머리로 실행되면 안 된다.
         assert!(
             !r.html.contains("<script>var u = location.href;</script>"),
-            "래퍼 없이 그대로 남았다: {}",
+            "script remained unwrapped: {}",
             r.html
         );
     }
@@ -2402,10 +2005,6 @@ mod tests {
 
     #[test]
     fn external_script_src_untouched_by_body_pass() {
-        // The src= URL itself is rewritten by the URL attribute observer in
-        // runtime-prelude or by Phase D1; this test only ensures we don't
-        // try to rewrite a body that doesn't exist. Use an absolute URL so
-        // the src-rewrite path is identical to production.
         let html = "<script src=\"https://example.com/runtime.js\"></script>";
         let r = transform(html, &opts()).unwrap();
         assert!(
@@ -2435,7 +2034,6 @@ mod tests {
     fn module_script_rewrites_window() {
         let html = "<script type=\"module\">import x from './m.js'; use(window);</script>";
         let r = transform(html, &opts()).unwrap();
-        // 작은 모듈도 원본 보존 경로로 간다(페이지가 리라이트).
         assert!(
             r.html.contains("__ZP_EXEC_INLINE_MODULE("),
             "module wrap missing: {}",
@@ -2443,7 +2041,7 @@ mod tests {
         );
         assert!(
             r.html.contains("use(window);"),
-            "원본이 보존되지 않았다: {}",
+            "original source was not preserved: {}",
             r.html
         );
     }
@@ -2501,7 +2099,7 @@ mod tests {
         // The body is URL-encoded: `top.location='x'`
         let html = "<a href=\"javascript:top.location%3D'x'\">x</a>";
         let r = transform(html, &opts()).unwrap();
-        // Encoded percent-triple decoded prior to OXC parse → `top` rewritten.
+        // Percent-encoded characters are decoded prior to OXC parsing so `top` is rewritten.
         assert!(
             r.html.contains("data-zp-jsurl"),
             "should have stash: {}",
@@ -2511,10 +2109,8 @@ mod tests {
 
     #[test]
     fn anchor_absolute_href_rewritten_to_proxy_via() {
-        // 2026-06-06 escape vector fix: raw target on <a href> leaks to
-        // browser-native UI (hover/middle-click/copy-link/open-in-new-tab).
-        // Rewrite to a proxy-origin "?via=" URL + stash absolute on
-        // data-zp-target-url for the prelude click handler's fast path.
+        // Rewrite `<a href>` to a proxy-origin `?via=` URL and stash the absolute
+        // target URL on `data-zp-target-url` for the prelude click handler's fast path.
         let html = "<a href=\"https://example.com/x\">x</a>";
         let r = transform(html, &opts()).unwrap();
         assert!(
@@ -2563,7 +2159,7 @@ mod tests {
     #[test]
     fn anchor_fragment_only_href_left_alone() {
         // Page-internal fragment anchors (`#section`) carry no target host,
-        // so leave them as-is — the prelude click handler treats them as
+        // so leave them as-is; the prelude click handler treats them as
         // virtual hash updates.
         let html = "<a href=\"#topAside\">x</a>";
         let r = transform(html, &opts()).unwrap();
@@ -2655,7 +2251,6 @@ mod tests {
 
     #[test]
     fn naver_real_world_anchor_reproducer() {
-        // Real NAVER main page anchor patterns observed in DOM.
         let html = concat!(
             "<a href=\"https://whale.naver.com/ko/?wpid=main_theme1\" class=\"link_top\">",
             "<span class=\"top_text\">\u{B2E4}\u{C6B4}\u{B85C}\u{B4DC}</span></a>",
@@ -2691,9 +2286,8 @@ mod tests {
 
     #[test]
     fn proxy_origin_blank_skips_navigation_rewrite() {
-        // Host-test fallback: when proxy_origin is empty (legacy / test
-        // harness), don't synthesize a URL — leave the raw attribute so
-        // callers can opt out cleanly.
+        // When `proxy_origin` is empty (test harness fallback), leave the raw
+        // navigation attribute untouched.
         let html = "<a href=\"https://example.com/x\">x</a>";
         let mut o = opts();
         o.proxy_origin = String::new();
@@ -2707,46 +2301,38 @@ mod tests {
 
     #[test]
     fn numeric_html_entity_in_url_is_decoded() {
-        // CNN 실측: `<source src="…mp4?c&#x3D;original">`.
-        // `&#x3D;` 는 `=` 다. 표에 없으면 엔티티가 안 풀린 채 URL 인코딩을
-        // 거치고, 남은 `#x3D;original` 이 프래그먼트로 새어 400 이 난다.
         for raw in ["&#x3D;", "&#X3D;", "&#61;"] {
             let src = format!("https://media.example/a.mp4?c{}original", raw);
             let decoded = decode_url_html_entities(&src);
             assert_eq!(
                 &*decoded, "https://media.example/a.mp4?c=original",
-                "숫자 엔티티({})가 안 풀렸다: {}",
+                "numeric entity ({}) was not decoded: {}",
                 raw, decoded
             );
         }
-        // 숫자 엔티티가 아닌 것은 그대로 둔다(공격면을 넓히지 않는다).
+        // Invalid numeric character references are left untouched.
         let untouched = decode_url_html_entities("https://a/b?x&#zz;y");
         assert_eq!(&*untouched, "https://a/b?x&#zz;y");
     }
 
     #[test]
     fn inline_style_keeps_child_combinator_unescaped() {
-        // `<style>` 은 raw text — 이스케이프하면 엔티티가 안 풀려 규칙이 죽는다.
-        // CNN 실측: `>` 671건이 전부 `&gt;` 가 되어 규칙 98개가 사라졌다.
+        // `<style>` is raw text; `>` and `<` must not be HTML-escaped into `&gt;`/`&lt;`.
         let html = "<style>.a>div:nth-child(3){width:calc(33.33% - 16px)}</style>";
         let out = transform(html, &opts()).unwrap().html;
         assert!(
             out.contains(".a>div:nth-child(3)"),
-            "자식 결합자가 이스케이프됐다: {out}"
+            "child combinator was HTML-escaped: {out}"
         );
-        assert!(!out.contains("&gt;"), "스타일 안에 &gt; 가 새어 들어갔다: {out}");
-        // `<` 도 마찬가지다 (미디어 쿼리 range 문법).
+        assert!(!out.contains("&gt;"), "&gt; leaked into style content: {out}");
         let ranged = transform("<style>@media (400px<width<800px){.b{color:red}}</style>", &opts()).unwrap().html;
-        assert!(!ranged.contains("&lt;"), "미디어 쿼리 range 가 이스케이프됐다: {ranged}");
+        assert!(!ranged.contains("&lt;"), "media query range was HTML-escaped: {ranged}");
     }
 
     #[test]
     fn stylesheet_link_with_html_entity_decoded() {
-        // Wikipedia emits `<link href="…/load.php?lang=en&amp;modules=…">`;
-        // lol_html returns the raw value with `&amp;` intact, so percent-
-        // encoding without HTML-entity decoding produces a URL where the
-        // upstream server reads `&amp;modules=` as a separate key and returns
-        // empty CSS. Decode first, then percent-encode the canonical URL.
+        // Decode HTML entities (`&amp;`) in attribute values before percent-encoding
+        // the canonical target URL.
         let html = "<link rel=\"stylesheet\" href=\"https://cdn.example.com/load.php?lang=en&amp;modules=site.styles\">";
         let r = transform(html, &opts()).unwrap();
         assert!(
@@ -2754,9 +2340,8 @@ mod tests {
             "link href must route through SW: {}",
             r.html
         );
-        // The encoded URL must not contain the encoded entity `%26amp%3B`
-        // (which is `&amp;` percent-encoded). It must contain `%26` (`&`)
-        // followed by `modules=` directly.
+        // The encoded URL must not contain `%26amp%3B` (`&amp;` percent-encoded);
+        // it must contain `%26modules%3D` (`&modules=`).
         assert!(
             !r.html.contains("%26amp%3B"),
             "must not preserve `&amp;` entity in URL: {}",
@@ -2793,8 +2378,8 @@ mod tests {
         );
     }
 
-    // An icon link carries nothing the browser would fetch for the tab icon: the parser reports it before the prelude can
-    // hide it. Its target and literal stay in the stashes the membrane reads.
+    // Icon links carry an inert data URI in `href` while keeping the target and
+    // literal URLs in `data-zp-*` stashes for the membrane.
     #[test]
     fn icon_link_carries_the_hidden_href_and_keeps_its_target() {
         for rel in ["icon", "shortcut icon", "apple-touch-icon", "MASK-ICON"] {
@@ -2805,15 +2390,15 @@ mod tests {
             assert!(r.html.contains("data-zp-lit-href=\"/site-icon.png\""), "{rel}: literal stash: {}", r.html);
             assert!(r.html.contains("data-zp-target-url=\"https://"), "{rel}: target stash: {}", r.html);
         }
-        // not an icon: still routed
+        // Non-icon `<link>` elements continue to route through `/zp/api/fetch`.
         let r = transform("<link rel=\"preload\" as=\"image\" href=\"/site-icon.png\">", &opts()).unwrap();
         assert!(r.html.contains("/zp/api/fetch?url="), "{}", r.html);
     }
 
     #[test]
     fn host_relative_img_resolved_against_target() {
-        // Naver shopsquare iframe emits <img src="/_next/image?...">; without
-        // base resolution the browser fetches from the proxy origin → 404.
+        // Host-relative `<img src="/_next/image?...">` must be resolved against `target_url`
+        // before encoding into the proxy fetch query.
         let html = "<img src=\"/_next/image?url=%2Fpng%2Ferror.png&w=1920&q=75\">";
         let opts = TransformOptions {
             target_url: "https://shopsquare.naver.com/".into(),
@@ -2822,8 +2407,6 @@ mod tests {
             proxy_origin: "http://proxy.localhost:18080".into(),
         };
         let r = transform(html, &opts).unwrap();
-        // Encoded form of `https://shopsquare.naver.com/_next/image?url=%2Fpng%2Ferror.png&w=1920&q=75`
-        // (we expect the absolute URL to be percent-encoded into the proxy fetch query).
         assert!(
             r.html
                 .contains("shopsquare.naver.com%2F_next%2Fimage"),
@@ -2856,11 +2439,8 @@ mod tests {
 
     #[test]
     fn external_script_src_uses_proxy_origin_absolute() {
-        // Regression: virtual baseURI override on the page resolves
-        // root-relative `/zp/...` against the target host, so subresources
-        // must emit a proxy-origin-absolute URL. See
-        // .ai/trap-notebook/membrane.md (2026-05-29 setScriptSource fix) for the
-        // companion runtime-prelude bug that re-stripped this prefix.
+        // Virtual `baseURI` overrides on the page resolve root-relative `/zp/...`
+        // against the target host, so subresources must emit a proxy-origin-absolute URL.
         let html = "<script defer src=\"https://pm.pstatic.net/resources/js/preload.js\"></script>";
         let r = transform(html, &opts()).unwrap();
         assert!(
@@ -2873,10 +2453,9 @@ mod tests {
 
     #[test]
     fn module_script_src_carries_module_kind() {
-        // GitHub 실측(2026-09-29): import/export 없는 모듈 두 개가 각각
-        // top-level `let e` 를 가진다. kind 없이 `/zp/api/fetch` 로 가면 SW 가
-        // classic 으로 리라이트하고, R1 레지스트리가 둘째를 "already declared"
-        // 로 죽인다. SW 가 모듈임을 알 수 있는 곳은 URL 뿐이다.
+        // Module scripts and `modulepreload` links route to `/zp/api/script?u=...&kind=module`
+        // so the Service Worker rewrites them as ES modules even when they contain no
+        // `import`/`export` syntax.
         let html = "<link rel=\"preload modulepreload\" href=\"/assets/m.js\">\
                     <link rel=\"preload\" as=\"script\" href=\"/assets/c.js\">\
                     <script type=\" Module \" src=\"/assets/m.js\"></script>\
@@ -2886,9 +2465,9 @@ mod tests {
         let r = transform(html, &opts()).unwrap();
         let out = r.html.replace("&amp;", "&");
         let m = "http://proxy.localhost:18080/zp/api/script?u=https%3A%2F%2Fexample.com%2Fassets%2Fm.js&kind=module";
-        assert_eq!(out.matches(m).count(), 2, "modulepreload 과 module script 는 같은 정규형: {out}");
-        assert_eq!(out.matches("/zp/api/fetch?url=").count(), 2, "classic 과 preload as=script 는 그대로: {out}");
-        // 정적 `import` 가 내는 URL 과 **바이트 단위로** 같아야 모듈 맵에 한 벌만 올라간다.
+        assert_eq!(out.matches(m).count(), 2, "modulepreload and module script must share canonical form: {out}");
+        assert_eq!(out.matches("/zp/api/fetch?url=").count(), 2, "classic script and preload as=script must use fetch route: {out}");
+        // Must match the exact URL emitted by static `import` specifier rewriting.
         let imported = rewrite_script(
             "import './assets/m.js';",
             &RewriteOpts {
@@ -2899,8 +2478,7 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(imported.code.contains(m), "정적 import 정규형과 달라졌다: {}", imported.code);
-        // 트림된 `type` — 인라인 모듈은 module 래퍼로 가야 classic 리라이트를 피한다.
+        assert!(imported.code.contains(m), "differed from static import canonical form: {}", imported.code);
         assert!(out.contains("__ZP_EXEC_INLINE_MODULE(\"let e = 1;\")"), "{out}");
         assert!(out.contains("__ZP_EXEC_INLINE_SCRIPT(\"let f = 1;\")"), "{out}");
     }
@@ -2918,11 +2496,9 @@ mod tests {
 
     #[test]
     fn unreserved_bytes_stay_raw_so_css_attribute_selectors_still_match() {
-        // An SDK that finds its own tag via `script[src*="ncaptcha-api.js"]`
-        // is matched by the engine against the RAW attribute — CSS selectors
-        // sit below the membrane, so `.`/`-`/`_`/`~` must survive encoding or
-        // self-discovery silently fails (NAVER WTM captcha: `ncaptcha-onload`
-        // never fired → `wtmncapt is not defined` in every submitted token).
+        // CSS attribute selectors (`script[src*="ncaptcha-api.js"]`) match against
+        // the raw DOM attribute below the JS membrane, so RFC 3986 unreserved bytes
+        // (`.`/`-`/`_`/`~`) must stay unescaped while reserved delimiters stay escaped.
         let html = "<script src=\"https://ncpt.naver.com/static/ncaptcha-api.js?k=1\"></script>";
         let r = transform(html, &opts()).unwrap();
         assert!(r.html.contains("ncaptcha-api.js?k=1") || r.html.contains("ncaptcha-api.js%3Fk"));
@@ -2931,33 +2507,22 @@ mod tests {
             "unreserved bytes must stay raw inside url=: {}",
             r.html
         );
-        // …but reserved delimiters stay escaped — no new escape hatch.
         assert!(r.html.contains("url=https%3A%2F%2Fncpt.naver.com"), "got: {}", r.html);
         assert!(r.html.contains("%3Fk%3D1"), "query delimiters must stay encoded: {}", r.html);
     }
 
     #[test]
     fn relative_subresource_resolved_against_target() {
-        // Earlier this test claimed the SW classifier would pick relative URLs
-        // up via VIRTUAL_SUBRESOURCE — but classify() only routes paths under
-        // /zp/, so `/static/a.css` actually fell through to UNKNOWN → fetch
-        // failure. The real fix is to resolve relatives against the target
-        // URL here so the browser issues a proxified absolute fetch.
+        // Resolve relative subresource URLs against `target_url` and fold `.`/`..`
+        // dot-segments so the encoded `?url=` key matches the page realm's `new URL()`.
         let html =
             "<link rel=\"stylesheet\" href=\"/static/a.css\"><script src=\"./b.js\"></script>";
         let r = transform(html, &opts()).unwrap();
-        // Host-relative against https://example.com/ → https://example.com/static/a.css
         assert!(
             r.html.contains("example.com%2Fstatic%2Fa.css"),
             "host-relative link must resolve against target: {}",
             r.html
         );
-        // Path-relative against https://example.com/ → https://example.com/b.js
-        //
-        // 2026-08-21 — 이 단언은 예전에 `example.com%2F.%2Fb.js` 를 기대했다.
-        // 즉 **정규화하지 않는 동작을 고정**하고 있었다. `.`/`..` 를 접지 않으면
-        // 같은 리소스에 `?url=` 키가 둘 생겨(서버가 만든 것 / 페이지 realm 이
-        // 계산한 것) `alreadyMapped` 단축과 컨텍스트 키가 어긋난다.
         assert!(
             r.html.contains("example.com%2Fb.js"),
             "path-relative script must resolve against target: {}",
@@ -2976,12 +2541,9 @@ mod tests {
 
     #[test]
     fn iframe_src_still_left_alone() {
-        // iframe navigation stays under the runtime-prelude's
-        // `installNetworkContainment` hook for now — rewriting iframe src in
-        // htmltx would race with the child-realm fetch pipeline (sw control
-        // reset after document.write, child Function captured, etc.). The
-        // anchor/form/input/button rewrite landed 2026-06-06 explicitly
-        // EXCLUDES iframe to avoid regression. See trap-notebook.
+        // `iframe[src]` is moved to `data-zp-frame-src` rather than rewritten to
+        // `/zp/api/fetch` or `?via=` so the runtime-prelude `installNetworkContainment`
+        // hook can route the frame through the document pipeline.
         let html = "<iframe src=\"https://other.example/f\"></iframe>";
         let r = transform(html, &opts()).unwrap();
         assert!(
@@ -3001,11 +2563,7 @@ mod tests {
 #[cfg(test)]
 mod naver_perf {
     use super::*;
-    // Diagnostic: how long does transform() take on the REAL NAVER document
-    // (8 inline scripts, 204 KB total, largest 181 KB)? This runs on the SW's
-    // single JS thread in production, so anything measured in seconds here
-    // means the Service Worker is wedged for that long — no fetch, no stream
-    // delivery, CDP unresponsive.
+    // Benchmark `transform()` on a real NAVER document when `ZP_NAVER_HTML` is set.
     #[test]
     #[ignore]
     fn time_naver_document() {
@@ -3028,8 +2586,7 @@ mod naver_perf {
 #[cfg(test)]
 mod naver_stream_perf {
     use super::*;
-    // The production path is STREAMING (HtmlTxn.write per decoded chunk), not
-    // the buffered transform(). Measure the real cost at realistic chunk sizes.
+    // Benchmark streaming `HtmlTxn::write` across chunk sizes when `ZP_NAVER_HTML` is set.
     #[test]
     #[ignore]
     fn time_naver_streaming() {
@@ -3057,11 +2614,8 @@ mod naver_stream_perf {
     }
 }
 
-/// URL 표면 픽스처 대조 — `crates/zp-shared/testdata/url_surfaces.json`.
-///
-/// 2026-08-20~21 에 같은 부류로 세 번 걸렸다: 표면이 한쪽 목록에만 있어서
-/// 다른 경로로 들어오면 원본 URL 이 그대로 나갔다. 목록을 눈으로 비교하는
-/// 대신 **픽스처의 모든 항목을 실제로 transform() 에 통과시킨다.**
+/// Verify URL-bearing attribute handling against `crates/zp-shared/testdata/url_surfaces.json`
+/// (shared with `test/js/static-policy.test.js`).
 #[cfg(test)]
 mod surface_fixture {
     use super::tests::opts;
@@ -3076,7 +2630,7 @@ mod surface_fixture {
         } else {
             TARGET.to_string()
         };
-        // SVG 요소는 <svg> 안에 두어야 파서가 같은 이름으로 만든다.
+        // Wrap SVG elements inside `<svg>` so the HTML parser constructs them in the SVG namespace.
         if matches!(tag, "image" | "use" | "feimage") {
             format!("<svg><{tag} {attr}=\"{value}\"></{tag}></svg>")
         } else {
@@ -3084,12 +2638,6 @@ mod surface_fixture {
         }
     }
 
-    /// 픽스처는 페이지 realm 의 JS 구현과 **공유**한다
-    /// (`test/js/static-policy.test.js` 가 같은 파일을 읽는다). 여기서만 통과하는
-    /// 것은 의미가 없다 — 이틀 동안 사고 넷이 전부 "서버에는 있는데 페이지
-    /// realm 에는 없는" 형태였다.
-    /// SRI 는 리라이트한 본문과 절대 안 맞는다 — 벗기지 않으면 리소스가
-    /// 통째로 차단된다(2026-08-21 실측: 대조군 실행 / 프록시 차단).
     #[test]
     fn integrity_is_stripped_and_backed_up() {
         for tag in ["script", "link"] {
@@ -3099,24 +2647,21 @@ mod surface_fixture {
             let out = transform(&html, &opts()).expect("transform").html;
             assert!(
                 !out.contains(" integrity=\""),
-                "{tag}: integrity 가 남았다 — 브라우저가 리소스를 차단한다: {out}"
+                "{tag}: integrity attribute remained and would block the resource: {out}"
             );
             assert!(
                 out.contains("data-zp-integrity=\"sha384-AAA\""),
-                "{tag}: 원본 값이 백업 안 됐다 — 페이지가 되읽으면 거짓말이 된다: {out}"
+                "{tag}: original integrity value was not backed up: {out}"
             );
         }
     }
 
-    /// integrity 가 없으면 백업 속성도 만들지 않는다(빈 속성이 늘면 지문이 된다).
     #[test]
     fn integrity_backup_is_absent_when_there_was_none() {
         let out = transform("<script src=\"/a.js\"></script>", &opts()).expect("transform").html;
-        assert!(!out.contains("data-zp-integrity"), "없던 백업 속성이 생겼다: {out}");
+        assert!(!out.contains("data-zp-integrity"), "unexpected data-zp-integrity attribute: {out}");
     }
 
-    /// `<base href>` 는 그 뒤에 파싱되는 상대 URL 의 기준이다. 무시하면
-    /// 서브리소스가 **다른 오리진의 다른 경로**로 간다(2026-08-21 실측).
     #[test]
     fn base_href_rebases_following_relative_urls() {
         let html = concat!(
@@ -3126,11 +2671,10 @@ mod surface_fixture {
         let out = transform(html, &opts()).expect("transform").html;
         assert!(
             out.contains("url=http%3A%2F%2Fcdn.example%2Fdeep%2Frel.png"),
-            "base 기준으로 안 풀렸다: {out}"
+            "URL did not resolve against <base>: {out}"
         );
     }
 
-    /// `<base>` **앞**에 있는 것은 문서 URL 기준이다(명세도 그렇다).
     #[test]
     fn elements_before_base_use_the_document_url() {
         let html = concat!(
@@ -3138,29 +2682,24 @@ mod surface_fixture {
             "<base href=\"http://cdn.example/deep/\"><img src=\"late.png\"></head></html>"
         );
         let out = transform(html, &opts()).expect("transform").html;
-        assert!(out.contains("example.com%2Fearly.png"), "앞 요소가 base 를 탔다: {out}");
-        assert!(out.contains("cdn.example%2Fdeep%2Flate.png"), "뒤 요소가 base 를 안 탔다: {out}");
+        assert!(out.contains("example.com%2Fearly.png"), "element before <base> resolved against <base>: {out}");
+        assert!(out.contains("cdn.example%2Fdeep%2Flate.png"), "element after <base> did not resolve against <base>: {out}");
     }
 
-    /// `<base href>` 자체는 리라이트하지 않는다 — 페이지 realm 이 원본을 읽어
-    /// 가상 base 를 세운다. 프록시 경로로 바꾸면 그 계산이 어긋난다.
     #[test]
     fn base_href_attribute_itself_is_left_alone() {
         let html = "<html><head><base href=\"http://cdn.example/deep/\"></head></html>";
         let out = transform(html, &opts()).expect("transform").html;
         assert!(
             out.contains("href=\"http://cdn.example/deep/\""),
-            "base href 가 바뀌었다: {out}"
+            "base href was modified: {out}"
         );
     }
 
-    /// ERRATA §J 속성 커버리지 열거 — fetch/navigation 을 만드는 모든
-    /// (tag, attr) 쌍에서 원본 타깃 URL 이 마크업에 그대로 남으면 안 된다.
-    /// 프록시 경로로 바뀌든(서브리소스/네비게이션), data-zp-* 로 옮겨지든
-    /// (iframe src), 제거되든(ping) 해야 한다.
+    /// Every `(tag, attr)` pair that initiates a fetch or navigation must either
+    /// be rewritten to a proxy route or moved to a `data-zp-*` attribute.
     #[test]
     fn url_bearing_attribute_enumeration() {
-        // (tag, attr, 기대 형태): "rewrite" = 프록시 URL, "moved" = data-zp-* 로 이동
         const CASES: &[(&str, &str, &str)] = &[
             ("a", "href", "rewrite"),
             ("area", "href", "rewrite"),
@@ -3189,75 +2728,70 @@ mod surface_fixture {
                 "moved" => {
                     assert!(
                         out.contains("data-zp-frame-src="),
-                        "{tag}[{attr}] 원본이 그대로다: {out}"
+                        "{tag}[{attr}] was not moved to data-zp-frame-src: {out}"
                     );
                     assert!(
                         !out.contains(&format!(" {attr}=\"{TARGET}\"")),
-                        "{tag}[{attr}] 원본 src 가 남았다: {out}"
+                        "{tag}[{attr}] retained original src: {out}"
                     );
                 }
                 _ => {
-                    // 원본은 data-zp-target-url 백업에 남는 게 맞다 — 확인할 것은
-                    // 실제 속성 값이 프록시 경로로 바뀌었는지 뿐이다.
                     assert!(
                         !out.contains(&format!(" {attr}=\"{TARGET}\"")),
-                        "{tag}[{attr}] 원본 타깃 URL 이 남았다: {out}"
+                        "{tag}[{attr}] retained original target URL: {out}"
                     );
                     assert!(
                         out.contains("/zp/"),
-                        "{tag}[{attr}] 프록시 경로로 안 바뀌었다: {out}"
+                        "{tag}[{attr}] was not rewritten to proxy path: {out}"
                     );
                 }
             }
         }
-        // cite/longdesc/usemap/profile 은 브라우저가 fetch 하지 않는 순수
-        // 메타데이터다 — 원본(타깃) URL 이 그대로 남는 게 의도된 동작이다.
+        // Pure metadata attributes (`cite`, `longdesc`, `usemap`, `profile`) are not
+        // fetched by the browser and retain their original value.
         let html = "<blockquote cite=\"http://t.example/q\"></blockquote>";
         let out = transform(html, &opts()).expect("transform").html;
-        assert!(out.contains("cite=\"http://t.example/q\""), "cite 가 바뀌었다: {out}");
+        assert!(out.contains("cite=\"http://t.example/q\""), "cite attribute was modified: {out}");
     }
 
     #[test]
     fn srcset_candidates_match_shared_fixture() {
         let raw = include_str!("../../zp-shared/testdata/srcset_cases.json");
         let doc: serde_json::Value = serde_json::from_str(raw).expect("parse srcset_cases.json");
-        let cases = doc["cases"].as_array().expect("cases 배열");
-        assert!(cases.len() >= 10, "픽스처가 비어 가면 파리티가 무의미해진다");
+        let cases = doc["cases"].as_array().expect("cases array");
+        assert!(cases.len() >= 10, "fixture must stay populated for parity checks");
         for case in cases {
             let id = case["id"].as_str().unwrap_or("?");
             let input = case["input"].as_str().expect("input");
             let want = case["candidates"].as_array().expect("candidates");
             let got = split_srcset_candidates(input);
-            assert_eq!(got.len(), want.len(), "{id}: 후보 개수");
+            assert_eq!(got.len(), want.len(), "{id}: candidate count");
             for (i, (g, w)) in got.iter().zip(want.iter()).enumerate() {
                 let w = w.as_array().expect("[lead, url, tail]");
                 assert_eq!(g.lead, w[0].as_str().unwrap(), "{id}[{i}] lead");
                 assert_eq!(g.url, w[1].as_str().unwrap(), "{id}[{i}] url");
                 assert_eq!(g.tail, w[2].as_str().unwrap(), "{id}[{i}] tail");
             }
-            // 분해가 무손실이어야 URL 만 갈아끼울 수 있다.
             let round: String = got
                 .iter()
                 .map(|c| format!("{}{}{}", c.lead, c.url, c.tail))
                 .collect();
-            assert_eq!(round, input, "{id}: 왕복이 입력과 달라졌다");
+            assert_eq!(round, input, "{id}: round-trip differed from input");
         }
     }
 
-    /// data: 후보가 섞인 목록에서 **다른** 후보가 그대로 살아 나가면 안 된다.
-    /// 쉼표 분할 구현은 여기서 정확히 실패한다.
     #[test]
     fn data_candidate_does_not_swallow_its_neighbour() {
         let raw = "data:image/svg+xml;utf8,<svg/> 1x, /b.png 2x";
         let out = proxied_srcset(raw, "http://proxy.example", "/zp/", "https://t.example/x/")
-            .expect("이웃 후보가 있으니 반드시 바뀐다");
+            .expect("must rewrite when neighbour candidate is present");
         assert!(
             out.starts_with("data:image/svg+xml;utf8,<svg/> 1x,"),
-            "data: 후보는 한 글자도 건드리면 안 된다: {out}"
+            "data: candidate must remain untouched: {out}"
         );
         assert!(
             out.contains("/zp/api/fetch?url=https%3A%2F%2Ft.example%2Fb.png"),
-            "이웃 후보는 프록시 경로가 돼야 한다: {out}"
+            "neighbour candidate must be rewritten to proxy path: {out}"
         );
     }
 
@@ -3270,8 +2804,8 @@ mod surface_fixture {
         for e in &entries {
             let Some(pair) = e.get("pair").and_then(|v| v.as_str()) else { continue };
             let kind = e.get("kind").and_then(|v| v.as_str()).unwrap_or("");
-            let (tag, attr) = pair.split_once(':').expect("pair 는 tag:attr 형태여야 한다");
-            // `xlink:href` 처럼 접두가 붙은 것은 attr 에 콜론이 하나 더 있다.
+            let (tag, attr) = pair.split_once(':').expect("pair must have tag:attr format");
+            // Handle prefixed attributes such as `xlink:href`.
             let (tag, attr) = if let Some((t2, a2)) = attr.split_once(':') {
                 (tag, Box::leak(format!("{t2}:{a2}").into_boxed_str()) as &str)
             } else {
@@ -3283,36 +2817,30 @@ mod surface_fixture {
             match kind {
                 "rewrite" | "srcset" => assert!(
                     out.contains("/zp/api/fetch?url="),
-                    "{pair}: 프록시 경로로 안 바뀌었다 (kind={kind})\n  in : {html}\n  out: {out}"
+                    "{pair}: was not rewritten to proxy path (kind={kind})\n  in : {html}\n  out: {out}"
                 ),
                 "navigation" => assert!(
                     out.contains("?via="),
-                    "{pair}: 내비게이션 경로로 안 바뀌었다\n  in : {html}\n  out: {out}"
+                    "{pair}: was not rewritten to navigation path\n  in : {html}\n  out: {out}"
                 ),
-                // 정책상 리라이트하지 않는 자리. 원본이 남거나(codebase) 속성이
-                // 통째로 걷히거나(ping) 둘 중 하나이고, **프록시 경로가 되면 안 된다**.
                 "deliberate" => assert!(
                     !out.contains("/zp/api/fetch?url="),
-                    "{pair}: deliberate 인데 리라이트됐다 — 막아 둔 표면이 되살아난다\n  out: {out}"
+                    "{pair}: marked deliberate but was rewritten\n  out: {out}"
                 ),
-                // 아직 안 고친 자리. 고치는 순간 이 단언이 실패해서 분류를 바꾸게 만든다.
                 "known-gap" => assert!(
                     !out.contains("/zp/api/fetch?url="),
-                    "{pair}: 이제 리라이트된다 — 픽스처에서 known-gap → rewrite 로 옮길 것\n  out: {out}"
+                    "{pair}: now rewritten; update fixture from known-gap to rewrite\n  out: {out}"
                 ),
-                // 서브리소스가 아니라 **문서**를 만드는 자리. `/zp/api/fetch` 로
-                // 보내면 프렐류드 없는 문서가 생기므로, 이름만 data 속성으로
-                // 옮겨 두고 페이지 realm 이 share 경로로 되돌린다.
                 "special" => assert!(
                     out.contains("data-zp-frame-src")
                         || out.contains("data-zp-srcdoc")
                         || !out.contains(TARGET),
-                    "{pair}: 옮겨지지도 않고 원본이 그대로 남았다
+                    "{pair}: was neither moved nor rewritten
   out: {out}"
                 ),
-                other => panic!("{pair}: 모르는 kind {other}"),
+                other => panic!("{pair}: unknown kind {other}"),
             }
         }
-        assert!(checked >= 20, "픽스처 항목이 너무 적다 ({checked})");
+        assert!(checked >= 20, "too few fixture entries checked ({checked})");
     }
 }

@@ -19,35 +19,40 @@
     }
     try { delete root.__ZP_BOOT; } catch { try { Object.defineProperty(root, '__ZP_BOOT', { value: undefined, enumerable: false }); } catch {} }
   }
+  function restoreEarlyNatives(w) {
+    try {
+      const saved = w && w.__zp_early_natives;
+      if (!saved) return;
+      try { delete w.__zp_early_natives; } catch {}
+      for (const k of Object.keys(saved)) {
+        const d = saved[k];
+        try {
+          if (d) Object.defineProperty(w, k, d);
+          else delete w[k];
+        } catch {}
+      }
+    } catch {}
+  }
   function captureNative(w) {
+    restoreEarlyNatives(w);
     const d = w.document;
-    // sandboxed(opaque) 컨텍스트에서 navigator.serviceWorker 읽기는 SecurityError
-    // 를 던진다 — 읽다가 죽으면 prelude 전체가 무너져 자식 스크립트 전부가 죽는다.
+    // Accessing navigator.serviceWorker throws SecurityError in sandboxed opaque contexts.
     const navGet = f => { try { return f(); } catch { return undefined; } };
     return {
       fetch: w.fetch && w.fetch.bind(w),
-      // 가상 URL 로 덮기 **전**의 진짜 document.URL. 자식 프레임이 SW 를 거칠
-      // 수 있는지 판정하는 유일하게 정직한 신호다 — `doc.URL` 은 우리가
-      // 가상 URL 을 돌려주도록 훅해 놨으므로 오라클로 못 쓴다.
+      // Native Document.prototype.URL descriptor captured before virtual URL hooks are installed.
       documentURLDesc: Object.getOwnPropertyDescriptor(w.Document && w.Document.prototype, 'URL'),
       XMLHttpRequest: w.XMLHttpRequest,
       WebSocket: w.WebSocket,
-      // D4: native WebTransport for the virtual-class pass-through to
-      // the ZeroProxy gateway. Captured here so target code that
-      // overwrites `globalThis.WebTransport` later can't break our
-      // shim. May be undefined on browsers that don't ship WT —
-      // ZPWebTransport falls back to the rejected-promise stub.
+      // Native WebTransport constructor for gateway routing; undefined if unsupported.
       WebTransport: w.WebTransport,
       EventSource: w.EventSource,
       Worker: w.Worker,
       FunctionCtor: w.Function,
-      // Native `eval`, captured before `define(root, 'eval', dynamicEval)`
-      // swaps it for the scoped jail variant. Only used through
-      // `execGlobalScript` to give inline <script> bodies real global scope —
-      // site-called `eval()` still goes through `dynamicEval`.
+      // Native eval captured before dynamicEval replacement; used by execGlobalScript
+      // to execute inline <script> bodies in global scope.
       globalEval: w.eval,
-      // `eval(trustedScript)` compiles the script (Chrome treats a TrustedScript as code, enforced or not): the brand check
-      // and the text, taken before the page can replace either.
+      // Capture TrustedTypes brand check and stringifier before page scripts can replace them.
       trustedTypes: navGet(() => w.trustedTypes),
       ttIsScript: navGet(() => w.TrustedTypePolicyFactory.prototype.isScript),
       ttScriptText: navGet(() => w.TrustedScript.prototype.toString),
@@ -100,9 +105,8 @@
       elementQuerySelectorAll: w.Element.prototype.querySelectorAll,
       fragmentQuerySelectorAll: w.DocumentFragment && w.DocumentFragment.prototype && w.DocumentFragment.prototype.querySelectorAll,
       elementQuerySelector: w.Element.prototype.querySelector,
-      // `<template>` 의 내용은 **별도의 DocumentFragment** 라 어떤
-      // querySelectorAll 로도 도달하지 않는다. 그런데 HTML 직렬화는 그 안을
-      // 그대로 뱉는다 — 세정기가 못 걷는 곳을 직렬화기는 걷는다(reddit 실측).
+      // <template>.content is an isolated DocumentFragment; HTML serialization
+      // traverses into it even though document.querySelectorAll does not.
       fragmentQuerySelectorAll: w.DocumentFragment && w.DocumentFragment.prototype.querySelectorAll,
       templateContent: w.HTMLTemplateElement
         && Object.getOwnPropertyDescriptor(w.HTMLTemplateElement.prototype, 'content'),
@@ -117,9 +121,7 @@
       scriptText: w.HTMLScriptElement && Object.getOwnPropertyDescriptor(w.HTMLScriptElement.prototype, 'text'),
       nodeTextContent: Object.getOwnPropertyDescriptor(w.Node.prototype, 'textContent'),
       htmlInnerText: w.HTMLElement && Object.getOwnPropertyDescriptor(w.HTMLElement.prototype, 'innerText'),
-      // 프레임의 진짜 창. 훅된 contentWindow 게터는 containFrameWindow 를 거쳐
-      // 들여다본 문서에 containment 를 심으므로, 이름으로 프레임을 찾는 내부
-      // 코드는 이걸 쓴다.
+      // Native contentWindow getters bypass containFrameWindow when resolving frame windows internally.
       iframeContentWindow: w.HTMLIFrameElement && Object.getOwnPropertyDescriptor(w.HTMLIFrameElement.prototype, 'contentWindow'),
       frameContentWindow: w.HTMLFrameElement && Object.getOwnPropertyDescriptor(w.HTMLFrameElement.prototype, 'contentWindow'),
       formSubmit: w.HTMLFormElement && w.HTMLFormElement.prototype.submit,

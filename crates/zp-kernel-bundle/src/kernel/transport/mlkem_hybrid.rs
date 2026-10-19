@@ -57,13 +57,8 @@ impl SupportedKxGroup for X25519MLKEM768 {
         let x25519_pub: x25519_dalek::PublicKey = (&x25519_priv).into();
 
         let mut pub_share = Vec::with_capacity(CLIENT_SHARE_LEN);
-        // Draft-kwiatkowski-tls-ecdhe-mlkem (group 0x11ec) order under
-        // active discussion across browsers — Chrome 148 / BoringSSL
-        // emit `MLKEM_EK || X25519_pub` in their actual ClientHello
-        // (matched against captured wire on tls.peet.ws). The earlier
-        // attempt with `X25519 || MLKEM` (Kyber-draft-00 style)
-        // triggered server-side `IllegalParameter` alert from tls.peet.ws,
-        // so this implementation pins MLKEM-first.
+        // Draft-kwiatkowski-tls-ecdhe-mlkem (group 0x11ec): Chrome 148 /
+        // BoringSSL emit `MLKEM_EK || X25519_pub` in their ClientHello.
         let ek_bytes = mlkem_ek.to_bytes();
         pub_share.extend_from_slice(ek_bytes.as_slice());
         pub_share.extend_from_slice(x25519_pub.as_bytes());
@@ -124,12 +119,12 @@ impl ActiveKeyExchange for Active {
     }
 
     /// Advertise the classical X25519 sibling as a "free" extra
-    /// key_share entry. Chrome 148 sends both: `X25519MLKEM768` (1216 B)
-    /// AND `X25519` (32 B) in the same ClientHello so a server that
+    /// key_share entry. Chrome 148 sends both `X25519MLKEM768` (1216 B)
+    /// and `X25519` (32 B) in the same ClientHello so a server that
     /// doesn't support the hybrid can pick the classical without
     /// triggering a HelloRetryRequest round-trip. The classical share is
     /// the trailing 32 bytes of `pub_share` (FIPS 203 `EK || X25519_pub`
-    /// layout — `post_quantum_first = true` per the draft and aws_lc_rs).
+    /// layout, `post_quantum_first = true` per the draft and aws_lc_rs).
     fn hybrid_component(&self) -> Option<(NamedGroup, &[u8])> {
         let x25519_pub = &self.pub_share[MLKEM768_EK_LEN..];
         debug_assert_eq!(x25519_pub.len(), X25519_LEN);

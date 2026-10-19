@@ -1,9 +1,5 @@
-// bench-core — shared logic for Node and Browser URL classification benches.
-//
-// Node side imports this directly; Browser side serializes a few functions
-// via Function.prototype.toString and re-injects into the page context.
-//
-// Pure / no I/O — no node:* imports. Browser-safe.
+// Shared logic for Node and browser URL classification benchmarks.
+// Contains no Node I/O imports so it can be loaded directly into a browser realm.
 
 export const UrlClass = Object.freeze({
   INVALID: 0, HTTP: 1, WS: 2, BLOB: 3, DATA: 4,
@@ -11,7 +7,7 @@ export const UrlClass = Object.freeze({
   RELATIVE: 9, OTHER: 10,
 });
 
-// JS regex baseline — same enum as WASM.
+// JS regex baseline matching the WASM UrlClass enum.
 const SCHEME_RE = /^[\s\x0c]*([A-Za-z][A-Za-z0-9+.\-]*):/;
 export function classifyJsRegex(raw) {
   const s = String(raw);
@@ -37,7 +33,7 @@ export function classifyJsRegex(raw) {
   }
 }
 
-// `new URL()` based — mirrors runtime-prelude.js's old isHTTPURL.
+// URL constructor baseline.
 export function classifyJsURL(raw) {
   const s = String(raw);
   if (s.length === 0) return UrlClass.INVALID;
@@ -56,7 +52,7 @@ export function classifyJsURL(raw) {
   } catch { return UrlClass.INVALID; }
 }
 
-// startsWith chain — Chrome's V8 inlines this aggressively.
+// Prefix startsWith chain baseline.
 export function classifyJsStartsWith(raw) {
   const s = String(raw);
   if (s.length === 0) return UrlClass.INVALID;
@@ -82,7 +78,7 @@ export function classifyJsStartsWith(raw) {
   return UrlClass.RELATIVE;
 }
 
-// Corpus generator — deterministic, length-bucketable.
+// Deterministic URL corpus generator.
 // lengthMode: 'mixed' | 'short' (~30B) | 'medium' (~100B) | 'long' (~500B)
 export function makeCorpus(n, lengthMode = 'mixed') {
   const corpus = [];
@@ -121,7 +117,6 @@ export function makeCorpus(n, lengthMode = 'mixed') {
   return corpus;
 }
 
-// Number formatter — K/M/G suffix for readability.
 export function fmt(n) {
   if (n >= 1e9) return (n / 1e9).toFixed(2) + 'G';
   if (n >= 1e6) return (n / 1e6).toFixed(2) + 'M';
@@ -129,9 +124,7 @@ export function fmt(n) {
   return n.toFixed(2);
 }
 
-// Time `fn(i)` for `iters` calls after a warmup pass. Caller provides a
-// `now()` source so the same function works in Node (perf_hooks) and Browser
-// (performance.now).
+// Measure `fn(i)` over `iters` calls after warmup using caller-injected `now()`.
 export function timed(now, label, iters, fn) {
   const warm = Math.max(1000, iters / 10) | 0;
   for (let i = 0; i < warm; i++) fn(i);
@@ -144,7 +137,6 @@ export function timed(now, label, iters, fn) {
   return { label, iters, dt, opsPerSec, nsPerOp, sink };
 }
 
-// Sample set for parity check.
 export const PARITY_SAMPLES = Object.freeze([
   'https://example.com/', 'http://x.y/z?a=b#c',
   'javascript:alert(1)', '  JAVASCRIPT:alert(2)',
@@ -154,15 +146,8 @@ export const PARITY_SAMPLES = Object.freeze([
   'mailto:a@b', '', 'http:',
 ]);
 
-// ============================================================================
-// Encoder alternatives — for the TextEncoder cost investigation.
-// All return the byte length written to dst[0..]. Capped at dst.length.
-// ============================================================================
+// UTF-8 encoder alternatives returning the byte length written to dst (capped at dst.length).
 
-// Manual UTF-8 encode via charCodeAt. ASCII-only fast path; surrogate pair
-// handling for the (rare-in-URLs) non-ASCII case. May be faster than
-// TextEncoder in environments where TextEncoder has cross-realm overhead
-// (suspected for Headless Chrome).
 export function encodeManual(str, dst) {
   const cap = dst.length;
   const len = str.length;
@@ -177,7 +162,6 @@ export function encodeManual(str, dst) {
       dst[j++] = 0xC0 | (c >> 6);
       dst[j++] = 0x80 | (c & 0x3F);
     } else if (c >= 0xD800 && c <= 0xDBFF && i + 1 < len) {
-      // High surrogate — combine with low.
       const c2 = str.charCodeAt(++i);
       const cp = 0x10000 + ((c & 0x3FF) << 10) + (c2 & 0x3FF);
       if (j + 4 > cap) return j;
@@ -195,9 +179,7 @@ export function encodeManual(str, dst) {
   return j;
 }
 
-// ASCII-only fast path. URLs are almost always ASCII. Returns -1 if any
-// non-ASCII byte detected (caller falls back to a wider encoder). This
-// is the cheapest possible encode for the typical case.
+// ASCII-only fast path returning -1 on any non-ASCII code unit.
 export function encodeAsciiFast(str, dst) {
   const cap = dst.length;
   const len = str.length;
@@ -210,9 +192,6 @@ export function encodeAsciiFast(str, dst) {
   return len;
 }
 
-// Reuses a single TextEncoder instance. The instance creation cost is
-// non-trivial; callers should cache it. Returns written byte count.
-// (Provided for clarity — every Node bench already does this.)
 export function encodeViaTextEncoder(enc, str, dst) {
   const { written } = enc.encodeInto(str, dst);
   return written | 0;
