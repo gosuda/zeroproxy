@@ -1321,7 +1321,8 @@ async function transportFetch(targetUrl, opt) {
   }
   const context = Object.freeze({
     entryId, documentUrl, origin: opt.opaqueOrigin ? 'null' : new URL(documentUrl).origin, referrer,
-    referrerPolicy: opt.referrerPolicy || (opt.request && opt.request.referrerPolicy) || (entry && entry.referrerPolicy) || '',
+    // A site frame's first request comes from its own launcher page, whose policy says nothing about the embedder's.
+    referrerPolicy: opt.document && entry && entry.siteFrame ? entry.siteFrame.referrerPolicy : (opt.referrerPolicy || (opt.request && opt.request.referrerPolicy) || (entry && entry.referrerPolicy) || ''),
   });
   const method = String(opt.method || (opt.request && opt.request.method) || 'GET');
   let body = null;
@@ -2032,6 +2033,7 @@ function buildRuntimePrelude(tab, entry) {
     ...(entry.opaque ? { opaque: true } : null),
     ...(tab.siteFrames ? { siteFrames: true } : null),
     ...(tab.challengeCompat ? { challengeCompat: true } : null),
+    ...(entry.referrerPolicy ? { referrerPolicy: entry.referrerPolicy } : null),
     ...(entry.siteFrame ? { siteFrame: entry.siteFrame } : null),
     ...(typeof entry.documentReferrer === 'string' ? { referrer: entry.documentReferrer } : null),
   };
@@ -2448,9 +2450,13 @@ function runtimeMessageAuthorized(event, tab, msg, fail) {
 // What a site frame is told about the page that embeds it: the embedder's real origin and address, the top document's address, and
 // the origin of the proxy page that owns the tab. Only http(s) URLs and origins are kept.
 function sanitizeSiteFrame(raw) {
-  const out = { parentOrigin: '', parentUrl: '', topUrl: '', mainOrigin: '' };
+  const out = { parentOrigin: '', parentUrl: '', topUrl: '', mainOrigin: '', referrerPolicy: '' };
   try {
     if (!raw || typeof raw !== 'object') return null;
+    // The policy the embedder applies to this frame (its `referrerpolicy` attribute, else its document's), which the browser would
+    // have put on the frame's navigation request had the embedder and the frame shared an origin.
+    const policy = String(raw.referrerPolicy || '').trim().toLowerCase();
+    if (['', 'no-referrer', 'no-referrer-when-downgrade', 'origin', 'origin-when-cross-origin', 'same-origin', 'strict-origin', 'strict-origin-when-cross-origin', 'unsafe-url'].includes(policy)) out.referrerPolicy = policy;
     out.parentOrigin = new URL(String(raw.parentOrigin)).origin;
     out.mainOrigin = new URL(String(raw.mainOrigin)).origin;
     out.parentUrl = ZP.canonicalTargetURL(String(raw.parentUrl)).href;

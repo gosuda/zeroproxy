@@ -101,23 +101,27 @@
   }
   // Fragment of a site frame's address: its share key, the relay servers other than this document's own, and a description of the
   // embedder (`zpf`) that the frame's launcher page hands to its own worker.
-  function siteFrameFragment(key) {
+  function siteFrameFragment(key, frameEl) {
     const params = new URLSearchParams();
     params.set('k', String(key));
     const own = ZP.defaultRelayServer(proxyOrigin);
     for (const server of activeServers) if (server !== own) params.append('server', server);
-    const frame = { parentOrigin: proxyOrigin, parentUrl: virtualURL.href, topUrl: topDocumentURL(), mainOrigin: mainProxyOrigin, challengeCompat: boot.challengeCompat === true };
+    // The referrer policy the embedder applies to the frame: the element's own, else the document's (a meta tag, else the header's).
+    let referrerPolicy = '';
+    try { if (frameEl) referrerPolicy = String(Native.getAttribute.call(frameEl, 'referrerpolicy') || '').trim().toLowerCase(); } catch {}
+    if (!referrerPolicy) { try { referrerPolicy = documentReferrerPolicy() || String(boot.referrerPolicy || ''); } catch {} }
+    const frame = { parentOrigin: proxyOrigin, parentUrl: virtualURL.href, topUrl: topDocumentURL(), mainOrigin: mainProxyOrigin, challengeCompat: boot.challengeCompat === true, referrerPolicy };
     params.set('zpf', ZP.bytesToBase64Url(new TextEncoder().encode(JSON.stringify(frame))));
     return '#' + params.toString();
   }
-  async function activatedFrameURL(raw, base = baseURL, opaque) {
+  async function activatedFrameURL(raw, base = baseURL, opaque, frameEl) {
     const target = targetURL(raw, base);
     const share = await ZP.encryptShareURL(target);
     rememberFrameRoute(share.encrypted, target);
     const entryId = 'e' + ZP.randomId();
     const isOpaque = typeof opaque === 'function' ? !!opaque() : opaque === undefined ? opaqueDocument : !!opaque;
     const siteHost = isOpaque ? '' : siteFrameHostFor(target);
-    if (siteHost) return siteHost + ZP.makeSharePath(share.encrypted) + siteFrameFragment(share.key);
+    if (siteHost) return siteHost + ZP.makeSharePath(share.encrypted) + siteFrameFragment(share.key, frameEl);
     // Pass parentTargetUrl so the service worker sends the embedding page's
     // virtual URL in the iframe document's Referer header.
     await ctx.bridge.send({ type: ZP.MSG.FRAME_ROUTE, tabId: boot.tabId, routeKey: share.encrypted, entryId, targetUrl: target, baseUrl: target, parentTargetUrl: virtualURL.href, ...(isOpaque ? { opaque: true } : null) });

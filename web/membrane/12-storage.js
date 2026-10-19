@@ -647,7 +647,10 @@
       gatedMembers.push([apiName, 'availability', feature, resolves('unavailable'), true]);
       gatedMembers.push([apiName, 'create', feature, rejects('NotAllowedError', 'Access denied because the Permission Policy is not enabled.'), true]);
     }
+    // A site frame is cross-origin to its embedder for the browser too, which refuses these calls itself, with its own sentences.
+    const browserDecidesPolicy = !!siteFrameBoot;
     for (const [apiName, member, feature, answer, isStatic] of gatedMembers) {
+      if (browserDecidesPolicy) break;
       let holder;
       try { holder = apiName === 'Window' ? w : (isStatic ? w[apiName] : w[apiName] && w[apiName].prototype); } catch { holder = null; }
       if (!holder || (apiName !== 'Window' && typeof w[apiName] !== 'function')) continue;
@@ -664,6 +667,7 @@
       ['AbsoluteOrientationSensor', ['accelerometer', 'gyroscope', 'magnetometer']], ['RelativeOrientationSensor', ['accelerometer', 'gyroscope']],
     ];
     for (const [ctorName, features] of gatedConstructors) {
+      if (browserDecidesPolicy) break;
       const Orig = w[ctorName];
       if (typeof Orig !== 'function') continue;
       const wrapped = new Proxy(Orig, {
@@ -676,7 +680,7 @@
       try { Object.defineProperty(Orig.prototype, 'constructor', { value: wrapped, writable: true, configurable: true }); } catch {}
       define(w, ctorName, wrapped);
     }
-    if (typeof w.PaymentRequest === 'function') {
+    if (typeof w.PaymentRequest === 'function' && !browserDecidesPolicy) {
       const Orig = w.PaymentRequest;
       const wrapped = new Proxy(Orig, {
         construct(target, args, newTarget) {
@@ -689,7 +693,7 @@
       define(w, 'PaymentRequest', wrapped);
     }
     // a camera or a microphone is refused before any prompt
-    if (w.MediaDevices && w.MediaDevices.prototype) {
+    if (w.MediaDevices && w.MediaDevices.prototype && !browserDecidesPolicy) {
       replaceNativeMethod(w.MediaDevices.prototype, 'getUserMedia', orig => ({ getUserMedia(...args) {
         let audio = false, video = false;
         try { const c = args[0]; audio = !!(c && c.audio); video = !!(c && c.video); } catch {}
@@ -698,7 +702,7 @@
       } }).getUserMedia);
     }
     // `document.fullscreenEnabled` is false where 'fullscreen' is not allowed
-    for (const key of ['fullscreenEnabled', 'webkitFullscreenEnabled']) {
+    for (const key of browserDecidesPolicy ? [] : ['fullscreenEnabled', 'webkitFullscreenEnabled']) {
       const fd = w.Document && Object.getOwnPropertyDescriptor(w.Document.prototype, key);
       if (fd && typeof fd.get === 'function') {
         replaceNativeAccessor(w.Document.prototype, key, function () {

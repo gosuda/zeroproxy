@@ -365,6 +365,8 @@
         if (!p || p === w) break;
         let o = '';
         try { o = typeof p.__zp_origin === 'function' ? p.__zp_origin() : ''; } catch {}
+        // An ancestor the browser holds as cross-origin (a site frame's embedder) was described in the boot configuration.
+        if (!o && siteFrameBoot) { try { o = windowHandles ? windowHandles.originOf(p) : ''; } catch {} }
         if (typeof o === 'string' && o) out.push(displayOrigin(o));
         w = p;
       }

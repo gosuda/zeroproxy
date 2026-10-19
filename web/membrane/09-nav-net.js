@@ -109,7 +109,7 @@
   }
   // Navigate a frame's Location to a routed share URL without mutating its `src` attribute.
   function navigateFrameTo(frame, href) {
-    activatedFrameURL(href, undefined, () => frameIsOpaque(frame)).then(url => {
+    activatedFrameURL(href, undefined, () => frameIsOpaque(frame), frame).then(url => {
       const win = nativeFrameWindow(frame);
       if (win) win.location.assign(url);
     }).catch(() => {});

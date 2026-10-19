@@ -1,7 +1,7 @@
 // Drives the launcher page: wait for the runtime button to enable, enter the target URL, and submit.
 // The launcher keeps Open disabled until the service worker runtime reports ready.
 // Returns whether the click triggered a navigation.
-async function openThroughLauncher(page, proxyOrigin, targetUrl, { navigationTimeout = 45000 } = {}) {
+async function openThroughLauncher(page, proxyOrigin, targetUrl, { navigationTimeout = 45000, siteFrames } = {}) {
   // Do not await goto: when the service worker starts during this navigation, goto's wait can hang
   // even after the page is complete and controlled. Wait on the button state instead.
   page.goto(`${proxyOrigin}/zp/`, { waitUntil: 'domcontentloaded' }).catch(() => {});
@@ -11,7 +11,7 @@ async function openThroughLauncher(page, proxyOrigin, targetUrl, { navigationTim
     throw new Error(`launcher never became ready: ${JSON.stringify(await pageText(page))}`);
   }
   // ZP_E2E_SITE_FRAMES=1 opens every tab with site-isolated frames, so the whole suite exercises that mode.
-  if (process.env.ZP_E2E_SITE_FRAMES === '1') await page.evaluate(() => { const c = document.getElementById('site-frames'); if (c && !c.checked) c.click(); });
+  if (siteFrames === undefined ? process.env.ZP_E2E_SITE_FRAMES === '1' : siteFrames) await page.evaluate(() => { const c = document.getElementById('site-frames'); if (c && !c.checked) c.click(); });
   await page.type('input', targetUrl);
   let navigated = true;
   await Promise.all([

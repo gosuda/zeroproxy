@@ -28,7 +28,7 @@ The feature is opt-in per tab (the launcher's "Site-isolated frames" box). A tab
 
 The frame's first response comes from the relay, because no worker exists yet at that origin:
 
-1. The embedder sets the frame's `src` to `<site origin>/zp/p/<encrypted target>#k=<key>&server=...&zpf=<embedder description>`. `zpf` is base64url JSON: the embedder's real origin and virtual URL, the top document's virtual URL, the main origin, and whether challenge compatibility is armed.
+1. The embedder sets the frame's `src` to `<site origin>/zp/p/<encrypted target>#k=<key>&server=...&zpf=<embedder description>`. `zpf` is base64url JSON: the embedder's real origin and virtual URL, the top document's virtual URL, the main origin, whether challenge compatibility is armed, and the referrer policy the embedder applies to the frame (its `referrerpolicy` attribute, else its document's). The frame's first request comes from its own launcher page, whose `no-referrer` policy would otherwise decide the `Referer` and `document.referrer`.
 2. The relay answers `/zp/p/*` for an iframe on a loopback host with the launcher page, `frame-ancestors http://*.localhost:<port>`, `Cross-Origin-Embedder-Policy: require-corp` and `Cross-Origin-Resource-Policy: cross-origin` (a page that demands cross-origin isolation can embed only frames that opt in). Every other response keeps `frame-ancestors 'none'`.
 3. The launcher registers the site's worker (service workers and storage are partitioned by top-level site, so each embedding top-level site registers its own), decrypts the target with the key from the fragment, and sends `OPEN_SHARE` with the `siteFrame` description. The worker creates a tab born as a frame: the embedder's address is the Referer, the top document's origin decides what counts as cross-site, and the entry is marked `frameRoute`.
 4. The launcher replaces the location with the worker's route. If the worker restarts and forgets the route, the same launcher page boots it again from the fragment, which is why `zpf` stays in the URL.
@@ -36,6 +36,9 @@ The frame's first response comes from the relay, because no worker exists yet at
 Each site host has its own worker, cookie jar (shared per registrable domain inside that worker), tab state and kernel connection. State is not shared with the main origin's worker.
 
 ## Policy that follows
+
+- The relay's synchronous-XHR queue is per origin host. Each origin's worker has its own tabs, so a worker of one host must not take, or answer, a job parked by a page of another.
+- Inside a site frame the browser itself enforces Permissions Policy (the frame is cross-origin to its embedder for real), so the membrane's virtual policy wrappers (`gatedMembers`, sensor and payment constructors, `getUserMedia`, `fullscreenEnabled`) are not installed there. A target's own `Permissions-Policy` header is not seen by the browser (the proxy strips it), which is a known difference.
 
 - The embedder's CSP `frame-src` and `child-src` admit `<scheme>://*.localhost:<port>` for tabs with site frames. A target's own `<meta>` CSP is merged the same way (`filter_meta_csp_with` in Rust, `ZP.filterMetaCSP` in JS), so it cannot shut the site hosts out.
 - A frame's window is unreachable for the embedder (cross-origin to the browser): `containFrameWindow` leaves it alone, `contentDocument` is `null`, and the membrane's cross-origin window stand-in wraps the real cross-origin window.

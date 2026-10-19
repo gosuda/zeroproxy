@@ -2515,6 +2515,11 @@ function createTargetServer(requests, pendingResponses) {
       </script></body>`);
       return;
     }
+    if (url.pathname === '/xsf-same') {
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(`<!doctype html><title>same-site frame</title><body><iframe src="/xframe-child"></iframe></body>`);
+      return;
+    }
     if (url.pathname === '/xframe-child') {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(`<!doctype html><title>child</title><body><script src="/xframe-child.js"></script></body>`);
@@ -5274,7 +5279,23 @@ async function handleSocks(socket, resolveHost) {
   upstream.pipe(socket);
 }
 
+// ZP_E2E_ONLY=<regex> runs only the subtests whose names match (a development aid; unset runs everything).
+// ZP_E2E_RANGE=<from>-<to> additionally runs the subtests at those positions, to find which earlier test changes a later one.
+let subtestOrdinal = 0;
+function onlySubtests(t) {
+  const only = process.env.ZP_E2E_ONLY ? new RegExp(process.env.ZP_E2E_ONLY, 'i') : null;
+  if (!only) return;
+  const range = /^(d+)-(d+)$/.exec(process.env.ZP_E2E_RANGE || '');
+  const run = t.test.bind(t);
+  t.test = (name, ...rest) => {
+    const at = subtestOrdinal++;
+    if (process.env.ZP_E2E_LIST === '1') console.log('ordinal', at, String(name).slice(0, 80));
+    const inRange = range && at >= Number(range[1]) && at <= Number(range[2]);
+    return typeof name === 'string' && !only.test(name) && !inRange && !/E1 escape matrix/.test(name) ? Promise.resolve() : run(name, ...rest);
+  };
+}
 test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, concurrency: false }, async t => {
+  onlySubtests(t);
   const prebuilt = process.env.ZP_E2E_PREBUILT === '1' || Boolean(process.env.CI);
   const temp = prebuilt ? null : fs.mkdtempSync(path.join(os.tmpdir(), 'zeroproxy-e2e-'));
   const buildOut = path.resolve(process.env.ZP_E2E_DIST || (prebuilt ? 'dist' : path.join(temp, 'dist')));
@@ -5535,6 +5556,7 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
   });
   // High timeout budget to avoid false timeouts when native-vs-proxied tests launch multiple browser instances under load.
   await t.test('E1 escape matrix and runtime integrations', { timeout: 720000 }, async t => {
+  onlySubtests(t);
   const page = await browser.newPage();
   t.after(async () => { await saveArtifacts('e1', page); await page.close(); });
   await observeTarget(page.target());
@@ -7476,6 +7498,50 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     assert.deepEqual(proxied, direct);
   });
 
+  // Site frames (see .ai/design/site-frames.md): a frame of another site is served from a real origin of its own, so the browser isolates it.
+  await t.test('with site frames on, a frame of another site runs at a real origin of its own and one of the same site does not', async () => {
+    const targetBase = `http://${targetHost}:${targetPort}`;
+    const isSiteHost = f => { const h = new URL(f.url()).host; return h.startsWith('s-') && h.endsWith(`.localhost:${proxyPort}`); };
+    const open = async (path, siteFrames) => {
+      const page = await browser.newPage();
+      await observeTarget(page.target());
+      assert.ok(await openThroughLauncher(page, proxyOrigin, `${targetBase}${path}`, { siteFrames }), `the launcher did not reach ${path}`);
+      return page;
+    };
+    // another site: its own host, out of the embedder's reach for the browser itself, a cross-origin frame to the page
+    const cross = await open('/xframe-env', true);
+    try {
+      await cross.waitForFunction(() => window.__xframeenv, { timeout: 120000, polling: 100 });
+      const frames = cross.frames().slice(1);
+      const site = frames.find(isSiteHost);
+      assert.ok(site, `no frame at a site host: ${frames.map(f => f.url()).join(' ')}`);
+      // evaluated natively inside the frame: the browser, not the membrane, refuses
+      assert.equal(await site.evaluate(() => { try { return typeof top.document; } catch (e) { return e.name; } }), 'SecurityError');
+      assert.equal(await cross.evaluate(() => { try { return String(document.querySelector('iframe').contentDocument); } catch (e) { return e.name; } }), 'null');
+      assert.equal(await cross.evaluate(() => { try { return typeof document.querySelector('iframe').contentWindow.document; } catch (e) { return e.name; } }), 'SecurityError');
+    } finally {
+      await cross.close();
+    }
+    // the same site as the top document stays where the top document is
+    const same = await open('/xsf-same', true);
+    try {
+      await same.waitForFunction(() => document.querySelector('iframe'), { timeout: 60000, polling: 100 });
+      await new Promise(r => setTimeout(r, 3000));
+      const frames = same.frames().slice(1);
+      assert.ok(frames.length > 0 && frames.every(f => !isSiteHost(f)), `a same-site frame left the main origin: ${frames.map(f => f.url()).join(' ')}`);
+    } finally {
+      await same.close();
+    }
+    // and without site frames nothing moves
+    const off = await open('/xframe-env', false);
+    try {
+      await off.waitForFunction(() => window.__xframeenv, { timeout: 120000, polling: 100 });
+      assert.equal(off.frames().slice(1).some(isSiteHost), false);
+    } finally {
+      await off.close();
+    }
+  });
+
   await t.test('a cross-origin frame sees its embedder and a native-shaped stack', async () => {
     const targetBase = `http://${targetHost}:${targetPort}`;
     const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
@@ -8929,6 +8995,9 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
   });
   });
   await t.test('all browser and worker network stays on the proxy origin', () => {
-    assert.deepEqual(wireRequests.filter(url => /^https?:|^wss?:/.test(url) && new URL(url).host !== new URL(proxyOrigin).host), []);
+    // A site frame (a tab opened with site frames on) is served from a host of its own on the same relay (`s-<site>-<hash>.localhost`).
+    const siteHost = host => host.startsWith('s-') && host.endsWith('.localhost:' + proxyPort);
+    const allowed = host => host === new URL(proxyOrigin).host || siteHost(host);
+    assert.deepEqual(wireRequests.filter(url => /^https?:|^wss?:/.test(url) && !allowed(new URL(url).host)), []);
   });
 });

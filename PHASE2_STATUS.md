@@ -8,11 +8,11 @@ The table below lists the verification commands and baseline metrics across all 
 
 | Suite | Command | Scope and Baseline |
 | :--- | :--- | :--- |
-| **JavaScript unit and policy** | `npm run test:js` | Policy rules, core helpers, Service Worker routing, and prelude contracts (172 passing tests) |
+| **JavaScript unit and policy** | `npm run test:js` | Policy rules, core helpers, Service Worker routing, and prelude contracts (176 passing tests) |
 | **Rust workspace** | `cargo test --workspace` | OXC rewriter matrix (3,360 combinations), HTML/CSS transforms, codecs, and shared policy (317 passing, 3 ignored) |
 | **Go server and host** | `go test ./...` | HTTP host handler, relay bridge, share URL parity, and TURN/WebTransport gateways (all packages pass) |
 | **WASM bundle integration** | `npm run test:wasm:ci` | Contract checks against compiled WASM artifacts in `dist/` (15 passing tests) |
-| **Browser E2E** | `npm run test:e2e` | E1 containment escape matrix and native-vs-proxy differential suite (243 passing tests) |
+| **Browser E2E** | `npm run test:e2e` | E1 containment escape matrix and native-vs-proxy differential suite (244 passing tests; the suite also passes with `ZP_E2E_SITE_FRAMES=1`) |
 | **TLS ClientHello parity** | `npm run check:chrome-hello` | Verifies extension set and `trust_anchors` payload match installed Chrome (154.0.8037.98) |
 | **Real-site script corpus** | `node --experimental-vm-modules scripts/rewrite-corpus-check.cjs <tape>` | Rewrites 705 cached scripts from 13 live sites and validates V8 parsing (0 failures) |
 | **Real-site rendering** | `taskweaver` (`--id zp`) | Loads Wikipedia, GitHub, Guardian, BBC, MDN, CNN, NAVER, NYT, Stack Overflow, Reddit, Apple, npm, and IMDb |

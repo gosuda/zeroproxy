@@ -482,7 +482,8 @@
     }
     function crossWindowLocation(targetWindow) {
       // Delegate to the target window's own Location facade so cross-frame writes navigate the target frame.
-      const ownerGet = targetWindow.__zp_get;
+      let ownerGet;
+      try { ownerGet = targetWindow.__zp_get; } catch { ownerGet = undefined; }
       if (ownerGet === get && (virtualOriginOfWindow(targetWindow) || securityOrigin()) === securityOrigin()) {
         return wrappedLocationFor(targetWindow.location);
       }
@@ -502,7 +503,8 @@
           if (denied) throw denied;
           const absolute = targetURL(value);
           try { const fe = winGet(targetWindow, 'frameElement'); if (fe) urlMeta.set(fe, absolute); } catch {}
-          const g = targetWindow.__zp_get;
+          let g;
+          try { g = targetWindow.__zp_get; } catch { g = undefined; }
           if (typeof g === 'function' && g !== get) {
             const owner = g(targetWindow, 'location');
             if (replace) owner.replace(absolute);
@@ -512,7 +514,8 @@
           // Target window has no membrane; route frame navigation directly.
           activatedFrameURL(absolute, undefined, () => windowIsOpaque(targetWindow)).then(u => {
             if (replace) targetWindow.location.replace(u);
-            else targetWindow.location.assign(u);
+            else if (windowReachable(targetWindow)) targetWindow.location.assign(u);
+            else targetWindow.location.href = u; // the one navigation a cross-origin Location allows besides replace()
           }).catch(() => {});
         };
         const replace = function replace(value) { navigate(value, true); };
@@ -943,6 +946,10 @@
       // (while still throwing on `in`), matching HTML cross-origin named access semantics.
       const namedChild = p => {
         if (typeof p !== 'string' || p === '') return null;
+        if (!windowReachable(win)) {
+          // Names live in that window's own realm; natively a cross-origin window still answers for its children's names.
+          try { const v = win[p]; return v && typeof v === 'object' ? v : null; } catch { return null; }
+        }
         try {
           for (let i = 0, n = childCount(); i < n; i++) {
             const child = win[i];

@@ -261,7 +261,7 @@
       Native.setAttribute.call(el, key, 'about:blank');
       pendingFrameRoutes.add(el);
     }
-    activatedFrameURL(target, undefined, () => frameIsOpaque(el)).then(u => {
+    activatedFrameURL(target, undefined, () => frameIsOpaque(el), el).then(u => {
       if (frameRouteSeq.get(el) !== seq) return;
       Native.setAttribute.call(el, key, u);
       rememberFrameOrigin(el);

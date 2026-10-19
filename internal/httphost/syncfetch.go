@@ -60,6 +60,10 @@ type syncFetchJob struct {
 	// fetched on behalf of an uncontrolled child frame.
 	Kind string `json:"kind"`
 
+	// Host is the origin host the page used. Each origin has a Service Worker of its own with its own tabs, so only a worker polling
+	// the same host may take the job (site frames run at hosts of their own on one relay).
+	Host string `json:"-"`
+
 	result chan *syncFetchResult
 }
 
@@ -91,7 +95,7 @@ type syncFetchLegacyResult struct {
 type syncFetchHub struct {
 	mu        sync.Mutex
 	jobs      map[string]*syncFetchJob
-	queue     chan *syncFetchJob
+	queues    map[string]chan *syncFetchJob // one queue per origin host
 	closed    chan struct{}
 	closeOnce sync.Once
 }
@@ -99,9 +103,21 @@ type syncFetchHub struct {
 func newSyncFetchHub() *syncFetchHub {
 	return &syncFetchHub{
 		jobs:   make(map[string]*syncFetchJob),
-		queue:  make(chan *syncFetchJob, syncFetchQueueCap),
+		queues: make(map[string]chan *syncFetchJob),
 		closed: make(chan struct{}),
 	}
+}
+
+// queueFor returns the queue of jobs parked by pages of `host`, creating it on first use.
+func (h *syncFetchHub) queueFor(host string) chan *syncFetchJob {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	q, ok := h.queues[host]
+	if !ok {
+		q = make(chan *syncFetchJob, syncFetchQueueCap)
+		h.queues[host] = q
+	}
+	return q
 }
 
 func (h *syncFetchHub) close() {
@@ -127,13 +143,30 @@ func (h *syncFetchHub) enqueue(j *syncFetchJob) error {
 	if len(h.jobs) >= syncFetchQueueCap {
 		return errQueueFull
 	}
+	q, ok := h.queues[j.Host]
+	if !ok {
+		q = make(chan *syncFetchJob, syncFetchQueueCap)
+		h.queues[j.Host] = q
+	}
 	select {
-	case h.queue <- j:
+	case q <- j:
 		h.jobs[j.ID] = j
 		return nil
 	default:
 		return errQueueFull
 	}
+}
+
+// takeFor is take, but only for a job parked by a page of `host`.
+func (h *syncFetchHub) takeFor(id, host string) *syncFetchJob {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	j := h.jobs[id]
+	if j == nil || j.Host != host {
+		return nil
+	}
+	delete(h.jobs, id)
+	return j
 }
 
 func (h *syncFetchHub) take(id string) *syncFetchJob {
@@ -187,6 +220,7 @@ func (s *server) handleSyncFetch(w http.ResponseWriter, r *http.Request) {
 		DocURL:          q.Get("dv"),
 		WithCredentials: q.Get("wc") == "1",
 		Cors:            corsMode(q.Get("cors")),
+		Host:            r.Host,
 		result:          make(chan *syncFetchResult, 1),
 	}
 	job.Cookies = parsePendingCookies(q["ck"])
@@ -283,15 +317,16 @@ func (s *server) handleSyncFetchPoll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
+	queue := s.syncHub.queueFor(r.Host)
 	select {
-	case job := <-s.syncHub.queue:
+	case job := <-queue:
 		// Drain up to syncFetchPollBatch queued jobs in a single poll response to
 		// avoid round-trip stalls when multiple subresources arrive concurrently.
 		jobs := []*syncFetchJob{job}
 	drain:
 		for len(jobs) < syncFetchPollBatch {
 			select {
-			case j := <-s.syncHub.queue:
+			case j := <-queue:
 				jobs = append(jobs, j)
 			default:
 				break drain
@@ -322,7 +357,7 @@ func (s *server) handleSyncFetchResult(w http.ResponseWriter, r *http.Request) {
 		s.safeError(w, r, "SYNC_BAD_RESULT", http.StatusBadRequest)
 		return
 	}
-	job := s.syncHub.take(id)
+	job := s.syncHub.takeFor(id, r.Host)
 	if job == nil {
 		w.WriteHeader(http.StatusNoContent)
 		return

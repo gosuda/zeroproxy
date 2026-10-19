@@ -676,6 +676,7 @@ function xoriginEnv(opts = {}) {
     OPAQUE_PENDING_ORIGIN: 'null#pending',
     Native: { getAttribute: { call: () => null }, hasAttribute: { call: (el, name) => !!(el && el.opaque && name === 'data-zp-opaque') }, DOMException },
     frameRouteTarget: () => '',
+    windowReachable: w => { try { void w.document; return true; } catch { return false; } },
     isScopeProxy: v => v === scope,
     safeCrossWindow: w => { if (!safe.has(w)) safe.set(w, { safeFor: w }); return safe.get(w); },
     crossWindowLocation: w => ({ locationOf: w }),

@@ -111,3 +111,33 @@ func TestSyncFetchRejectsDuplicateRIDWithConflict(t *testing.T) {
 		t.Fatalf("first request status = %d, want 200", rec1.Code)
 	}
 }
+
+// Each origin has a Service Worker of its own with its own tabs, so a job parked by a page of one host must reach only a worker polling
+// that host, and only that host's worker may answer it.
+func TestSyncFetchJobsAreScopedByOriginHost(t *testing.T) {
+	hub := newSyncFetchHub()
+	job := &syncFetchJob{ID: "scoped-1", Target: "https://example.com/", Method: http.MethodGet, Host: "proxy.localhost:18080", result: make(chan *syncFetchResult, 1)}
+	if err := hub.enqueue(job); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	other := hub.queueFor("s-site-1234.localhost:18080")
+	select {
+	case got := <-other:
+		t.Fatalf("a worker of another host was handed job %q", got.ID)
+	default:
+	}
+	if got := hub.takeFor("scoped-1", "s-site-1234.localhost:18080"); got != nil {
+		t.Fatal("another host answered a job that is not its own")
+	}
+	select {
+	case got := <-hub.queueFor("proxy.localhost:18080"):
+		if got.ID != "scoped-1" {
+			t.Fatalf("queued job = %q", got.ID)
+		}
+	default:
+		t.Fatal("the owning host's queue lost the job")
+	}
+	if got := hub.takeFor("scoped-1", "proxy.localhost:18080"); got == nil {
+		t.Fatal("the owning host could not take its job")
+	}
+}
