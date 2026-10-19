@@ -6,6 +6,7 @@
 
 | Date | Category | Summary | Detail |
 |---|---|---|---|
+| 2026-10-15 | 실측 / 방법 | 역실험: 통과하는 네이티브+kernel 에 프록시의 차이(AI·게이트 API·WebGL·노이즈·rtt·CSP·5× 감속)를 얹어도 3/3 통과 — 원인이 아니다. | rewriter.md#역실험-통과하는-쪽에-차이를-얹는다 |
 | 2026-10-15 | 실측 / 방법 | 위젯 페이로드: 단계별(ncMr7..RCCiX6)로 짝지어 범주형 차이만 뽑는다. 디버거는 네이티브 부모를 망친다(57 s·300031) — 위젯만 읽는다. | rewriter.md#위젯-페이로드-단계별-대조-방법 |
 | 2026-10-15 | 실사이트 / 실측 | 사람이 받는 챌린지는 HTTP/3 에 달렸다: h3 managed 8/8, h2 2/5, kernel interactive 7/7. 와이어(JA4·H2·TCP)는 같다. | rewriter.md#챌린지-종류-http3 |
 | 2026-10-15 | membrane / 수정 | 교차출처 프레임에서 정책 게이트 API(AI·MIDI·USB·센서·PaymentRequest…)와 WebGL low-power 가 네이티브와 달리 열렸다. 표로 거부. | rewriter.md#교차출처-프레임-정책-게이트-api |

@@ -97,9 +97,11 @@ strings below are closed as *not doing*.
    (the payload fields now equal native's; the outcome is unchanged). Found, measured, not done (Residuals): the target's CSP is not applied (the widget counts its Trusted Types `default` policy
    being called 43 times natively, 0 proxied), `connection.rtt` is 0, audio noise is detected (the proxy's `getChannelData` farble: with it off the audio hash equals native's; **your call whether to keep it**),
    inline-script entity decoding, the stage timings (sum 1.4 s native, 6.7 s proxied). Method that found them: per-stage membrane operation counts (a temporary `get`/`set` bucket counter keyed by the stage's own
-   `ncMr7..RCCiX6` window) and native-vs-proxied probes of one API family at a time (`gd-gated-apis.js`, `gd-webgl-attr.js`, `gd-ai-avail.js`, `gd-parser-cmp.js`, `gd-tthook.js`). **The inverse experiment is next**:
-   `gd-inverse.js` makes the native-page+kernel run (which passes) behave like the proxied one a factor at a time (`INVERSE=ai|gl|gated|audio|rtt|csp|csp-all`, `N=3`) — a factor that turns the pass into a fail
-   is worth building (Trusted Types enforcement is the expensive one). Other tools: `gd-proxied-trace.js` (kernel calls recorded in the SW), `gd-phase.js native|proxied`.
+   `ncMr7..RCCiX6` window) and native-vs-proxied probes of one API family at a time (`gd-gated-apis.js`, `gd-webgl-attr.js`, `gd-ai-avail.js`, `gd-parser-cmp.js`, `gd-tthook.js`). **The inverse experiment is done**:
+   `gd-inverse.js` made the native-page+kernel run (which passes) behave like the proxied one a factor at a time (`INVERSE=ai|gl|gated|audio|rtt|csp|csp-all|all`, `N=3`, `CPU=5`, `VERIFY=1`): each factor passes 3 of 3, all of them together pass 3 of 3, also at a 5× CPU slowdown —
+   so none of the differences above is the cause, and Trusted Types enforcement is **not** worth building for this (it would be a feature, not the fix). Candidates left, none tested: the timing profile's shape (non-uniform: the membrane makes some operations 100× and others 1×),
+   Resource Timing lists, the real process boundary (the widget is an out-of-process frame natively; one process and one origin underneath here — a per-virtual-origin real origin would hand the browser the whole class of checks of ERRATA 104), HTTP/3 (makes the challenge `managed`).
+   Open question for the owner: keep or drop the `getChannelData`/canvas noise (detected by the widget, changes no verdict). Other tools: `gd-proxied-trace.js` (kernel calls recorded in the SW), `gd-phase.js native|proxied`.
    Measured Resource Timing gaps worth fixing on their own (an XHR is `fetch`, a `<link>` load is `img`, a cross-origin frame's
    entry shows `h2`/sizes) are in the same row.
 4. **Not doing:** a page's own `eval` / `new Function` code prints as a script frame, not V8's eval-origin text (ERRATA

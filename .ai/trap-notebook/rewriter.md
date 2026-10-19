@@ -1961,3 +1961,11 @@ Summarizer 의 응답 시간), WebGL `powerPreference` 가 `low-power` 대 `defa
 프록시의 kernel(브리지·프록시 모두) `interactive` 7/7(그 밖의 실행도 모두 체크박스가 나왔다). 와이어에서 읽히는 것(JA4, 확장 집합, ECH, H2 프레임·헤더 순서·값, TCP/IP)은 `tls.peet.ws` 로 대조해 같다(`gd-echo.js`, `gd-echo-proxied.js`) — 브리지의
 puppeteer 가로채기는 Sec-Fetch-*·Accept-Language·Priority 를 못 보므로 브리지 문서 GET 에는 그 헤더가 빠진다(프록시 SW 는 붙인다).
 **읽는 법**: HTTP/3 가 사람이 받는 챌린지를 확정하고, 체크박스가 나오면 네이티브는 통과·프록시는 위젯 단계의 범주형 차이로 `600010` 을 받는다. H3 자체는 UDP 경로+QUIC 스택이라 큰 일이다.
+
+## <a id="역실험-통과하는-쪽에-차이를-얹는다"></a>역실험 — 통과하는 구성에 프록시의 차이를 하나씩 얹는다 (2026-10-15)
+
+**질문**: 페이로드 대조로 찾은 차이(내장 AI, 정책 게이트 API, WebGL, 오디오 노이즈, rtt 0, 대상 CSP 미적용) 중 어느 것이 서버가 거부하는 원인인가. 차이를 고쳐 보며 실패하는 쪽에서 재면, 고칠 때마다 큰 구현을 해야 하고 원인이 아니어도 모른다.
+**방법**: 통과하는 구성(네이티브 페이지 + 프록시 kernel, `gd-bridge-lib.js`)을 기준으로, 위젯 프레임을 **프록시의 모습으로 하나씩 바꾼다** — 문서 시작 훅(`evaluateOnNewDocument`, 호스트가 `challenges.cloudflare.com` 인 프레임만)으로 API 응답을 바꾸고,
+응답 헤더는 브리지가 가공한다(`BRIDGE_STRIP_CSP=widget|all` 이 CSP 헤더를 뗀다). `gd-inverse.js` (`INVERSE=ai|gl|gated|audio|rtt|csp|csp-all|all`, `N=`, `CPU=` 로 모든 타깃 CPU 감속, `VERIFY=1` 로 훅이 위젯 프레임에서 실제로 걸렸는지 읽는다).
+**결과**: 인자마다 3/3 통과, 전부 함께도 3/3, 5× 감속을 더해도 3/3. 단일·복합 요인 모두 판정을 못 바꾼다 — 그 차이들은 원인이 아니다. 비싼 구현(Trusted Types 강제)을 하기 전에 이 실험으로 거를 수 있었다.
+**함정**: ① 통과 구성의 기준선(INVERSE=none)을 먼저 3회 돌린다. ② 훅이 실제로 걸렸는지 확인한다(`VERIFY=1`) — 안 걸린 훅의 "통과"는 아무것도 말하지 않는다. ③ CSP 를 떼면 `sandbox` 도 같이 빠진다(프록시도 그렇다). ④ 서버 프로세스가 죽어 있으면 `install` 이 `ERR_CONNECTION_REFUSED` 로 죽는다.
