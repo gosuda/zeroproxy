@@ -5870,6 +5870,47 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
   assert.equal(frameMessage.message.topOrigin, `http://${targetHost}:${targetPort}`);
   });
 
+  await t.test('an invalid call to a replaced platform member fails the way the engine fails it', async () => {
+    const r = await page.evaluate(() => {
+      const t = f => { try { f(); return 'no error'; } catch (e) { return e.name + ': ' + e.message; } };
+      const get = (proto, key) => Object.getOwnPropertyDescriptor(proto, key).get;
+      return {
+        cookie: t(() => get(Document.prototype, 'cookie').call({})),
+        userAgent: t(() => get(Navigator.prototype, 'userAgent').call(null)),
+        innerHTML: t(() => get(Element.prototype, 'innerHTML').call({})),
+        documentURL: t(() => get(Document.prototype, 'URL').call({})),
+        readyState: t(() => get(XMLHttpRequest.prototype, 'readyState').call({})),
+        open: t(() => XMLHttpRequest.prototype.open.call({}, 'GET', '/')),
+        openArgs: t(() => new XMLHttpRequest().open('GET')),
+        beacon: t(() => navigator.sendBeacon()),
+        urlNoNew: t(() => URL()),
+        urlNoArg: t(() => new URL()),
+        canParse: t(() => URL.canParse()),
+        pushState: t(() => History.prototype.pushState.call({}, null, '')),
+        defineGetter: t(() => ({}).__defineGetter__('x', 1)),
+        xhrOwnNames: Object.getOwnPropertyNames(new XMLHttpRequest()),
+        xhrSetters: ['readyState', 'status', 'response', 'responseURL'].map(k => typeof Object.getOwnPropertyDescriptor(XMLHttpRequest.prototype, k).set),
+        valid: t(() => { const x = new XMLHttpRequest(); x.open('GET', '/zp/probe-nothing'); return x.readyState; }),
+      };
+    });
+    assert.equal(r.cookie, 'TypeError: Illegal invocation');
+    assert.equal(r.userAgent, 'TypeError: Illegal invocation');
+    assert.equal(r.innerHTML, 'TypeError: Illegal invocation');
+    assert.equal(r.documentURL, 'TypeError: Illegal invocation');
+    assert.equal(r.readyState, 'TypeError: Illegal invocation');
+    assert.equal(r.open, 'TypeError: Illegal invocation');
+    assert.equal(r.openArgs, "TypeError: Failed to execute 'open' on 'XMLHttpRequest': 2 arguments required, but only 1 present.");
+    assert.equal(r.beacon, "TypeError: Failed to execute 'sendBeacon' on 'Navigator': 1 argument required, but only 0 present.");
+    assert.equal(r.urlNoNew, "TypeError: Failed to construct 'URL': Please use the 'new' operator, this DOM object constructor cannot be called as a function.");
+    assert.equal(r.urlNoArg, "TypeError: Failed to construct 'URL': 1 argument required, but only 0 present.");
+    assert.equal(r.canParse, "TypeError: Failed to execute 'canParse' on 'URL': 1 argument required, but only 0 present.");
+    assert.equal(r.pushState, 'TypeError: Illegal invocation');
+    assert.equal(r.defineGetter, 'TypeError: Object.prototype.__defineGetter__: Expecting function');
+    assert.deepEqual(r.xhrOwnNames, [], 'a request owns no properties of its own');
+    assert.deepEqual(r.xhrSetters, ['undefined', 'undefined', 'undefined', 'undefined'], 'the response attributes are read-only');
+    assert.equal(r.valid, 'no error', 'a valid call still reaches the replacement');
+  });
+
   await t.test('canvas and audio reads come back unmodified; speech voices are the fixed list', async () => {
   const fingerprintMasking = await page.evaluate(() => {
     const canvasMask = HTMLCanvasElement.prototype.toDataURL.toString();

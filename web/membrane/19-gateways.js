@@ -11,7 +11,7 @@
     }
     function ZPWebTransport(targetUrl, opts) {
       if (!(this instanceof ZPWebTransport)) {
-        throw new TypeError("Failed to construct 'WebTransport': Please use the 'new' operator.");
+        throw new TypeError("Failed to construct 'WebTransport': Please use the 'new' operator, this DOM object constructor cannot be called as a function.");
       }
       const target = String(targetUrl == null ? '' : targetUrl);
       // Mirror native URL validation so feature-detection of invalid URLs throws SyntaxError.
@@ -165,7 +165,7 @@
     }
     function VirtualGateway() {
       if (!(this instanceof VirtualGateway)) {
-        throw new TypeError("Failed to construct '" + name + "': Please use the 'new' operator.");
+        throw new TypeError("Failed to construct '" + name + "': Please use the 'new' operator, this DOM object constructor cannot be called as a function.");
       }
     }
     installEventMethods(VirtualGateway.prototype);

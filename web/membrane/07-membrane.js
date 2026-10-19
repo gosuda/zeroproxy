@@ -1766,7 +1766,7 @@
     if (nativeDefineGetter) {
       defineMasked(Object.prototype, '__defineGetter__', {
         value: function __defineGetter__(prop, fn) {
-          if (typeof fn !== 'function') throw normalizedError('TypeError');
+          if (typeof fn !== 'function') return nativeDefineGetter.call(this, prop, fn);
           const host = isScopeProxy(this) || this === root ? root : this;
           if (typeof prop === 'string' && MEMBER_DANGER.has(prop) && dangerousBase(this)) {
             if (!Reflect.defineProperty(host, prop, { get: fn, enumerable: true, configurable: true })) {
@@ -1782,7 +1782,7 @@
     if (nativeDefineSetter) {
       defineMasked(Object.prototype, '__defineSetter__', {
         value: function __defineSetter__(prop, fn) {
-          if (typeof fn !== 'function') throw normalizedError('TypeError');
+          if (typeof fn !== 'function') return nativeDefineSetter.call(this, prop, fn);
           const host = isScopeProxy(this) || this === root ? root : this;
           if (typeof prop === 'string' && MEMBER_DANGER.has(prop) && dangerousBase(this)) {
             if (!Reflect.defineProperty(host, prop, { set: fn, enumerable: true, configurable: true })) {

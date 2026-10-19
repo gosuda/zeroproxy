@@ -102,68 +102,66 @@
     if (Native.fetch && Native.Request && Native.Headers) define(root, 'fetch', function fetch(input, init) { return fetchThroughRuntime(input, init); });
     if (Native.XMLHttpRequest && Native.fetch && Native.Request && Native.Headers) {
       const UNSENT = 0, OPENED = 1, HEADERS_RECEIVED = 2, LOADING = 3, DONE = 4;
+      // The instances of the replacement class: its members answer any other receiver as the native class does.
+      const xhrInstances = newWeakSet();
+      const xhrRecords = newWeakMap();
+      const xhrBrand = recv => xhrInstances.has(recv);
+      let spareXhr = null;
+      const xhrSpare = () => spareXhr || (spareXhr = new Native.XMLHttpRequest());
       function ZPXMLHttpRequest() {
-        this.readyState = UNSENT;
-        this.response = this.responseText = '';
+        if (!new.target) throw new TypeError("Failed to construct 'XMLHttpRequest': Please use the 'new' operator, this DOM object constructor cannot be called as a function.");
+        xhrInstances.add(this);
+        // The state lives in a record the instance does not expose: a native request owns no properties.
         // Native defaults are null, not undefined, so the prototype accessors
         // below report `null` on an untouched request.
-        this.responseXML = null;
-        this.onreadystatechange = null;
-        this.responseType = '';
-        this.responseURL = '';
-        this.status = 0;
-        this.statusText = '';
-        this.timeout = 0;
-        this.withCredentials = false;
-        this.upload = {};
-        this._headers = [];
-        this._responseHeaders = null;
-        this._method = 'GET';
-        this._url = '';
-        this._sent = false;
-        this._controller = null;
-        this._timer = 0;
+        xhrRecords.set(this, {
+          readyState: UNSENT, response: '', responseText: '', responseXML: null, onreadystatechange: null, responseType: '',
+          responseURL: '', status: 0, statusText: '', timeout: 0, withCredentials: false, upload: {},
+          headers: [], responseHeaders: null, method: 'GET', url: '', sent: false, controller: null, timer: 0, sync: false,
+        });
       }
+      const xhrState = xhr => xhrRecords.get(xhr);
       function xhrReady(xhr, state) {
-        xhr.readyState = state;
+        xhrState(xhr).readyState = state;
         fireEvent(xhr, 'readystatechange');
       }
       function xhrDone(xhr, type) {
-        clearTimeout(xhr._timer);
-        xhr._timer = 0;
+        clearTimeout(xhrState(xhr).timer);
+        xhrState(xhr).timer = 0;
         xhrReady(xhr, DONE);
         fireEvent(xhr, type);
         fireEvent(xhr, 'loadend');
       }
       installEventMethods(ZPXMLHttpRequest.prototype);
-      // Expose XHR state as prototype accessors backed by `_zp`-prefixed fields
-      // to match native `XMLHttpRequest.prototype` descriptors and avoid creating
-      // own properties on instances.
+      // Expose XHR state as prototype accessors over the record, shaped like the native
+      // `XMLHttpRequest.prototype`: the response attributes are read-only, the rest have setters.
       for (const _n of ['readyState', 'response', 'responseText', 'responseXML', 'responseType',
         'responseURL', 'status', 'statusText', 'timeout', 'withCredentials', 'upload',
         'onreadystatechange']) {
-        const _k = '_zp' + _n;
+        const nativeAccessor = Native.XMLHttpRequest && Object.getOwnPropertyDescriptor(Native.XMLHttpRequest.prototype, _n);
+        const getter = function () { return xhrState(this)[_n]; };
+        const setter = nativeAccessor && !nativeAccessor.set ? undefined : function (v) { xhrState(this)[_n] = v; };
         defineAccessor(ZPXMLHttpRequest.prototype, _n,
-          function () { return this[_k]; },
-          function (v) { this[_k] = v; },
+          nativeAccessor && nativeAccessor.get ? guardGetter(ZPXMLHttpRequest.prototype, _n, getter, nativeAccessor.get, xhrBrand) : getter,
+          setter && nativeAccessor && nativeAccessor.set ? guardSetter(ZPXMLHttpRequest.prototype, _n, setter, nativeAccessor.set, xhrBrand, xhrSpare) : setter,
           Native.XMLHttpRequest && Native.XMLHttpRequest.prototype);
       }
       // Route synchronous XHR through the same-origin `/zp/api/sync-fetch` relay.
       // The Go server parks the HTTP response while the Service Worker performs
       // the upstream fetch, keeping egress confined to the worker transport.
       function sendSyncThroughRelay(xhr, body) {
-        xhr._sent = true;
+        xhrState(xhr).sent = true;
         let networkError = null;
         try {
           const rid = 'sx' + ZP.randomId();
           let u = proxyOrigin + ZP.apiPath('sync-fetch')
             + '?rid=' + nativeEncodeURIComponent(rid)
-            + '&u=' + nativeEncodeURIComponent(xhr._url)
-            + '&m=' + nativeEncodeURIComponent(xhr._method)
+            + '&u=' + nativeEncodeURIComponent(xhrState(xhr).url)
+            + '&m=' + nativeEncodeURIComponent(xhrState(xhr).method)
             + '&tab=' + nativeEncodeURIComponent(boot.tabId || '')
             + '&entry=' + nativeEncodeURIComponent(activeEntryId || '');
-          for (const kv of xhr._headers) u += '&h=' + nativeEncodeURIComponent(kv[0] + ':' + kv[1]);
-          if (xhr.withCredentials) u += '&wc=1';
+          for (const kv of xhrState(xhr).headers) u += '&h=' + nativeEncodeURIComponent(kv[0] + ':' + kv[1]);
+          if (xhrState(xhr).withCredentials) u += '&wc=1';
           // Include pending cookie writes that have not yet settled in the worker.
           const unsent = pendingCookieWrites();
           if (unsent.length) {
@@ -172,18 +170,18 @@
           }
 
           const nx = new Native.XMLHttpRequest();
-          nx.open(xhr._method, u, false);
-          if (xhr.responseType === 'arraybuffer' || xhr.responseType === 'blob') {
+          nx.open(xhrState(xhr).method, u, false);
+          if (xhrState(xhr).responseType === 'arraybuffer' || xhrState(xhr).responseType === 'blob') {
             // Synchronous XHR does not allow setting `responseType`; receive as text.
           }
-          nx.send(body != null && xhr._method !== 'GET' && xhr._method !== 'HEAD' ? body : null);
+          nx.send(body != null && xhrState(xhr).method !== 'GET' && xhrState(xhr).method !== 'HEAD' ? body : null);
           // On a worker-reported network error (such as a failed CORS check), transition
           // to DONE and throw NetworkError without firing progress events.
           if (nx.getResponseHeader('X-ZP-Sync-Err') === 'ZP_NETWORK_ERROR') {
-            xhr._sent = false;
-            xhr.status = 0;
-            xhr.statusText = '';
-            xhr.readyState = DONE;
+            xhrState(xhr).sent = false;
+            xhrState(xhr).status = 0;
+            xhrState(xhr).statusText = '';
+            xhrState(xhr).readyState = DONE;
             networkError = normalizedError('NetworkError');
             throw networkError;
           }
@@ -199,8 +197,8 @@
             }
           } catch {}
 
-          xhr.status = nx.status;
-          xhr.statusText = nx.statusText || '';
+          xhrState(xhr).status = nx.status;
+          xhrState(xhr).statusText = nx.statusText || '';
           try {
             const h = new Native.Headers();
             String(nx.getAllResponseHeaders() || '').split(/\r?\n/).forEach(line => {
@@ -218,30 +216,30 @@
                 const list = JSON.parse(new TextDecoder().decode(bytes));
                 const all = new Native.Headers();
                 for (const kv of list) { try { all.append(kv[0], kv[1]); } catch {} }
-                xhr._responseHeaders = all;
-              } catch { xhr._responseHeaders = h; }
-            } else xhr._responseHeaders = h;
+                xhrState(xhr).responseHeaders = all;
+              } catch { xhrState(xhr).responseHeaders = h; }
+            } else xhrState(xhr).responseHeaders = h;
           } catch {}
           xhrReady(xhr, HEADERS_RECEIVED);
           xhrReady(xhr, LOADING);
-          xhr.responseText = nx.responseText || '';
-          if (xhr.responseType === 'json') {
-            try { xhr.response = xhr.responseText ? JSON.parse(xhr.responseText) : null; } catch { xhr.response = null; }
+          xhrState(xhr).responseText = nx.responseText || '';
+          if (xhrState(xhr).responseType === 'json') {
+            try { xhrState(xhr).response = xhrState(xhr).responseText ? JSON.parse(xhrState(xhr).responseText) : null; } catch { xhrState(xhr).response = null; }
           } else {
-            xhr.response = xhr.responseText;
+            xhrState(xhr).response = xhrState(xhr).responseText;
           }
-          xhr._sent = false;
+          xhrState(xhr).sent = false;
           xhrDone(xhr, 'load');
         } catch (e) {
           if (networkError && e === networkError) throw e;
-          xhr._sent = false;
-          xhr.status = 0;
-          xhr.statusText = '';
+          xhrState(xhr).sent = false;
+          xhrState(xhr).status = 0;
+          xhrState(xhr).statusText = '';
           try {
             const diag = root.__zp_diagnostics;
             if (diag && diag.length < 200) diag.push({
               t: 'sync-xhr-relay-failed',
-              url: String(xhr._url || '').slice(0, 160),
+              url: String(xhrState(xhr).url || '').slice(0, 160),
               msg: String((e && e.message) || e).slice(0, 120),
             });
           } catch {}
@@ -262,69 +260,70 @@
         open(method, url, async = true, user, password) {
           // Service Workers do not intercept synchronous XHR; mark sync requests
           // so `send()` routes them through the same-origin relay endpoint.
-          this._sync = (async === false);
+          xhrState(this).sync = (async === false);
           this.abort();
-          this._method = String(method || 'GET').toUpperCase();
+          xhrState(this).method = String(method || 'GET').toUpperCase();
           const target = new URL(requestTargetURL(url));
           if (user != null) target.username = String(user);
           if (password != null) target.password = String(password);
-          this._url = target.href;
-          this.responseURL = this._url;
-          this._headers = [];
-          this._responseHeaders = null;
-          this.status = 0;
-          this.statusText = '';
-          this.response = this.responseText = '';
+          xhrState(this).url = target.href;
+          xhrState(this).responseURL = xhrState(this).url;
+          xhrState(this).headers = [];
+          xhrState(this).responseHeaders = null;
+          xhrState(this).status = 0;
+          xhrState(this).statusText = '';
+          xhrState(this).response = xhrState(this).responseText = '';
           xhrReady(this, OPENED);
         },
         setRequestHeader(name, value) {
-          if (this.readyState !== OPENED || this._sent) throw normalizedError('InvalidStateError');
-          this._headers.push([String(name), String(value)]);
+          if (xhrState(this).readyState !== OPENED || xhrState(this).sent) throw normalizedError('InvalidStateError');
+          xhrState(this).headers.push([String(name), String(value)]);
         },
         send(body = null) {
-          if (this.readyState !== OPENED || this._sent) throw normalizedError('InvalidStateError');
-          if (this._sync) return sendSyncThroughRelay(this, body);
-          this._sent = true;
-          this._controller = new AbortController();
-          const init = { method: this._method, headers: this._headers, credentials: this.withCredentials ? 'include' : 'same-origin', signal: this._controller.signal };
-          if (body != null && this._method !== 'GET' && this._method !== 'HEAD') init.body = body;
-          if (this.timeout > 0) this._timer = setTimeout(() => { try { this._controller.abort(); } catch {} this._sent = false; xhrDone(this, 'timeout'); }, this.timeout);
-          fetchThroughRuntime(this._url, init).then(async resp => {
-            if (!this._sent) return;
-            this.status = resp.status;
-            this.statusText = resp.statusText;
-            this.responseURL = resp.url || this._url;
-            this._responseHeaders = resp.headers;
+          if (xhrState(this).readyState !== OPENED || xhrState(this).sent) throw normalizedError('InvalidStateError');
+          if (xhrState(this).sync) return sendSyncThroughRelay(this, body);
+          xhrState(this).sent = true;
+          xhrState(this).controller = new AbortController();
+          const init = { method: xhrState(this).method, headers: xhrState(this).headers, credentials: xhrState(this).withCredentials ? 'include' : 'same-origin', signal: xhrState(this).controller.signal };
+          if (body != null && xhrState(this).method !== 'GET' && xhrState(this).method !== 'HEAD') init.body = body;
+          if (xhrState(this).timeout > 0) xhrState(this).timer = setTimeout(() => { try { xhrState(this).controller.abort(); } catch {} xhrState(this).sent = false; xhrDone(this, 'timeout'); }, xhrState(this).timeout);
+          fetchThroughRuntime(xhrState(this).url, init).then(async resp => {
+            if (!xhrState(this).sent) return;
+            xhrState(this).status = resp.status;
+            xhrState(this).statusText = resp.statusText;
+            xhrState(this).responseURL = resp.url || xhrState(this).url;
+            xhrState(this).responseHeaders = resp.headers;
             xhrReady(this, HEADERS_RECEIVED);
             xhrReady(this, LOADING);
-            if (this.responseType === 'arraybuffer') this.response = await resp.arrayBuffer();
-            else if (this.responseType === 'blob') this.response = await resp.blob();
-            else if (this.responseType === 'json') { const text = await resp.text(); try { this.response = text ? JSON.parse(text) : null; } catch { this.response = null; } }
-            else { this.responseText = await resp.text(); this.response = this.responseText; }
-            this._sent = false;
+            if (xhrState(this).responseType === 'arraybuffer') xhrState(this).response = await resp.arrayBuffer();
+            else if (xhrState(this).responseType === 'blob') xhrState(this).response = await resp.blob();
+            else if (xhrState(this).responseType === 'json') { const text = await resp.text(); try { xhrState(this).response = text ? JSON.parse(text) : null; } catch { xhrState(this).response = null; } }
+            else { xhrState(this).responseText = await resp.text(); xhrState(this).response = xhrState(this).responseText; }
+            xhrState(this).sent = false;
             xhrDone(this, 'load');
           }).catch(() => {
-            if (!this._sent) return;
-            this._sent = false;
-            this.status = 0;
-            this.statusText = '';
+            if (!xhrState(this).sent) return;
+            xhrState(this).sent = false;
+            xhrState(this).status = 0;
+            xhrState(this).statusText = '';
             xhrDone(this, 'error');
           });
         },
         abort() {
-          if (this._controller) { try { this._controller.abort(); } catch {} }
-          clearTimeout(this._timer);
-          this._timer = 0;
-          const active = this._sent;
-          this._sent = false;
-          this._controller = null;
+          if (xhrState(this).controller) { try { xhrState(this).controller.abort(); } catch {} }
+          clearTimeout(xhrState(this).timer);
+          xhrState(this).timer = 0;
+          const active = xhrState(this).sent;
+          xhrState(this).sent = false;
+          xhrState(this).controller = null;
           if (active) xhrDone(this, 'abort');
         },
-        getResponseHeader(name) { return this._responseHeaders ? this._responseHeaders.get(String(name)) : null; },
-        getAllResponseHeaders() { if (!this._responseHeaders) return ''; let out = ''; this._responseHeaders.forEach((v, k) => { out += k + ': ' + v + '\r\n'; }); return out; },
+        getResponseHeader(name) { return xhrState(this).responseHeaders ? xhrState(this).responseHeaders.get(String(name)) : null; },
+        getAllResponseHeaders() { if (!xhrState(this).responseHeaders) return ''; let out = ''; xhrState(this).responseHeaders.forEach((v, k) => { out += k + ': ' + v + '\r\n'; }); return out; },
         overrideMimeType() {}
       });
       maskMethods(ZPXMLHttpRequest.prototype, ['open','setRequestHeader','send','abort','getResponseHeader','getAllResponseHeaders','overrideMimeType']);
+      guardClassMembers(ZPXMLHttpRequest.prototype, Native.XMLHttpRequest.prototype, xhrBrand, xhrSpare);
       brandLikeNative(ZPXMLHttpRequest, ZPXMLHttpRequest.prototype, 'XMLHttpRequest');
       define(root, 'XMLHttpRequest', ZPXMLHttpRequest);
     }
@@ -679,7 +678,7 @@
       return state;
     };
     function ZPWebSocketStream(url, options = {}) {
-      if (!new.target) throw new TypeError("Failed to construct 'WebSocketStream': Please use the 'new' operator.");
+      if (!new.target) throw new TypeError("Failed to construct 'WebSocketStream': Please use the 'new' operator, this DOM object constructor cannot be called as a function.");
       if (!arguments.length) throw new TypeError('WebSocketStream requires a URL');
       options = options || {};
       const ws = new root.WebSocket(url, options.protocols);

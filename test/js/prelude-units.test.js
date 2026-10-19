@@ -1355,3 +1355,78 @@ test('site frames: the embedding page and the top document are addressed at the 
   assert.equal(env.realOriginOfWindow(top), 'http://proxy.localhost:18080', 'the top document lives at the main origin');
   assert.equal(env.realOriginOfWindow(stranger), 'http://proxy.test:18080', 'any other window is ours');
 });
+
+// Native fallback for invalid calls: a replacement wrapped by guardMethod / guardGetter / guardSetter answers a call the
+// engine would refuse (a receiver without the interface's internal slots, too few arguments) with the replaced member's own error.
+function guardEnv() {
+  const toStringMap = new Map();
+  const env = load(
+    slice('  const BRAND_PROBE_KEYS = ', '  // The members of a replacement class\'s prototype, guarded'),
+    ['guardMethod', 'guardGetter', 'guardSetter', 'guardOriginals'],
+    {
+      toStringMap, root: {}, nativeApply: Reflect.apply, nativeReflectGOPD: Reflect.getOwnPropertyDescriptor, nativeHasOwn: Object.prototype.hasOwnProperty,
+    });
+  return { env, toStringMap };
+}
+
+// An interface whose instances carry a slot only the real constructor sets: reading `localName` on anything else throws.
+// (named after an interface the guard checks receivers of)
+const Thing = class Element {
+  #slot = true;
+  get localName() { return this.#slot ? 'thing' : ''; }
+  get nativeAttr() { return this.#slot ? 'native' : ''; }
+  set nativeAttr(v) { void v; void this.#slot; }
+  nativeMethod(a, b) { void a; void b; void this.#slot; return 'native'; }
+};
+Object.defineProperty(Thing.prototype, 'nativeMethod', { enumerable: true });
+
+test('guard: a valid call reaches the replacement; an invalid receiver or too few arguments get the native error', () => {
+  const { env } = guardEnv();
+  const nativeMethod = Thing.prototype.nativeMethod;
+  const impl = function () { return 'replacement'; };
+  const guarded = env.guardMethod(Thing.prototype, 'nativeMethod', impl, nativeMethod);
+  assert.notEqual(guarded, impl, 'the replacement was wrapped');
+  assert.equal(guarded.call(new Thing(), 1, 2), 'replacement');
+  assert.throws(() => guarded.call({}, 1, 2), /private|incompatible|Cannot read/i, 'a receiver without the slot reaches the native member');
+  assert.throws(() => guarded.call(null, 1, 2), TypeError);
+  assert.equal(nativeMethod.length, 2);
+  // fewer arguments than the member's length: the native member decides (here it does not throw, so its answer comes back)
+  assert.equal(guarded.call(new Thing(), 1), 'native');
+  assert.equal(guarded.name, 'nativeMethod');
+  assert.ok(!Object.prototype.hasOwnProperty.call(guarded, 'prototype'), 'a method is not a constructor');
+  assert.throws(() => new guarded(), TypeError);
+});
+
+test('guard: accessors check the receiver; a second guard wraps the native member, not the first guard', () => {
+  const { env } = guardEnv();
+  const d = Object.getOwnPropertyDescriptor(Thing.prototype, 'nativeAttr');
+  const getImpl = function () { return 'replacement'; };
+  const getter = env.guardGetter(Thing.prototype, 'nativeAttr', getImpl, d.get);
+  const setter = env.guardSetter(Thing.prototype, 'nativeAttr', function (v) { void v; }, d.set);
+  assert.equal(getter.call(new Thing()), 'replacement');
+  assert.throws(() => getter.call({}), TypeError, 'a plain object is not a Thing');
+  assert.throws(() => setter.call({}, 1), TypeError);
+  // an already-guarded implementation is returned as it is, and a guard over a guard hands invalid calls to the first native member
+  assert.equal(env.guardGetter(Thing.prototype, 'nativeAttr', getter, d.get), getter);
+  const again = env.guardGetter(Thing.prototype, 'nativeAttr', getImpl, getter);
+  assert.equal(env.guardOriginals.get(again), d.get, 'the original is the engine\'s getter');
+  assert.throws(() => again.call({}), TypeError);
+});
+
+test('guard: an explicit brand check serves a replacement class; members that are not native are left alone', () => {
+  const { env, toStringMap } = guardEnv();
+  const inst = new WeakSet();
+  const brand = r => inst.has(r);
+  const nativeMethod = Thing.prototype.nativeMethod;
+  const impl = function () { return 'replacement'; };
+  const guarded = env.guardMethod({}, 'open', impl, nativeMethod, brand);
+  const mine = {}; inst.add(mine);
+  assert.equal(guarded.call(mine, 1, 2), 'replacement');
+  assert.throws(() => guarded.call({}, 1, 2), TypeError, 'an object that is not an instance reaches the native member');
+  // a member the membrane installed itself (masked) is not the engine's: nothing to fall back to
+  const ours = function () { return 'ours'; };
+  toStringMap.set(ours, 'function ours() { [native code] }');
+  assert.equal(env.guardMethod(Thing.prototype, 'x', impl, ours), impl);
+  // a constructor is not an operation
+  assert.equal(env.guardMethod(Thing.prototype, 'x', impl, Thing), impl);
+});

@@ -6,6 +6,7 @@ Keep each summary to a single line under 160 characters and point every detail l
 
 | Date | Category | Summary | Detail |
 |---|---|---|---|
+| 2026-10-20 | membrane / fidelity | Replacements ignored receiver brand and argument count (sendBeacon() posted to /undefined); now guarded. Not the Glassdoor cause: 0/5 still. | rewriter.md#replacement-invalid-calls |
 | 2026-10-19 | membrane / frame | Site frames broke five ways (COEP/CORP, meta CSP, unreachable window, shared sync-fetch queue, referrer policy); occluded Chrome makes mouse events take 5 s. | rewriter.md#site-frame-traps |
 | 2026-10-19 | design / measurement | <label>.localhost hosts are separate sites (other process, SW cold start ~170 ms), but SW storage is partitioned per top-level site. | rewriter.md#localhost-label-sites |
 | 2026-10-19 | real-site / measurement | A widget sharing its embedder's process fails even with no membrane (site isolation off: 0/4). Proxied frames need different real sites. | rewriter.md#widget-process-model-inverse |
