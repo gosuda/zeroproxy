@@ -5848,12 +5848,12 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
   assert.equal(frameMessage.message.topOrigin, `http://${targetHost}:${targetPort}`);
   });
 
-  await t.test('canvas audio and speech fingerprint masking', async () => {
+  await t.test('canvas and audio reads come back unmodified; speech voices are the fixed list', async () => {
   const fingerprintMasking = await page.evaluate(() => {
     const canvasMask = HTMLCanvasElement.prototype.toDataURL.toString();
     const voicesMask = speechSynthesis.getVoices.toString();
 
-    // #123456 has even channels everywhere: a farbled one is odd, and nothing may move by more than its low bit.
+    // #123456 read back must be exactly what was drawn: the membrane adds no noise to canvas pixels.
     const solid = () => {
       const c = document.createElement('canvas');
       c.width = 64;
@@ -5871,8 +5871,7 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     const ctxA = canvasA.getContext('2d');
     const read = Array.from(ctxA.getImageData(0, 0, 64, 64).data);
     const raw = [0x12, 0x34, 0x56, 255];
-    const farbledChannels = read.filter((v, i) => v !== raw[i % 4]).length;
-    const withinLowBit = read.every((v, i) => Math.abs(v - raw[i % 4]) <= 1);
+    const changedChannels = read.filter((v, i) => v !== raw[i % 4]).length;
     // a sub-rectangle reads the same pixels as the whole canvas does
     const sub = Array.from(ctxA.getImageData(10, 20, 5, 1).data);
     const subMatches = sub.every((v, i) => v === read[(20 * 64 + 10) * 4 + i]);
@@ -5916,8 +5915,7 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
       canvasMask,
       voicesMask,
       sameDrawingSameBytes: urlA === urlB && urlA === urlA2,
-      farbledChannels,
-      withinLowBit,
+      changedChannels,
       subMatches,
       roundTrip,
       blankStaysBlank,
@@ -5935,10 +5933,8 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
   });
   assert.equal(fingerprintMasking.canvasMask, 'function toDataURL() { [native code] }');
   assert.equal(fingerprintMasking.voicesMask, 'function getVoices() { [native code] }');
-  // Farbling is deterministic per session for a given drawing.
   assert.equal(fingerprintMasking.sameDrawingSameBytes, true);
-  assert.ok(fingerprintMasking.farbledChannels > 0, 'no channel farbled');
-  assert.equal(fingerprintMasking.withinLowBit, true);
+  assert.equal(fingerprintMasking.changedChannels, 0, 'canvas pixels read back unchanged');
   assert.equal(fingerprintMasking.subMatches, true);
   assert.equal(fingerprintMasking.roundTrip, true);
   assert.equal(fingerprintMasking.blankStaysBlank, true);
@@ -5952,8 +5948,8 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
   if (fingerprintMasking.audio) {
     assert.equal(fingerprintMasking.audio.sameArray, true);
     assert.equal(fingerprintMasking.audio.stable, true);
-    assert.ok(fingerprintMasking.audio.changed > 0 && fingerprintMasking.audio.changedDeep > 0, JSON.stringify(fingerprintMasking.audio));
-    assert.ok(fingerprintMasking.audio.maxDelta < 1e-6, JSON.stringify(fingerprintMasking.audio));
+    assert.equal(fingerprintMasking.audio.changed, 0, JSON.stringify(fingerprintMasking.audio));
+    assert.equal(fingerprintMasking.audio.maxDelta, 0, JSON.stringify(fingerprintMasking.audio));
   }
   assert.equal(fingerprintMasking.voiceCount, 2);
   assert.deepEqual(fingerprintMasking.voiceNames, ['Google US English', 'Microsoft David - English (United States)']);

@@ -412,18 +412,6 @@
   const integrityBackupAttr = 'data-zp-integrity';
   const hiddenIconHref = 'data:application/x-zeroproxy-icon,1';
   const WINDOW_BOUND_METHODS = newSet(['addEventListener','removeEventListener','dispatchEvent','setTimeout','setInterval','clearTimeout','clearInterval','requestAnimationFrame','cancelAnimationFrame','requestIdleCallback','cancelIdleCallback','matchMedia','getComputedStyle','postMessage','atob','btoa','focus','blur','close','print','alert','confirm','prompt','scroll','scrollTo','scrollBy']);
-  const canvasHookedWindows = newWeakSet();
-  const audioHookedWindows = newWeakSet();
-  // Read the per-profile canvas/audio farbling seed from native localStorage
-  // before the storage facade virtualizes the namespace.
-  const farbleSecret = (() => {
-    try {
-      const ls = root.localStorage;
-      let s = ls.getItem('__zp_farble');
-      if (!s) { s = Math.random().toString(36).slice(2) + Date.now().toString(36); ls.setItem('__zp_farble', s); }
-      return s;
-    } catch { return Math.random().toString(36).slice(2); }
-  })();
   const serviceWorkerFacades = newWeakMap();
   const storageMaps = newMap();
   // Shared hook table populated by installPhase2Membrane so sibling functions

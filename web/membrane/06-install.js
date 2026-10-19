@@ -26,8 +26,6 @@
   __zpStep('TargetServiceWorkerBlocker', () => installTargetServiceWorkerBlocker(root));
   __zpStep('IframeHooks', () => installIframeHooks(root));
   __zpStep('Blockers', () => installBlockers(root));
-  __zpStep('CanvasAntiFingerprinting', () => installCanvasAntiFingerprinting(root));
-  __zpStep('AudioAntiFingerprinting', () => installAudioAntiFingerprinting(root));
   __zpStep('NavigationBackstop', () => installNavigationBackstop(root, root.document && root.document.documentElement));
   __zpStep('SurfaceGuards', () => installSurfaceGuards(root));
   zpTrace('install:all:done');

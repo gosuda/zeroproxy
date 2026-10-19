@@ -9,7 +9,7 @@ ZeroProxy enforces two core properties:
 1. **Containment**: Target code cannot open native network connections, obtain the real `window`/`Location` or an uncontained realm, read another target's storage or proxy control surfaces, or execute unrewritten code.
 2. **Compatibility**: Websites that load and function in a standard browser load and function through ZeroProxy.
 
-Hiding the proxy's existence from target JavaScript (concealment) is **not** a project goal. Existing fingerprint masking (such as deterministic per-profile, per-origin canvas and audio noise) remains in place, but new concealment features are out of scope. Before starting any task, verify which containment invariant it protects or which broken website it fixes. If it does neither, do not implement it.
+Hiding the proxy's existence from target JavaScript (concealment) is **not** a project goal. Existing masking (such as the fixed speech-synthesis voice list) remains in place, but new concealment features are out of scope. Before starting any task, verify which containment invariant it protects or which broken website it fixes. If it does neither, do not implement it.
 
 ### Accepted Non-Goals and Residuals
 

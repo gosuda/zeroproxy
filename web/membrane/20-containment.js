@@ -327,8 +327,6 @@
     installTargetServiceWorkerBlocker(w);
     installIframeHooks(w);
     installBlockers(w, true);
-    installCanvasAntiFingerprinting(w);
-    installAudioAntiFingerprinting(w);
     installNavigationBackstop(w, w.document && w.document.documentElement);
     try { Object.defineProperty(w, networkContainmentMarker, { value: true, enumerable: false, configurable: false }); } catch {}
   }

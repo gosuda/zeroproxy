@@ -864,7 +864,7 @@ Summary of past root causes, fixes, and verifications; not the current full acce
 ## <a id="deterministic-canvas-farbling"></a>Canvas noise changed on every read and mutated the page canvas; make noise deterministic... (2026-10-12) {#deterministic-canvas-farbling}
 
 - **Category:** `membrane / fix`
-- **Invariant and fix:** Canvas noise changed on every read and mutated the page canvas; make noise deterministic per input on a clone and match native hook shapes.
+- **Invariant and fix:** Canvas noise changed on every read and mutated the page canvas. The noise is removed: canvas and audio reads are the browser's own, and no read mutates the page canvas.
 
 ## <a id="prepare-stack-trace-page-view"></a>`Error (2026-10-12) {#prepare-stack-trace-page-view}
 
