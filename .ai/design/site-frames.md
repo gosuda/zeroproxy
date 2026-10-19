@@ -10,7 +10,7 @@ Every proxied frame is served from one real origin, so the browser puts a frame 
 
 Only to a relay reachable under a loopback name (`proxy.localhost`, `localhost`). `<label>.localhost` names resolve to loopback, are secure contexts, and each label is a site of its own, so a frame served from `s-<site>-<hash>.localhost` is isolated from the embedder at `proxy.localhost`. A relay on a real domain cannot do this: subdomains of one registrable domain are the same site. `ZP.siteFrameCapable(origin)` is the single test.
 
-The feature is opt-in per tab (the launcher's "Site-isolated frames" box). A tab records `siteFrames`; its documents learn it through the boot configuration.
+The feature is on by default wherever the relay is reachable under a loopback name, and off (the launcher's "Site-isolated frames" box disabled) elsewhere. Unchecking the box opens a tab without it. A tab records `siteFrames`; its documents learn it through the boot configuration. A share link opened directly, and every site frame's own launcher, start their tabs the same way.
 
 ## Which frame goes where
 

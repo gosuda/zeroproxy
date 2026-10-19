@@ -119,7 +119,7 @@
         <button>Open</button>
       </form>
       <label class="opt"><input id="challenge-compat" type="checkbox"> <span class="lbl">Challenge compatibility (Cloudflare Turnstile)</span></label>
-      <label class="opt"><input id="site-frames" type="checkbox"> <span class="lbl">Site-isolated frames (loopback relay only)</span></label>
+      <label class="opt"><input id="site-frames" type="checkbox" checked> <span class="lbl">Site-isolated frames (loopback relay only)</span></label>
     </div>
     <div class="stat">
       <span class="lbl"><span class="dot" aria-hidden="true"></span>02 — Status</span>
@@ -179,10 +179,15 @@
     const el = document.getElementById('challenge-compat');
     return !!(el && el.checked);
   }
+  // On by default where the relay can mint a host per site; elsewhere the box is off and cannot be turned on.
   function siteFramesEnabled() {
     const el = document.getElementById('site-frames');
-    return !!(el && el.checked);
+    return !!(el && el.checked && !el.disabled);
   }
+  (() => {
+    const el = document.getElementById('site-frames');
+    if (el && !ZP.siteFrameCapable(proxyOrigin())) { el.checked = false; el.disabled = true; }
+  })();
   // Subdomains where upstream WAFs enforce an initial ~60s IP/session reputation delay before serving the first
   // response; the launcher displays an informational status message during the initial load.
   const SLOW_LANE_RULES = [
@@ -260,7 +265,7 @@
       const zpf = params.get('zpf') || '';
       let siteFrame = null;
       if (zpf) { try { siteFrame = JSON.parse(new TextDecoder().decode(ZP.base64UrlToBytes(zpf))); } catch {} }
-      const result = await swRequest({ type: ZP.MSG.OPEN_SHARE, routeKey: encrypted, targetUrl, servers, env: ZP.clientEnvOf(window), ...(siteFrame ? { siteFrame, challengeCompat: !!siteFrame.challengeCompat } : null) });
+      const result = await swRequest({ type: ZP.MSG.OPEN_SHARE, routeKey: encrypted, targetUrl, servers, siteFrames: siteFramesEnabled(), env: ZP.clientEnvOf(window), ...(siteFrame ? { siteFrame, challengeCompat: !!siteFrame.challengeCompat } : null) });
       if (Array.isArray(result.servers) && result.servers.length) servers = result.servers;
       const next = result.path + ZP.makeShareFragment(key, servers) + (siteFrame ? '&zpf=' + zpf : '');
       if (location.pathname === result.path) {

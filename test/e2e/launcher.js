@@ -10,8 +10,9 @@ async function openThroughLauncher(page, proxyOrigin, targetUrl, { navigationTim
   } catch {
     throw new Error(`launcher never became ready: ${JSON.stringify(await pageText(page))}`);
   }
-  // ZP_E2E_SITE_FRAMES=1 opens every tab with site-isolated frames, so the whole suite exercises that mode.
-  if (siteFrames === undefined ? process.env.ZP_E2E_SITE_FRAMES === '1' : siteFrames) await page.evaluate(() => { const c = document.getElementById('site-frames'); if (c && !c.checked) c.click(); });
+  // Site-isolated frames are on by default. ZP_E2E_SITE_FRAMES=0 opens every tab without them, so the suite can exercise that mode too.
+  const wantSiteFrames = siteFrames === undefined ? process.env.ZP_E2E_SITE_FRAMES !== '0' : siteFrames;
+  await page.evaluate(want => { const c = document.getElementById('site-frames'); if (c && !c.disabled && c.checked !== want) c.click(); }, wantSiteFrames);
   await page.type('input', targetUrl);
   let navigated = true;
   await Promise.all([
