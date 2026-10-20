@@ -6,6 +6,7 @@ Keep each summary to a single line under 160 characters and point every detail l
 
 | Date | Category | Summary | Detail |
 |---|---|---|---|
+| 2026-10-20 | real-site / measurement | Native Turnstile widget fails 0/4 (control 3/3) with only its Trusted Types directives removed. The proxy drops them; the old inverse missed the <meta>. | rewriter.md#widget-needs-trusted-types |
 | 2026-10-20 | real-site / method | Native parent + proxied widget fails 0/4: the proxied parent is not needed. Persona 154 vs Chrome 155 and with(__zp_lex_scope) cost: not the cause. | rewriter.md#hybrid-native-parent-proxied-widget |
 | 2026-10-20 | membrane / fidelity | Replacements ignored receiver brand and argument count (sendBeacon() posted to /undefined); now guarded. Not the Glassdoor cause: 0/5 still. | rewriter.md#replacement-invalid-calls |
 | 2026-10-19 | membrane / frame | Site frames broke five ways (COEP/CORP, meta CSP, unreachable window, shared sync-fetch queue, referrer policy); occluded Chrome makes mouse events take 5 s. | rewriter.md#site-frame-traps |
