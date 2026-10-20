@@ -1,6 +1,6 @@
 // The first flight the SW's captured spec produces, read back off the wire format.
 //
-// Chrome 154's ClientHello includes 17 non-GREASE extensions, including
+// Chrome 155's ClientHello includes 17 non-GREASE extensions, including
 // `trust_anchors` (0xca34, TLS Trust Expressions), plus a GREASE extension at
 // each end.
 use std::sync::Arc;
@@ -85,11 +85,11 @@ fn the_hello_has_the_extension_set_of_a_real_chrome() {
     let exts = extensions(&first_flight());
     let mut real: Vec<u16> = exts.iter().map(|(t, _)| *t).filter(|t| !is_grease(*t)).collect();
     real.sort_unstable();
-    let chrome_154: Vec<u16> = vec![
+    let chrome_155: Vec<u16> = vec![
         0x0000, 0x0005, 0x000a, 0x000b, 0x000d, 0x0010, 0x0012, 0x0017, 0x001b, 0x0023, 0x002b, 0x002d, 0x0033,
         0x44cd, 0xca34, 0xfe0d, 0xff01,
     ];
-    assert_eq!(real, chrome_154, "the extension set drifted from Chrome 154's");
+    assert_eq!(real, chrome_155, "the extension set drifted from Chrome 155's");
     assert_eq!(exts.iter().filter(|(t, _)| is_grease(*t)).count(), 2, "a GREASE extension at each end");
     assert!(is_grease(exts.first().unwrap().0) && is_grease(exts.last().unwrap().0));
 }

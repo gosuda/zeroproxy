@@ -33,7 +33,7 @@
   // X-ZP-User-Agent and the relay promotes it. The HTTP User-Agent, navigator.userAgent, Sec-CH-UA brands, and the
   // captured TLS ClientHello in sw.js must all report the same Chrome major version to avoid cross-signal WAF detection.
   // Keep worker-prelude.js TARGET_USER_AGENT in lockstep.
-  const TARGET_CHROME_MAJOR = 154;
+  const TARGET_CHROME_MAJOR = 155;
   const TARGET_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/' + TARGET_CHROME_MAJOR + '.0.0.0 Safari/537.36';
   // Chromium derives the low-entropy Sec-CH-UA brand list deterministically from the major version
   // (components/embedder_support/user_agent_utils.cc): the GREASE brand is `Not` + a + `A` + b + `Brand` with a and b
@@ -57,7 +57,7 @@
   // High-entropy User-Agent values returned by `navigator.userAgentData.getHighEntropyValues()` and `Sec-CH-UA-*`
   // headers when requested via `Accept-CH`. Both the HTTP hints and the JS API report the full four-part build number
   // (`.0.0.0` appears only in the reduced User-Agent string); the GREASE brand reports its major version plus `.0.0.0`.
-  const TARGET_CHROME_FULL_VERSION = TARGET_CHROME_MAJOR + '.0.8037.98';
+  const TARGET_CHROME_FULL_VERSION = TARGET_CHROME_MAJOR + '.0.8059.80';
   const TARGET_UA_HIGH_ENTROPY = Object.freeze({
     architecture: 'x86',
     bitness: '64',

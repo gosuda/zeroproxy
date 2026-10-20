@@ -133,7 +133,7 @@ pub fn last_named_groups_dump() -> (Vec<u16>, Vec<u16>) {
 /// a zero body is the fingerprint signal, not the exact length.
 pub const PADDING_BODY_LEN: usize = 100;
 
-/// Body of Chrome's `trust_anchors` extension (0xca34, TLS Trust Expressions), as Chrome 154.0.8037.98 sends it on every connection:
+/// Body of Chrome's `trust_anchors` extension (0xca34, TLS Trust Expressions), as Chrome 155.0.8059.80 sends it on every connection:
 /// a 2-byte list length (184) and 28 length-prefixed trust-anchor IDs (relative OIDs of its root-store versions). A real Chrome
 /// ClientHello has it; WebView2/Edge's does not, so a hello without it says "not Chrome" to a server that counts extensions.
 pub const CHROME_TRUST_ANCHORS: [u8; 186] = [

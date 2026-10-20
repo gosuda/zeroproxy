@@ -518,7 +518,7 @@
   try { self.eval = workerEval; } catch {}
   try { self.Function = workerFunction; } catch {}
   // Must match ZP.TARGET_USER_AGENT in web/zp-core.js so worker and window realms report identical User-Agent strings.
-  const TARGET_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36';
+  const TARGET_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36';
   const TARGET_APP_VERSION = TARGET_USER_AGENT.replace(/^Mozilla\//, '');
   const TARGET_PLATFORM = 'Win32';
   const nav = self.navigator;
