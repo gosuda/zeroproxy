@@ -154,6 +154,8 @@
     params.set('tab', boot.tabId);
     params.set('srcu', readFrom || srcu);
     if (opts && opts.type === 'module') params.set('mod', '1');
+    // A blob or data worker inherits this document's Trusted Types policies (a worker started from a URL has its own response's, which carries none).
+    for (const p of ttInheritedPolicies()) params.append('tt', p);
     workerGatewayParams(params);
     for (const server of activeServers) params.append('server', server);
     return proxyOrigin + ZP.controlPath('worker-bootstrap.js') + '#' + params.toString();

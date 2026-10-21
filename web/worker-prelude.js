@@ -67,7 +67,8 @@
   const realLocation = self.location;
   const realProxyOrigin = realLocation.origin;
   const isModuleWorker = new URLSearchParams(realLocation.hash.slice(1)).get('mod') === '1';
-  if (!isModuleWorker) importScripts('/zp/assets/zp-core.js');
+  // A worker that enforces Trusted Types takes `importScripts` URLs only as `TrustedScriptURL`: the bootstrap made the policy to load them with.
+  if (!isModuleWorker) { const early = self.__ZP_WORKER_TP; importScripts(early ? early.createScriptURL('/zp/assets/zp-core.js') : '/zp/assets/zp-core.js'); }
   const nativeFetch = self.fetch.bind(self);
   // Capture the native URL constructor before replacing `self.URL` with the virtualizing wrapper.
   const NativeURLCtor = self.URL;
@@ -97,12 +98,62 @@
     blockedDynamic();
   }
   const EXPR_STMT_RE = /^(?:function|class|var|let|const|if|for|while|do|switch|try|throw|return|break|continue|with|import|export|debugger)\b/;
+  // Trusted Types. A blob or data worker inherits the policies of the document that started it: its bootstrap put them in its CSP (`__ZP_WORKER_TT`)
+  // and made the policy of ours that this prelude hands Trusted values from (`__ZP_WORKER_TP`). Where the worker enforces them, the strings the
+  // prelude gives eval, Function and importScripts are Trusted values of that policy, and the strings a page gives them go to the worker's `default`
+  // policy as the engine calls it, or are refused as the engine refuses. A worker that does not enforce them is left alone.
+  const nativeTT = (() => {
+    try {
+      const F = TrustedTypePolicyFactory.prototype, P = TrustedTypePolicy.prototype;
+      return {
+        f: self.trustedTypes, is: F.isScript, isURL: F.isScriptURL, defaultPolicy: Object.getOwnPropertyDescriptor(F, 'defaultPolicy').get,
+        createScript: P.createScript, createScriptURL: P.createScriptURL, text: TrustedScript.prototype.toString, urlText: TrustedScriptURL.prototype.toString,
+      };
+    } catch { return null; }
+  })();
+  const ttPolicies = Array.isArray(self.__ZP_WORKER_TT) ? self.__ZP_WORKER_TT : [];
+  const ttInternal = (() => { const p = self.__ZP_WORKER_TP; try { delete self.__ZP_WORKER_TP; delete self.__ZP_WORKER_TT; } catch {} return p || null; })();
+  const ttEnforced = !!(nativeTT && ttPolicies.length && ZP.requiresTrustedTypes(ttPolicies.join(', ')));
+  // Whether the prelude can hand Trusted values to the native sinks (it can where the worker enforces and the bootstrap made the policy).
+  const ttActive = ttEnforced && !!ttInternal;
+  const ttScript = s => ttActive ? Reflect.apply(nativeTT.createScript, ttInternal, [s]) : s;
+  const ttScriptURL = s => ttActive ? Reflect.apply(nativeTT.createScriptURL, ttInternal, [s]) : s;
+  const ttIsTrusted = (kind, v) => {
+    try { return !!(nativeTT && v !== null && typeof v === 'object' && Reflect.apply(kind === 'Script' ? nativeTT.is : nativeTT.isURL, nativeTT.f, [v])); } catch { return false; }
+  };
+  const ttText = (kind, v) => Reflect.apply(kind === 'Script' ? nativeTT.text : nativeTT.urlText, v, []);
+  // The refusal the engine throws for `sink` when the worker enforces `kind` and there is no `default` policy.
+  const TT_WORKER_SINKS = { 'WorkerGlobalScope setTimeout': 'setTimeout', 'WorkerGlobalScope setInterval': 'setInterval', 'WorkerGlobalScope importScripts': 'importScripts' };
+  function ttViolation(kind, sink) {
+    if (sink === 'eval' || sink === 'Function') return new EvalError("Evaluating a string as JavaScript violates this document's Trusted Type assignment requirements.");
+    const name = TT_WORKER_SINKS[sink];
+    const tail = "This document requires 'Trusted" + kind + "' assignment.";
+    return new TypeError(name ? "Failed to execute '" + name + "' on 'WorkerGlobalScope': " + tail : tail);
+  }
+  // What a sink of `kind` named `sink` receives for the page's `value`: a Trusted value gives its string; where the worker enforces, a string goes
+  // through the worker's `default` policy (refused, as natively, when there is none); otherwise `value` itself.
+  function ttCompliant(kind, sink, value) {
+    if (ttIsTrusted(kind, value)) return ttText(kind, value);
+    if (!ttEnforced) return value;
+    let dp = null;
+    try { dp = Reflect.apply(nativeTT.defaultPolicy, nativeTT.f, []); } catch {}
+    if (!dp) throw ttViolation(kind, sink);
+    const made = Reflect.apply(kind === 'Script' ? nativeTT.createScript : nativeTT.createScriptURL, dp, [String(value), 'Trusted' + kind, sink]);
+    if (made === null || made === undefined) throw ttViolation(kind, sink);
+    return ttText(kind, made);
+  }
+  // `new Function(...)` for source the prelude built itself. The Function constructor takes no Trusted value, so where the worker enforces Trusted Types
+  // the function is made by evaluating the source the constructor would have compiled, as a Trusted script of the prelude's own policy.
+  function workerBuildFunction(ctor, args, kindWord) {
+    if (!ttActive) return Reflect.construct(ctor, args);
+    const parts = args.map(String);
+    const body = parts.length ? parts[parts.length - 1] : '';
+    return nativeEval.call(self, ttScript('(' + (kindWord || 'function') + ' anonymous(' + parts.slice(0, -1).join(',') + '\n) {\n' + body + '\n})'));
+  }
   // `eval` compiles strings and `TrustedScript` instances; all other argument types are returned unchanged (ECMA-262 PerformEval step 2).
-  const nativeTT = (() => { try { return { f: self.trustedTypes, is: TrustedTypePolicyFactory.prototype.isScript, text: TrustedScript.prototype.toString }; } catch { return null; } })();
-  function evalSource(x) {
-    if (typeof x === 'string') return x;
-    try { if (nativeTT && x !== null && typeof x === 'object' && Reflect.apply(nativeTT.is, nativeTT.f, [x])) return Reflect.apply(nativeTT.text, x, []); } catch {}
-    return null;
+  function evalSource(x, sink) {
+    if (typeof x === 'string') return ttCompliant('Script', sink || 'eval', x);
+    return ttIsTrusted('Script', x) ? ttText('Script', x) : null;
   }
   function workerDynamicEval(source) {
     if (new.target) throw new TypeError('eval is not a constructor');
@@ -112,7 +163,7 @@
     if (!EXPR_STMT_RE.test(text.trimStart())) {
       try {
         const rw = zpRewrite(text);
-        const expr = Reflect.construct(NativeFunctionCtor, ['__zp_scope', 'with(__zp_scope){' + ZP_WITH_PROLOGUE + 'return (' + rw + '\n);}']);
+        const expr = workerBuildFunction(NativeFunctionCtor, ['__zp_scope', 'with(__zp_scope){' + ZP_WITH_PROLOGUE + 'return (' + rw + '\n);}']);
         return Reflect.apply(expr, self, [scope]);
       } catch (e) { if (e && e.name === 'NotSupportedError') throw e; }
     }
@@ -126,12 +177,18 @@
     const kind = ctor === NativeAsyncFunctionCtor ? 'async function'
       : ctor === NativeGeneratorFunctionCtor ? 'function*'
       : ctor === NativeAsyncGeneratorFunctionCtor ? 'async function*' : 'function';
+    // Where the worker enforces Trusted Types, the `default` policy sees the source the engine would have compiled (and decides what is).
+    if (ttEnforced) {
+      const wanted = '(' + kind + ' anonymous(' + parts.join(',') + '\n) {\n' + body + '\n})';
+      const made = ttCompliant('Script', 'Function', wanted);
+      if (made !== wanted) return workerDynamicEval.call(undefined, ttScript(made));
+    }
     const wrapped = kind + ' __zp_dynamic__(' + parts.join(',') + '){\n' + body + '\n}';
     const code = zpRewrite(wrapped);
     const open = code.indexOf('{'), close = code.lastIndexOf('}');
     if (open < 0 || close <= open) blockedDynamic();
     const inner = code.slice(open + 1, close);
-    const compiled = Reflect.construct(ctor, parts.concat([inner]));
+    const compiled = workerBuildFunction(ctor, parts.concat([inner]), kind);
     // Sloppy functions coerce nullish `this` to the real global object; substitute `scope` so `this.location` stays virtualized.
     const sloppy = !/^\s*['"]use strict['"]/.test(body);
     const fn = function anonymous() {
@@ -147,7 +204,7 @@
   // Direct `eval(x)` helper: `zpDirectEvalRunner` is a sloppy function whose `eval` parameter receives the native
   // `eval` intrinsic, making `eval(__zp_src)` a real direct eval. Call-site accessors on `desc` expose the caller's
   // local bindings, and `.call(this)` preserves `this`.
-  const zpDirectEvalRunner = Reflect.construct(NativeFunctionCtor, ['eval', '__zp_env', '__zp_src', 'return eval(__zp_src)']);
+  const zpDirectEvalRunner = workerBuildFunction(NativeFunctionCtor, ['eval', '__zp_env', '__zp_src', 'return eval(__zp_src)']);
   var __zp_eval_desc = null;
   function workerDirectEval(callee, args, desc, callerStrict) {
     if (new.target) throw new TypeError('eval is not a constructor');
@@ -180,7 +237,7 @@
         },
       });
       const body = strictSrc ? '"use strict";' + rewritten : 'with(__zp_env){' + ZP_WITH_PROLOGUE + rewritten + '\n}';
-      return zpDirectEvalRunner.call(this, nativeEval, env, body + '\n//# sourceURL=' + base.href);
+      return zpDirectEvalRunner.call(this, nativeEval, env, ttScript(body + '\n//# sourceURL=' + base.href));
     } finally {
       __zp_eval_desc = prev;
       __zp_lex_env = prevLexEnv;
@@ -253,8 +310,8 @@
     if (isEval) __zp_lex_env = newMap();
     const tagged = '\n//# sourceURL=' + base.href;
     try {
-      if (ZP_STRICT_DIRECTIVE_RE.test(code)) return nativeEval.call(self, code + tagged);
-      return nativeEval.call(self, 'with(__zp_lex_scope){' + ZP_WITH_PROLOGUE + code + '\n}' + tagged);
+      if (ZP_STRICT_DIRECTIVE_RE.test(code)) return nativeEval.call(self, ttScript(code + tagged));
+      return nativeEval.call(self, ttScript('with(__zp_lex_scope){' + ZP_WITH_PROLOGUE + code + '\n}' + tagged));
     } finally {
       __zp_lex_env = prevLexEnv;
     }
@@ -814,18 +871,18 @@
   const nativeSetTimeout = self.setTimeout.bind(self);
   const nativeSetInterval = self.setInterval.bind(self);
   // Coerce non-function handlers (strings, TrustedScript, or arbitrary objects) to source text before rewriting.
-  const compileTimerString = handler => {
-    let code = evalSource(handler);
-    if (code === null) code = String(handler);
+  const compileTimerString = (handler, sink) => {
+    // A Trusted value gives its string; any other value is a string for the worker's `default` policy (an object by its string form).
+    const code = ttIsTrusted('Script', handler) ? ttText('Script', handler) : ttCompliant('Script', sink, typeof handler === 'string' ? handler : String(handler));
     const rw = zpRewrite(code);
     return () => workerExecGlobal(rw, true);
   };
   self.setTimeout = (handler, timeout, ...args) => {
-    if (typeof handler !== 'function') return nativeSetTimeout(compileTimerString(handler), timeout);
+    if (typeof handler !== 'function') return nativeSetTimeout(compileTimerString(handler, 'WorkerGlobalScope setTimeout'), timeout);
     return nativeSetTimeout(handler, timeout, ...args);
   };
   self.setInterval = (handler, timeout, ...args) => {
-    if (typeof handler !== 'function') return nativeSetInterval(compileTimerString(handler), timeout);
+    if (typeof handler !== 'function') return nativeSetInterval(compileTimerString(handler, 'WorkerGlobalScope setInterval'), timeout);
     return nativeSetInterval(handler, timeout, ...args);
   };
   // EventSource implementation backed by streaming proxied `self.fetch`.
@@ -1318,14 +1375,16 @@
   }
   self.importScripts = (...urls) => {
     if (!nativeImportScripts) blocked();
-    for (const raw of urls) {
+    // Where the worker enforces Trusted Types every argument is checked before any script loads, as the engine does.
+    const given = urls.map(u => ttCompliant('ScriptURL', 'WorkerGlobalScope importScripts', u));
+    for (const raw of given) {
       // Pass internal proxy routes directly to `nativeImportScripts` before resolving relative to a `blob:` or `data:` worker base URL.
       let internal = null;
       try { internal = new NativeURLCtor(String(raw), realLocation.href); } catch {}
       if (internal && internal.origin === realProxyOrigin &&
           (internal.pathname === '/zp/api/worker-script' || internal.pathname === '/zp/api/script' ||
            internal.pathname.startsWith('/zp/assets/') || internal.pathname.startsWith('/__zp/'))) {
-        nativeImportScripts(internal.pathname + internal.search + internal.hash);
+        nativeImportScripts(ttScriptURL(internal.pathname + internal.search + internal.hash));
         continue;
       }
       const parsed = new NativeURLCtor(String(raw), base.href);
@@ -1333,7 +1392,7 @@
       if (!isModuleWorker && (parsed.protocol === 'data:' || parsed.protocol === 'blob:')) {
         workerExecGlobal(zpRewrite(readVirtualScriptSource(parsed)), false);
       } else {
-        nativeImportScripts(importScriptURL(raw));
+        nativeImportScripts(ttScriptURL(importScriptURL(raw)));
       }
     }
   };

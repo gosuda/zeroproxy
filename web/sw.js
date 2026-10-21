@@ -1958,7 +1958,7 @@ async function transformDocumentResponse(resp, opt) {
     return safeError('MALFORMED_HTML', 502, targetUrl);
   }
 
-  const preludeHTML = buildRuntimePrelude(opt.tab, opt.entry, ZP.requiresTrustedTypes(resp.headers && resp.headers.get('Content-Security-Policy')));
+  const preludeHTML = buildRuntimePrelude(opt.tab, opt.entry, ZP.trustedTypesPolicies(resp.headers && resp.headers.get('Content-Security-Policy')));
   const injected = injectPrelude(transformed, preludeHTML);
   const headers = new Headers(resp.headers);
   headers.delete('Content-Length');
@@ -1967,7 +1967,7 @@ async function transformDocumentResponse(resp, opt) {
 }
 // Pipe decoded HTML bytes through ZPBundle.HtmlTxn for progressive rewriting and prelude injection, failing closed on stream errors.
 function streamDocumentResponse(resp, opt, targetUrl, bodyStream) {
-  const preludeHTML = buildRuntimePrelude(opt.tab, opt.entry, ZP.requiresTrustedTypes(resp.headers && resp.headers.get('Content-Security-Policy')));
+  const preludeHTML = buildRuntimePrelude(opt.tab, opt.entry, ZP.trustedTypesPolicies(resp.headers && resp.headers.get('Content-Security-Policy')));
   let txn;
   try { txn = new self.ZPBundle.HtmlTxn(targetUrl, ORIGIN, preludeHTML); }
   catch { return null; }
@@ -2017,9 +2017,12 @@ function isHTMLResponse(resp) {
   const ct = resp.headers && resp.headers.get('Content-Type') || '';
   return /\btext\/html\b/i.test(ct) || /\bapplication\/xhtml\+xml\b/i.test(ct);
 }
-function buildRuntimePrelude(tab, entry, trustedTypes) {
+// `ttPolicies`: the target's enforced Trusted Types policies (`ZP.trustedTypesPolicies` of its header), which the document enforces and which
+// a blob or data worker it starts inherits.
+function buildRuntimePrelude(tab, entry, ttPolicies) {
   // Seed initial non-HttpOnly document.cookie values matching entry.targetUrl.
   const documentCookie = tab.cookieJar ? tab.cookieJar.documentCookieFor(entry.targetUrl) : '';
+  const ttList = Array.isArray(ttPolicies) ? ttPolicies : [];
   const boot = {
     tabId: tab.tabId,
     entryId: entry.entryId,
@@ -2033,7 +2036,8 @@ function buildRuntimePrelude(tab, entry, trustedTypes) {
     ...(entry.opaque ? { opaque: true } : null),
     ...(tab.siteFrames ? { siteFrames: true } : null),
     ...(tab.challengeCompat ? { challengeCompat: true } : null),
-    ...(trustedTypes ? { trustedTypes: true } : null),
+    ...(ttList.length ? { trustedTypesPolicies: ttList } : null),
+    ...(ZP.requiresTrustedTypes(ttList.join(', ')) ? { trustedTypes: true } : null),
     ...(entry.referrerPolicy ? { referrerPolicy: entry.referrerPolicy } : null),
     ...(entry.siteFrame ? { siteFrame: entry.siteFrame } : null),
     ...(typeof entry.documentReferrer === 'string' ? { referrer: entry.documentReferrer } : null),
@@ -3372,10 +3376,20 @@ function safeError(code, status = 400, targetUrl = '') {
 }
 function escapeHTML(s) { return String(s).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&#34;',"'":'&#39;'}[ch])); }
 function workerBootstrap(url) {
-  // Wrap bootstrap state initialization in an IIFE so top-level bindings do not pollute a classic worker's global lexical scope.
-  const head = "(function(){var p=new URLSearchParams(self.location.hash.slice(1));self.__ZP_WORKER_TARGET=p.get('u')||'about:blank';self.__ZP_WORKER_REF=p.get('ref')||'';self.__ZP_WORKER_TAB_ID=p.get('tab')||'';self.__ZP_WORKER_SERVERS=p.getAll('server');self.__ZP_WORKER_SRC_URL=p.get('srcu')||'';self.__ZP_WORKER_WT_GATEWAY=p.get('wtg')||'';self.__ZP_WORKER_WT_GATEWAY_HASHES=p.getAll('wtgh');try{self.__ZP_WORKER_RTC_ICE=JSON.parse(p.get('ice')||'[]')}catch(e){self.__ZP_WORKER_RTC_ICE=[]}})();";
-  // Module workers lack `importScripts`, so chain `import()` calls sequentially through `zp-core`, `zp-page-bundle`, `worker-prelude`, and the target script.
   const hashParams = url.hash ? new URLSearchParams(url.hash.slice(1)) : null;
+  // A blob or data worker inherits the Trusted Types policies of the document that started it: its membrane lists them as `tt`, and they join this
+  // response's CSP so the worker's own sinks are bound as the creator's are. Only Trusted Types directives are taken from the list.
+  const tt = hashParams ? ZP.trustedTypesPolicies(hashParams.getAll('tt').join(', ')) : [];
+  // Where the worker enforces them, the bootstrap makes the policy its prelude hands Trusted values from and loads its scripts through it.
+  const ttHead = tt.length
+    ? "self.__ZP_WORKER_TT=" + JSON.stringify(tt) + ";try{self.__ZP_WORKER_TP=self.trustedTypes.createPolicy(" + JSON.stringify(ZP.TT_POLICY_NAME) + ",{createScript:function(s){return s},createScriptURL:function(s){return s}})}catch(e){}"
+    : '';
+  const ttOpen = tt.length ? "(function(){var tp=self.__ZP_WORKER_TP;var tu=function(s){return tp?tp.createScriptURL(s):s};" : '';
+  const ttClose = tt.length ? "})();" : '';
+  const U = expr => tt.length ? 'tu(' + expr + ')' : expr;
+  // Wrap bootstrap state initialization in an IIFE so top-level bindings do not pollute a classic worker's global lexical scope.
+  const head = "(function(){var p=new URLSearchParams(self.location.hash.slice(1));self.__ZP_WORKER_TARGET=p.get('u')||'about:blank';self.__ZP_WORKER_REF=p.get('ref')||'';self.__ZP_WORKER_TAB_ID=p.get('tab')||'';self.__ZP_WORKER_SERVERS=p.getAll('server');self.__ZP_WORKER_SRC_URL=p.get('srcu')||'';self.__ZP_WORKER_WT_GATEWAY=p.get('wtg')||'';self.__ZP_WORKER_WT_GATEWAY_HASHES=p.getAll('wtgh');try{self.__ZP_WORKER_RTC_ICE=JSON.parse(p.get('ice')||'[]')}catch(e){self.__ZP_WORKER_RTC_ICE=[]}" + ttHead + "})();";
+  // Module workers lack `importScripts`, so chain `import()` calls sequentially through `zp-core`, `zp-page-bundle`, `worker-prelude`, and the target script.
   const mod = hashParams && hashParams.get('mod') === '1';
   const src = hashParams ? hashParams.get('src') : null;
   const srcu = hashParams ? hashParams.get('srcu') : null;
@@ -3388,11 +3402,11 @@ function workerBootstrap(url) {
   const body = srcu != null
     ? (mod
       ? head + "import('/zp/assets/zp-core.js?v=__ZP_BUILD_ID__').then(function(){return import('/zp/assets/zp-page-bundle.js?v=__ZP_BUILD_ID__').catch(function(){})}).then(function(){return import('/zp/assets/worker-prelude.js?v=__ZP_BUILD_ID__')}).catch(function(e){setTimeout(function(){throw e},0)});"
-      : head + "importScripts('/zp/assets/worker-prelude.js?v=__ZP_BUILD_ID__');try{importScripts('/zp/assets/zp-page-bundle.js?v=__ZP_BUILD_ID__')}catch(e){};if(self.__zp_settle)self.__zp_settle();if(self.__zp_runSrcu)self.__zp_runSrcu();")
+      : head + ttOpen + "importScripts(" + U("'/zp/assets/worker-prelude.js?v=__ZP_BUILD_ID__'") + ");try{importScripts(" + U("'/zp/assets/zp-page-bundle.js?v=__ZP_BUILD_ID__'") + ")}catch(e){};if(self.__zp_settle)self.__zp_settle();if(self.__zp_runSrcu)self.__zp_runSrcu();" + ttClose)
     : (mod
       ? head + "var __zp_script_url=" + scriptURL + ";import('/zp/assets/zp-core.js?v=__ZP_BUILD_ID__').then(function(){return import('/zp/assets/zp-page-bundle.js?v=__ZP_BUILD_ID__').catch(function(){})}).then(function(){return import('/zp/assets/worker-prelude.js?v=__ZP_BUILD_ID__')}).then(function(){return import(__zp_script_url)}).catch(function(e){setTimeout(function(){throw e},0)});"
-      : head + "importScripts('/zp/assets/worker-prelude.js?v=__ZP_BUILD_ID__');try{importScripts('/zp/assets/zp-page-bundle.js?v=__ZP_BUILD_ID__')}catch(e){};if(self.__zp_settle)self.__zp_settle();importScripts(" + scriptURL + ");");
+      : head + ttOpen + "importScripts(" + U("'/zp/assets/worker-prelude.js?v=__ZP_BUILD_ID__'") + ");try{importScripts(" + U("'/zp/assets/zp-page-bundle.js?v=__ZP_BUILD_ID__'") + ")}catch(e){};if(self.__zp_settle)self.__zp_settle();importScripts(" + U(scriptURL) + ");" + ttClose);
   // Emit `Cross-Origin-Embedder-Policy: require-corp` on the worker bootstrap response so workers spawned by COEP-isolated documents (`require-corp` or `credentialless`) are not blocked by the browser.
-  return new Response(body, { headers: { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Security-Policy': proxiedCSP([], false), 'Cross-Origin-Embedder-Policy': 'require-corp', 'X-Content-Type-Options': 'nosniff' } });
+  return new Response(body, { headers: { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Security-Policy': [proxiedCSP([], false)].concat(tt).join(', '), 'Cross-Origin-Embedder-Policy': 'require-corp', 'X-Content-Type-Options': 'nosniff' } });
 }
 

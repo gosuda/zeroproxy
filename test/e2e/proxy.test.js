@@ -2753,6 +2753,65 @@ function createTargetServer(requests, pendingResponses) {
       </script></body>`);
       return;
     }
+    if (url.pathname === '/xttf') {
+      // A srcdoc frame of a document that enforces Trusted Types is bound by the same policy and has a default policy of its own (none).
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Security-Policy': "require-trusted-types-for 'script'; trusted-types rec" });
+      res.end(`<!doctype html><title>ttf</title><body><script>
+        var pol = trustedTypes.createPolicy('rec', { createHTML: function (s) { return s; } });
+        var child = [
+          "var out = {};",
+          "var t = function (k, fn) { try { var v = fn(); out[k] = v === undefined ? 'ok' : String(v).slice(0, 60); } catch (e) { out[k] = 'threw:' + e.name + ':' + String(e.message).slice(0, 140); } };",
+          "t('innerHTML', function () { document.body.innerHTML = '<i>x</i>'; });",
+          "t('eval', function () { return eval('1 + 1'); });",
+          "t('Function', function () { return new Function('return 2')(); });",
+          "t('timeout', function () { setTimeout('1', 0); });",
+          "t('scriptText', function () { var s = document.createElement('script'); s.text = '1'; });",
+          "t('policy', function () { var r = []; ['rec', 'nope'].forEach(function (n) { try { trustedTypes.createPolicy(n, {}); r.push(n + ':ok'); } catch (e) { r.push(n + ':' + e.name); } }); return r.join(','); });",
+          "t('has', function () { return String(trustedTypes.defaultPolicy); });",
+          "parent.postMessage(JSON.stringify(out), '*');",
+        ].join(String.fromCharCode(10));
+        window.addEventListener('message', function (e) { try { window.__xttf = JSON.parse(e.data); } catch (x) {} });
+        var f = document.createElement('iframe');
+        f.srcdoc = pol.createHTML('<body><script>' + child + '<\\/script></body>');
+        document.body.appendChild(f);
+      <\/script></body>`);
+      return;
+    }
+    if (url.pathname === '/xttw.js') {
+      // The worker body, also served as a script URL: a worker started from a URL has its own response's policy, a blob worker inherits its creator's.
+      res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end([
+        "var out = {};",
+        "var t = function (k, fn) { try { var v = fn(); out[k] = v === undefined ? 'ok' : String(v).slice(0, 60); } catch (e) { out[k] = 'threw:' + e.name + ':' + String(e.message).slice(0, 160); } };",
+        "t('has', function () { return typeof trustedTypes + ',' + (self.trustedTypes ? String(self.trustedTypes.defaultPolicy) : 'none'); });",
+        "t('eval', function () { return eval('1 + 1'); });",
+        "t('Function', function () { return new Function('return 2')(); });",
+        "t('timeout', function () { setTimeout('1', 0); });",
+        "t('importScripts', function () { try { importScripts('/xttw-none.js'); } catch (e) { return e.name + ':' + (String(e.message).indexOf('TrustedScriptURL') >= 0 ? 'trusted' : 'other'); } });",
+        "t('policy', function () { var r = []; ['rec', 'nope'].forEach(function (n) { try { trustedTypes.createPolicy(n, {}); r.push(n + ':ok'); } catch (e) { r.push(n + ':' + e.name); } }); return r.join(','); });",
+        "postMessage(out);",
+      ].join('\n'));
+      return;
+    }
+    if (url.pathname === '/xttw') {
+      // A document that enforces Trusted Types starts one worker from a blob and one from a URL; each reports what it may do.
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Security-Policy': "require-trusted-types-for 'script'; trusted-types rec" });
+      res.end(`<!doctype html><title>ttw</title><body><script>
+        var out = {};
+        var pol = trustedTypes.createPolicy('rec', { createScriptURL: function (s) { return s; } });
+        var run = function (k, src) {
+          return new Promise(function (resolve) {
+            var w = new Worker(pol.createScriptURL(src));
+            w.onmessage = function (e) { out[k] = e.data; resolve(); };
+            w.onerror = function (e) { out[k] = 'error:' + e.message; resolve(); };
+          });
+        };
+        fetch('/xttw.js').then(function (r) { return r.text(); }).then(function (body) {
+          return run('blob', URL.createObjectURL(new Blob([body], { type: 'text/javascript' })));
+        }).then(function () { return run('url', '/xttw.js'); }).then(function () { window.__xttw = out; });
+      <\/script></body>`);
+      return;
+    }
     if (url.pathname === '/xdeval') {
       const cases = `
         var out = {};
@@ -7941,6 +8000,21 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
       assert.deepEqual(proxied, direct);
     });
   }
+
+  await t.test('a worker of a document that enforces Trusted Types is bound by it when started from a blob, not when started from a URL, as natively', async () => {
+    const { direct, proxied } = await compareTrustedTypes('/xttw', '__xttw');
+    assert.match(direct.blob.eval + direct.blob.importScripts, /EvalError.*TypeError/, 'the native blob worker inherits the policy');
+    assert.equal(direct.url.eval, '2', 'a worker started from a URL has the policy of its own response');
+    assert.deepEqual(proxied, direct);
+  });
+
+  await t.test('a srcdoc frame of a document that enforces Trusted Types is bound by it, as natively', async () => {
+    const { direct, proxied } = await compareTrustedTypes('/xttf', '__xttf');
+    assert.match(direct.innerHTML, /^threw:TypeError:/, 'the native frame inherits the policy');
+    assert.match(direct.eval, /^threw:EvalError/);
+    assert.equal(direct.has, 'null', 'a frame has a default policy of its own');
+    assert.deepEqual(proxied, direct);
+  });
 
   await t.test('a report-only Trusted Types policy enforces nothing, as natively', async () => {
     const { direct, proxied } = await compareTrustedTypes('/xttn?via=report-only', '__xttn');

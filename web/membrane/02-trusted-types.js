@@ -72,6 +72,22 @@
     } catch {}
     return false;
   }
+  // The Trusted Types policies a blob or data worker started here inherits: those of the response header (the boot config) and of every
+  // `<meta>` policy. The worker's bootstrap puts them in its own CSP.
+  function ttInheritedPolicies() {
+    const out = Array.isArray(boot.trustedTypesPolicies) ? boot.trustedTypesPolicies.slice() : [];
+    try {
+      const d = root.document;
+      if (d && Native.documentGetElementsByTagName) {
+        const metas = nativeApply(Native.documentGetElementsByTagName, d, ['meta']);
+        for (let i = 0; i < metas.length; i++) {
+          const equiv = nativeApply(Native.getAttribute, metas[i], ['http-equiv']);
+          if (equiv && /^content-security-policy$/i.test(equiv)) for (const p of ZP.trustedTypesPolicies(nativeApply(Native.getAttribute, metas[i], ['content']))) out.push(p);
+        }
+      }
+    } catch {}
+    return out;
+  }
   function ttIsTrusted(kind, v) {
     if (v === null || typeof v !== 'object') return false;
     const f = kind === 'HTML' ? Native.ttIsHTML : kind === 'Script' ? Native.ttIsScript : Native.ttIsScriptURL;
