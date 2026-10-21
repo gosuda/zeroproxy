@@ -6,6 +6,10 @@ Keep each summary to a single line under 160 characters and point every detail l
 
 | Date | Category | Summary | Detail |
 |---|---|---|---|
+| 2026-10-21 | real-site / measurement | Cleared natively for Glassdoor: voices, referrer, sandbox, CSP, CPU, wire, rendering. Proxied widget's verdict: fail 600010. | rewriter.md#glassdoor-cleared-2026-10-21 |
+| 2026-10-21 | membrane / csp | A default policy that changes a string makes eval and Function throw EvalError; markup and timers use the text. Was wrong in the membrane. | rewriter.md#trusted-types-compilation-rules |
+| 2026-10-21 | membrane / fidelity | Timeline toJSON() leaked the proxy URL and share key; long-animation-frame listed membrane scripts. Fixed. | rewriter.md#performance-entry-fidelity |
+| 2026-10-21 | membrane / fidelity | event.view/currentTarget/composedPath leaked the real window; UI event constructors threw on view: window. Fixed. | rewriter.md#event-window-identity |
 | 2026-10-21 | membrane / fidelity | A failed importScripts in a proxied worker names the proxy URL, not the target's. Not fixed; concealment scope. | rewriter.md#worker-importscripts-error-url |
 | 2026-10-21 | membrane / csp | Trusted Types now bind proxied documents (default-policy calls match native). Glassdoor still fails; sandbox, CSP content, CPU cleared. | rewriter.md#trusted-types-enforced |
 | 2026-10-20 | real-site / measurement | Native Turnstile widget fails 0/4 (control 3/3) with only its Trusted Types directives removed. The proxy drops them; the old inverse missed the <meta>. | rewriter.md#widget-needs-trusted-types |
