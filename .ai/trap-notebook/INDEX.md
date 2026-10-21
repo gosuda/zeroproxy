@@ -6,6 +6,7 @@ Keep each summary to a single line under 160 characters and point every detail l
 
 | Date | Category | Summary | Detail |
 |---|---|---|---|
+| 2026-10-21 | membrane / fidelity | Widget reads 183 toString TypeError stacks; type name, debug name, builtin-frame text fixed. Depth, positions, load: not the cause. | rewriter.md#stack-fidelity-2026-10-21 |
 | 2026-10-21 | real-site / measurement | Cleared natively for Glassdoor: voices, referrer, sandbox, CSP, CPU, wire, rendering. Proxied widget's verdict: fail 600010. | rewriter.md#glassdoor-cleared-2026-10-21 |
 | 2026-10-21 | membrane / csp | A default policy that changes a string makes eval and Function throw EvalError; markup and timers use the text. Was wrong in the membrane. | rewriter.md#trusted-types-compilation-rules |
 | 2026-10-21 | membrane / fidelity | Timeline toJSON() leaked the proxy URL and share key; long-animation-frame listed membrane scripts. Fixed. | rewriter.md#performance-entry-fidelity |
