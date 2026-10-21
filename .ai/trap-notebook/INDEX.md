@@ -6,6 +6,7 @@ Keep each summary to a single line under 160 characters and point every detail l
 
 | Date | Category | Summary | Detail |
 |---|---|---|---|
+| 2026-10-21 | membrane / fidelity | A failed importScripts in a proxied worker names the proxy URL, not the target's. Not fixed; concealment scope. | rewriter.md#worker-importscripts-error-url |
 | 2026-10-21 | membrane / csp | Trusted Types now bind proxied documents (default-policy calls match native). Glassdoor still fails; sandbox, CSP content, CPU cleared. | rewriter.md#trusted-types-enforced |
 | 2026-10-20 | real-site / measurement | Native Turnstile widget fails 0/4 (control 3/3) with only its Trusted Types directives removed. The proxy drops them; the old inverse missed the <meta>. | rewriter.md#widget-needs-trusted-types |
 | 2026-10-20 | real-site / method | Native parent + proxied widget fails 0/4: the proxied parent is not needed. Persona 154 vs Chrome 155 and with(__zp_lex_scope) cost: not the cause. | rewriter.md#hybrid-native-parent-proxied-widget |
