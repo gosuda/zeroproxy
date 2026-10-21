@@ -57,7 +57,7 @@
   // High-entropy User-Agent values returned by `navigator.userAgentData.getHighEntropyValues()` and `Sec-CH-UA-*`
   // headers when requested via `Accept-CH`. Both the HTTP hints and the JS API report the full four-part build number
   // (`.0.0.0` appears only in the reduced User-Agent string); the GREASE brand reports its major version plus `.0.0.0`.
-  const TARGET_CHROME_FULL_VERSION = TARGET_CHROME_MAJOR + '.0.8059.80';
+  const TARGET_CHROME_FULL_VERSION = TARGET_CHROME_MAJOR + '.0.8059.85';
   const TARGET_UA_HIGH_ENTROPY = Object.freeze({
     architecture: 'x86',
     bitness: '64',
