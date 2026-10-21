@@ -208,6 +208,40 @@ pub fn filter_meta_csp(content: &str) -> String {
     filter_meta_csp_with(content, "")
 }
 
+/// The name of the Trusted Types policy the membrane creates for its own string sinks. A document that restricts policy names
+/// (`trusted-types a b`) must admit it. Keep in sync with `ZP.TT_POLICY_NAME`.
+pub const TT_POLICY_NAME: &str = "zp-internal";
+
+/// The Trusted Types directives of one CSP policy, as the proxied document must carry them: `require-trusted-types-for` unchanged, and
+/// `trusted-types` with the membrane's policy name added (`'none'` and an empty list become that name alone; `*` already admits it).
+/// The target's other directives are not carried; the proxy's own policy decides those.
+pub fn trusted_types_directives(policy: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for segment in policy.split(';') {
+        let mut it = segment.split_whitespace();
+        let name = match it.next() { Some(n) => n.to_ascii_lowercase(), None => continue };
+        let mut tokens: Vec<String> = it.map(|t| t.to_string()).collect();
+        if name == "require-trusted-types-for" {
+            out.push(format!("{} {}", name, tokens.join(" ")).trim().to_string());
+        } else if name == "trusted-types" {
+            let none = tokens.is_empty() || tokens.iter().any(|t| t.eq_ignore_ascii_case("'none'"));
+            if none {
+                out.push(format!("{} {}", name, TT_POLICY_NAME));
+            } else {
+                if !tokens.iter().any(|t| t == "*" || t == TT_POLICY_NAME) { tokens.push(TT_POLICY_NAME.to_string()); }
+                out.push(format!("{} {}", name, tokens.join(" ")));
+            }
+        }
+    }
+    out
+}
+
+/// The Trusted Types part of a `Content-Security-Policy` header value (policies separated by commas): one TT-only policy for each of the
+/// target's policies that declares a Trusted Types directive. Appended to the proxy's own header, it makes the browser enforce them.
+pub fn trusted_types_policies(header: &str) -> Vec<String> {
+    header.split(',').map(trusted_types_directives).filter(|d| !d.is_empty()).map(|d| d.join("; ")).collect()
+}
+
 /// The CSP source matching every `<label>.localhost` host of a loopback proxy origin (the real origins that serve frames of other
 /// sites), or an empty string when the proxy origin is not a loopback name. Keep in sync with `ZP.siteFrameSource`.
 pub fn site_frame_source(proxy_origin: &str) -> String {
@@ -239,7 +273,9 @@ pub fn filter_meta_csp_with(content: &str, site_frame_source: &str) -> String {
         match name {
             "script-src" | "script-src-elem" | "script-src-attr" =>
                 "'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' blob:",
-            "connect-src" => "'self' blob: data:",
+            // Only the proxy's own origin: whether the page may fetch `data:` and `blob:` URLs is the target's policy to state (the header
+            // policy, which every document carries, admits them for a target that states none).
+            "connect-src" => "'self'",
             "worker-src" => "'self' blob:",
             "child-src" => "'self' blob: data:",
             "frame-src" => "'self' blob: data:",
@@ -256,7 +292,7 @@ pub fn filter_meta_csp_with(content: &str, site_frame_source: &str) -> String {
         "img-src", "media-src", "font-src", "object-src", "manifest-src",
         "prefetch-src", "form-action", "base-uri",
     ];
-    let mut out: Vec<String> = Vec::new();
+    let mut out: Vec<String> = trusted_types_directives(content);
     for segment in content.split(';') {
         let seg = segment.trim();
         if seg.is_empty() { continue; }
@@ -312,6 +348,34 @@ mod tests {
         // Without a site source the output is the plain filter's, byte for byte.
         let plain = "frame-src https://x.test; img-src https:";
         assert_eq!(filter_meta_csp_with(plain, ""), filter_meta_csp(plain));
+    }
+
+    #[test]
+    fn trusted_types_directives_carry_the_target_policy_and_admit_the_membrane() {
+        assert_eq!(
+            trusted_types_directives("default-src 'none'; require-trusted-types-for 'script'; trusted-types a default"),
+            vec!["require-trusted-types-for 'script'", "trusted-types a default zp-internal"]
+        );
+        assert_eq!(trusted_types_directives("trusted-types 'none'"), vec!["trusted-types zp-internal"]);
+        assert_eq!(trusted_types_directives("trusted-types"), vec!["trusted-types zp-internal"]);
+        assert_eq!(trusted_types_directives("trusted-types * 'allow-duplicates'"), vec!["trusted-types * 'allow-duplicates'"]);
+        assert_eq!(trusted_types_directives("trusted-types a zp-internal"), vec!["trusted-types a zp-internal"]);
+        assert!(trusted_types_directives("script-src 'self'; img-src https:").is_empty());
+        // One TT-only policy for each target policy that has any.
+        assert_eq!(
+            trusted_types_policies("script-src 'self', require-trusted-types-for 'script', default-src 'none'; trusted-types x"),
+            vec!["require-trusted-types-for 'script'", "trusted-types x zp-internal"]
+        );
+        assert!(trusted_types_policies("script-src 'self'").is_empty());
+    }
+
+    #[test]
+    fn filter_meta_csp_keeps_the_trusted_types_directives() {
+        let out = filter_meta_csp("default-src 'none'; require-trusted-types-for 'script'; trusted-types x default; script-src 'none'");
+        assert!(out.contains("require-trusted-types-for 'script'"), "{}", out);
+        assert!(out.contains("trusted-types x default zp-internal"), "{}", out);
+        // A meta policy with only Trusted Types directives is kept rather than neutralized.
+        assert_eq!(filter_meta_csp("require-trusted-types-for 'script'"), "require-trusted-types-for 'script'");
     }
 
     #[test]

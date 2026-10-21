@@ -24,6 +24,9 @@ function load(code, exports, deps) {
   deps = Object.assign({
     winGet: (w, n) => w[n], winSet: (w, n, v) => { w[n] = v; },
     newMap: e => new Map(e), newSet: e => new Set(e), newWeakMap: () => new WeakMap(), newWeakSet: () => new WeakSet(),
+    // Trusted Types is off in these units: no document enforces it, so values pass through as before the feature.
+    ttEnforced: () => false, ttCompliant: (_kind, _sink, v) => v, ttScript: x => x, ttHTML: x => x, ttScriptURL: x => x,
+    ttFunction: (args, _evalFn, Ctor) => Reflect.construct(Ctor || Function, args), ttEvalSource: x => (typeof x === 'string' ? x : null),
   }, deps);
   const names = Object.keys(deps);
   // eslint-disable-next-line no-new-func
@@ -1429,4 +1432,175 @@ test('guard: an explicit brand check serves a replacement class; members that ar
   assert.equal(env.guardMethod(Thing.prototype, 'x', impl, ours), impl);
   // a constructor is not an operation
   assert.equal(env.guardMethod(Thing.prototype, 'x', impl, Thing), impl);
+});
+
+// Trusted Types (02-trusted-types.js), run against a small stand-in for the engine's factory.
+const TT_BLOCK = slice('  const TT_KINDS = {', '  // The source text `eval` runs for its argument');
+const TT_EVAL = slice('  function ttEvalSource(x, sink, tt) {', '\n  }\n') + '\n  }\n';
+
+function ttEnv({ enforce = true, names = null, metas = [] } = {}) {
+  class TrustedHTML { constructor(s) { this.s = s; } }
+  class TrustedScript { constructor(s) { this.s = s; } }
+  class TrustedScriptURL { constructor(s) { this.s = s; } }
+  const wrap = (Ctor, fn) => function (...a) { const r = fn(...a); return r === null || r === undefined ? r : new Ctor(r); };
+  const mkPolicy = (name, opts) => ({
+    name,
+    createHTML: wrap(TrustedHTML, opts.createHTML), createScript: wrap(TrustedScript, opts.createScript), createScriptURL: wrap(TrustedScriptURL, opts.createScriptURL),
+  });
+  const factory = {
+    defaultPolicy: null, created: [],
+    createPolicy(name, opts) {
+      if (names && !names.includes(name)) throw new TypeError(`Policy "${name}" disallowed.`);
+      const p = mkPolicy(name, opts); this.created.push(name);
+      if (name === 'default') this.defaultPolicy = p;
+      return p;
+    },
+  };
+  const Native = {
+    trustedTypes: factory,
+    ttCreatePolicy: factory.createPolicy,
+    ttCreateHTML() { return this.createHTML(...arguments); },
+    ttCreateScript() { return this.createScript(...arguments); },
+    ttCreateScriptURL() { return this.createScriptURL(...arguments); },
+    ttIsHTML: v => v instanceof TrustedHTML, ttIsScript: v => v instanceof TrustedScript, ttIsScriptURL: v => v instanceof TrustedScriptURL,
+    ttHTMLText() { return this.s; }, ttScriptText() { return this.s; }, ttScriptURLText() { return this.s; },
+    ttDefaultPolicy() { return factory.defaultPolicy; },
+    documentGetElementsByTagName: () => metas,
+    getAttribute(name) { return this[name] === undefined ? null : this[name]; },
+    FunctionCtor: Function,
+    globalEval: code => code,
+  };
+  const boot = { trustedTypes: enforce };
+  // This file defines ttEnforced, ttCompliant and the rest itself, so the harness's default stubs for them are switched off.
+  const env = load(TT_BLOCK + TT_EVAL, ['ttViolation', 'ttPolicy', 'ttHTML', 'ttScript', 'ttScriptURL', 'ttEnforced', 'ttIsTrusted', 'ttCompliant', 'ttFunction', 'ttAttributeSink', 'ttAttributeValue', 'ttWrapNatives', 'ttEvalSource'], {
+    Native, boot, root: { document: {} }, nativeApply: Reflect.apply,
+  });
+  return { env, Native, boot, factory, TrustedHTML, TrustedScript, TrustedScriptURL };
+}
+
+test('trusted types: refusals are worded as the engine words them', () => {
+  const { env } = ttEnv();
+  assert.equal(env.ttViolation('HTML', 'Element innerHTML').message, "Failed to set the 'innerHTML' property on 'Element': This document requires 'TrustedHTML' assignment.");
+  assert.equal(env.ttViolation('HTML', 'Element insertAdjacentHTML').message, "Failed to execute 'insertAdjacentHTML' on 'Element': This document requires 'TrustedHTML' assignment.");
+  assert.equal(env.ttViolation('ScriptURL', 'Worker constructor').message, "Failed to construct 'Worker': This document requires 'TrustedScriptURL' assignment.");
+  assert.equal(env.ttViolation('Script', 'Window setTimeout').message, "Failed to execute 'setTimeout' on 'Window': This document requires 'TrustedScript' assignment.");
+  assert.equal(env.ttViolation('Script', 'Element onclick', 'setAttribute').message, "Failed to execute 'setAttribute' on 'Element': This document requires 'TrustedScript' assignment.");
+  assert.equal(env.ttViolation('Script', 'Element onclick').message, "Failed to set the 'onclick' property on 'Element': This document requires 'TrustedScript' assignment.");
+  assert.ok(env.ttViolation('Script', 'eval') instanceof EvalError, 'a string for eval is an EvalError');
+  assert.ok(env.ttViolation('Script', 'Function') instanceof EvalError);
+  assert.ok(env.ttViolation('HTML', 'Element innerHTML') instanceof TypeError);
+});
+
+test('trusted types: the membrane policy is created once, and is absent where the document does not admit its name', () => {
+  const a = ttEnv();
+  const p = a.env.ttPolicy();
+  assert.equal(p.name, ZP.TT_POLICY_NAME);
+  assert.equal(a.env.ttPolicy(), p, 'one policy for the realm');
+  assert.deepEqual(a.factory.created, [ZP.TT_POLICY_NAME]);
+  assert.ok(a.env.ttHTML('<b>') instanceof a.TrustedHTML);
+  assert.ok(a.env.ttScript('1') instanceof a.TrustedScript);
+  assert.ok(a.env.ttScriptURL('/x') instanceof a.TrustedScriptURL);
+  const b = ttEnv({ names: ['only-this'] });
+  assert.equal(b.env.ttPolicy(), null, 'a refused name leaves no policy');
+  assert.equal(b.env.ttHTML('<b>'), '<b>', 'the membrane then hands strings to the native sinks');
+  const c = ttEnv(); c.Native.trustedTypes = undefined;
+  assert.equal(c.env.ttPolicy(), null, 'a browser without Trusted Types has nothing to create');
+});
+
+test('trusted types: what a sink receives from the page', () => {
+  const on = ttEnv();
+  // a Trusted value gives its string, whether or not the document enforces
+  assert.equal(on.env.ttCompliant('HTML', 'Element innerHTML', new on.TrustedHTML('<i>')), '<i>');
+  const off = ttEnv({ enforce: false });
+  assert.equal(off.env.ttCompliant('HTML', 'Element innerHTML', new off.TrustedHTML('<i>')), '<i>');
+  assert.equal(off.env.ttCompliant('HTML', 'Element innerHTML', '<s>'), '<s>', 'no enforcement: a string is left alone');
+  // enforcement without a default policy refuses a string
+  assert.throws(() => on.env.ttCompliant('HTML', 'Element innerHTML', '<s>'), /requires 'TrustedHTML' assignment/);
+  assert.throws(() => on.env.ttCompliant('Script', 'eval', '1'), EvalError);
+  // enforcement with a default policy: called the way the engine calls it, and its answer is what the sink gets
+  const calls = [];
+  on.factory.createPolicy('default', {
+    createHTML: (s, ...rest) => { calls.push(['H', s, ...rest]); return s.toUpperCase(); },
+    createScript: (s, ...rest) => { calls.push(['S', s, ...rest]); return null; },
+    createScriptURL: s => s,
+  });
+  assert.equal(on.env.ttCompliant('HTML', 'Element innerHTML', '<s>'), '<S>');
+  assert.deepEqual(calls[0], ['H', '<s>', 'TrustedHTML', 'Element innerHTML']);
+  assert.throws(() => on.env.ttCompliant('Script', 'Window setTimeout', 'x'), /requires 'TrustedScript' assignment/, 'a default policy that answers null is a refusal');
+  assert.equal(on.env.ttCompliant('ScriptURL', 'HTMLScriptElement src', 123), '123', 'the value reaches the policy as a string');
+});
+
+test('trusted types: enforcement is read from the response header and from a <meta> policy', () => {
+  assert.equal(ttEnv({ enforce: true }).env.ttEnforced(), true);
+  assert.equal(ttEnv({ enforce: false }).env.ttEnforced(), false);
+  const meta = { 'http-equiv': 'Content-Security-Policy', content: "require-trusted-types-for 'script'" };
+  const metas = [{ 'http-equiv': 'x-ua-compatible', content: 'IE=Edge' }];
+  const late = ttEnv({ enforce: false, metas });
+  assert.equal(late.env.ttEnforced(), false);
+  metas.push(meta);
+  assert.equal(late.env.ttEnforced(), true, 'a <meta> policy added after the first read counts');
+  metas.length = 0;
+  assert.equal(late.env.ttEnforced(), true, 'and enforcement does not end');
+  const plain = ttEnv({ enforce: false, metas: [{ 'http-equiv': 'Content-Security-Policy', content: "default-src 'self'" }] });
+  assert.equal(plain.env.ttEnforced(), false, 'a policy that does not require Trusted Types changes nothing');
+});
+
+test('trusted types: Function is made by evaluating the source it would have compiled, as a TrustedScript', () => {
+  const off = ttEnv({ enforce: false });
+  const fn = off.env.ttFunction(['a', 'b', 'return a + b'], null, Function);
+  assert.equal(fn(1, 2), 3, 'no enforcement: the plain constructor');
+  const on = ttEnv();
+  const seen = [];
+  const result = on.env.ttFunction(['a', 'b', 'return a + b'], function (script) { seen.push(script); return 'made'; }, Function);
+  assert.equal(result, 'made');
+  assert.ok(seen[0] instanceof on.TrustedScript, 'the evaluator receives a Trusted value');
+  assert.equal(seen[0].s, '(function anonymous(a,b\n) {\nreturn a + b\n})');
+  const bare = ttEnv(); const s2 = [];
+  bare.env.ttFunction([], f => { s2.push(f); return 1; }, Function);
+  assert.equal(s2[0].s, '(function anonymous(\n) {\n\n})');
+});
+
+test('trusted types: which attributes are sinks, and what setAttribute gives them', () => {
+  const { env } = ttEnv();
+  const button = { localName: 'button', onclick: null };
+  assert.deepEqual(env.ttAttributeSink(button, 'onclick'), ['Script', 'Element onclick']);
+  assert.equal(env.ttAttributeSink(button, 'on'), null, 'a bare "on" is no handler');
+  assert.equal(env.ttAttributeSink(button, 'onmadeup'), null, 'a handler the element does not have is no sink');
+  assert.deepEqual(env.ttAttributeSink({ localName: 'iframe' }, 'srcdoc'), ['HTML', 'HTMLIFrameElement srcdoc']);
+  assert.equal(env.ttAttributeSink({ localName: 'div' }, 'srcdoc'), null);
+  assert.deepEqual(env.ttAttributeSink({ localName: 'script' }, 'src'), ['ScriptURL', 'HTMLScriptElement src']);
+  assert.equal(env.ttAttributeSink({ localName: 'img' }, 'src'), null);
+  assert.equal(env.ttAttributeValue({ localName: 'img' }, 'src', '/a.png'), '/a.png', 'other attributes are the page\'s own');
+  assert.throws(() => env.ttAttributeValue({ localName: 'script' }, 'src', '/a.js', 'setAttribute'), /Failed to execute 'setAttribute' on 'Element'/);
+});
+
+test('trusted types: the natives the membrane calls take Trusted values for the strings it builds', () => {
+  const { env, Native, TrustedScript, TrustedHTML } = ttEnv();
+  const got = [];
+  Native.setAttribute = function (name, value) { got.push(['setAttribute', name, value]); };
+  Native.insertAdjacentHTML = function (where, html) { got.push(['insertAdjacentHTML', where, html]); };
+  let stored;
+  Native.elementInnerHTML = { get() { return stored; }, set(v) { stored = v; }, enumerable: true, configurable: true };
+  env.ttWrapNatives(Native);
+  const button = { localName: 'button', onclick: null };
+  Native.setAttribute.call(button, 'onclick', 'go()');
+  assert.ok(got[0][2] instanceof TrustedScript, 'an event handler built by the membrane is TrustedScript');
+  Native.setAttribute.call(button, 'title', 'plain');
+  assert.equal(got[1][2], 'plain', 'other attributes stay strings');
+  Native.insertAdjacentHTML.call({}, 'beforeend', '<b>');
+  assert.ok(got[2][2] instanceof TrustedHTML);
+  Native.elementInnerHTML.set.call({}, '<i>');
+  assert.ok(stored instanceof TrustedHTML, 'innerHTML takes TrustedHTML');
+  const already = stored;
+  Native.elementInnerHTML.set.call({}, already);
+  assert.equal(stored, already, 'a value that is already Trusted passes unchanged');
+});
+
+test('trusted types: eval source is the Trusted value\'s string, a string after the default policy, or nothing', () => {
+  const on = ttEnv();
+  assert.equal(on.env.ttEvalSource(new on.TrustedScript('1 + 1')), '1 + 1');
+  assert.equal(on.env.ttEvalSource({}), null, 'a non-string, non-Trusted argument is returned by eval as it is');
+  assert.throws(() => on.env.ttEvalSource('1 + 1'), EvalError);
+  const off = ttEnv({ enforce: false });
+  assert.equal(off.env.ttEvalSource('2 + 2'), '2 + 2');
 });

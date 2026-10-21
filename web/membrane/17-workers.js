@@ -4,7 +4,7 @@
       // Point ZPWorker.prototype at Native.Worker.prototype so instanceof Worker and prototype inspection match native.
       const ZPWorker = function (url, opts) {
         try { zpTrace('Worker', String(url).slice(0, 120)); } catch {}
-        const w = new Native.Worker(workerBootstrapURL(url, opts), opts);
+        const w = new Native.Worker(ttScriptURL(workerBootstrapURL(ttCompliant('ScriptURL', 'Worker constructor', url), opts)), opts);
         // Relay __zp:'zp-broker' control messages from the worker to the service worker and hide them from target message listeners.
         try {
           w.addEventListener('message', ev => {
@@ -39,7 +39,7 @@
       const RealSW = root.__zp_realSW || Native.SharedWorker;
       const ZPSharedWorker = function(url, opts) {
         try { zpTrace('SharedWorker', String(url).slice(0, 120)); } catch {}
-        return new RealSW(workerBootstrapURL(url, opts), prefixedSharedWorkerOptions(sharedWorkerNamePrefix(), opts));
+        return new RealSW(ttScriptURL(workerBootstrapURL(ttCompliant('ScriptURL', 'SharedWorker constructor', url), opts)), prefixedSharedWorkerOptions(sharedWorkerNamePrefix(), opts));
       };
       try { ZPSharedWorker.prototype = RealSW.prototype; } catch {}
       brandLikeNative(ZPSharedWorker, null, 'SharedWorker');

@@ -1958,7 +1958,7 @@ async function transformDocumentResponse(resp, opt) {
     return safeError('MALFORMED_HTML', 502, targetUrl);
   }
 
-  const preludeHTML = buildRuntimePrelude(opt.tab, opt.entry);
+  const preludeHTML = buildRuntimePrelude(opt.tab, opt.entry, ZP.requiresTrustedTypes(resp.headers && resp.headers.get('Content-Security-Policy')));
   const injected = injectPrelude(transformed, preludeHTML);
   const headers = new Headers(resp.headers);
   headers.delete('Content-Length');
@@ -1967,7 +1967,7 @@ async function transformDocumentResponse(resp, opt) {
 }
 // Pipe decoded HTML bytes through ZPBundle.HtmlTxn for progressive rewriting and prelude injection, failing closed on stream errors.
 function streamDocumentResponse(resp, opt, targetUrl, bodyStream) {
-  const preludeHTML = buildRuntimePrelude(opt.tab, opt.entry);
+  const preludeHTML = buildRuntimePrelude(opt.tab, opt.entry, ZP.requiresTrustedTypes(resp.headers && resp.headers.get('Content-Security-Policy')));
   let txn;
   try { txn = new self.ZPBundle.HtmlTxn(targetUrl, ORIGIN, preludeHTML); }
   catch { return null; }
@@ -2017,7 +2017,7 @@ function isHTMLResponse(resp) {
   const ct = resp.headers && resp.headers.get('Content-Type') || '';
   return /\btext\/html\b/i.test(ct) || /\bapplication\/xhtml\+xml\b/i.test(ct);
 }
-function buildRuntimePrelude(tab, entry) {
+function buildRuntimePrelude(tab, entry, trustedTypes) {
   // Seed initial non-HttpOnly document.cookie values matching entry.targetUrl.
   const documentCookie = tab.cookieJar ? tab.cookieJar.documentCookieFor(entry.targetUrl) : '';
   const boot = {
@@ -2033,6 +2033,7 @@ function buildRuntimePrelude(tab, entry) {
     ...(entry.opaque ? { opaque: true } : null),
     ...(tab.siteFrames ? { siteFrames: true } : null),
     ...(tab.challengeCompat ? { challengeCompat: true } : null),
+    ...(trustedTypes ? { trustedTypes: true } : null),
     ...(entry.referrerPolicy ? { referrerPolicy: entry.referrerPolicy } : null),
     ...(entry.siteFrame ? { siteFrame: entry.siteFrame } : null),
     ...(typeof entry.documentReferrer === 'string' ? { referrer: entry.documentReferrer } : null),
@@ -3198,11 +3199,16 @@ function applyZPSecurityHeaders(h, req, servers, tab, targetUrl) {
   const responseSignalled = h.get('X-ZP-Challenge-Compat') === '1';
   h.delete('X-ZP-Challenge-Compat');
   const armedHere = !!(tab && tab.challengeCompat) && responseSignalled;
+  // The proxy's policy replaces the target's, except that the Trusted Types directives of the target's policies are carried along
+  // (each as a policy of its own, so the browser enforces them as it would have): a document that declares them binds the page's
+  // string sinks and the membrane's alike, and expects its `default` policy and `createPolicy` name list to be honoured.
+  // Only for documents: a worker script's own response CSP governs the worker, whose prelude does not handle Trusted Types sinks.
+  const targetCSP = /\b(text\/html|application\/xhtml\+xml)\b/i.test(h.get('Content-Type') || '') ? (h.get('Content-Security-Policy') || '') : '';
   h.delete('Content-Security-Policy');
   h.delete('Content-Security-Policy-Report-Only');
   h.delete('X-Content-Security-Policy');
   h.delete('X-WebKit-CSP');
-  h.set('Content-Security-Policy', proxiedCSP(servers, armedHere, tab && tab.siteFrames));
+  h.set('Content-Security-Policy', [proxiedCSP(servers, armedHere, tab && tab.siteFrames)].concat(ZP.trustedTypesPolicies(targetCSP)).join(', '));
   for (const name of ZP_REPORTING_HEADERS) h.delete(name);
   for (const name of ZP_TARGET_POLICY_HEADERS) h.delete(name);
   for (const name of ZP_HOP_BY_HOP_HEADERS) h.delete(name);

@@ -80,6 +80,8 @@
     let childFunctionFacade;
     if (childFunction) {
       const childEval = w.eval;
+      // The child frame has its own trustedTypes (and its own default policy); its document inherits the parent's CSP.
+      let childTT; try { childTT = w.trustedTypes; } catch { childTT = undefined; }
       // Per-realm lexical declaration table (`let`/`const`/`class`) isolated
       // from the parent realm so top-level lexical bindings survive across
       // indirect-eval scripts within the child without colliding with the parent.
@@ -119,7 +121,7 @@
       const childStrictRE = /^(\s|\/\*[^]*?\*\/|\/\/[^\n]*)*('use strict'|"use strict")/;
       const childExecGlobal = code => {
         if (!childEval) return (new childFunction(code)).call(w);
-        return childEval(childStrictRE.test(code) ? code : 'with(__zp_lex_scope){' + ZP_WITH_PROLOGUE + code + '\n}');
+        return childEval(ttScript(childStrictRE.test(code) ? code : 'with(__zp_lex_scope){' + ZP_WITH_PROLOGUE + code + '\n}'));
       };
       const childRewrite = (source, kind) => {
         const hooks = pageRewriteHooks;
@@ -128,14 +130,23 @@
       };
       // Guard `eval` and `Function` in the child realm so dynamic compilation
       // stays within the child's global scope.
+      const childEvalText = text => childExecGlobal(pageRewriteHooks.rewrite(text, 'eval'));
       const childDynamicEval = function dynamicEval(value) {
         if (new.target) throw new TypeError('eval is not a constructor');
-        return typeof value === 'string' ? childExecGlobal(pageRewriteHooks.rewrite(value, 'eval')) : value;
+        const text = ttEvalSource(value, 'eval', childTT);
+        return text === null ? value : childEvalText(text);
       };
       childFunctionFacade = function Function(...args) {
         // Validate and convert parameters via the native constructor without
         // executing the unrewritten body.
-        const original = Reflect.construct(childFunction, args);
+        if (ttEnforced()) {
+          const parts = new Array(args.length);
+          for (let i = 0; i < args.length; i++) parts[i] = String(args[i]);
+          const wanted = '(function anonymous(' + parts.slice(0, -1).join(',') + '\n) {\n' + (parts.length ? parts[parts.length - 1] : '') + '\n})';
+          const made = ttCompliant('Script', 'Function', wanted, '', childTT);
+          if (made !== wanted) return childEvalText(made);
+        }
+        const original = ttFunction(args, childEval, childFunction);
         const source = origToString.call(original);
         const compiled = childExecGlobal(pageRewriteHooks.rewrite('(' + source + ')', 'classic'));
         toStringMap.set(compiled, source);
@@ -154,9 +165,9 @@
       const childRunners = () => {
         if (childRunSloppy === undefined) {
           try {
-            childRunSloppy = new childFunction('eval', '__zp_env', '__zp_src', 'return eval(__zp_src)');
-            childRunStrict = new childFunction('__zp_self', '__zp_env', '__zp_src',
-              'with(__zp_env){const eval=__zp_self;' + ZP_WITH_PROLOGUE + 'return (()=>{"use strict";return eval(__zp_src)})()}');
+            childRunSloppy = ttFunction(['eval', '__zp_env', '__zp_src', 'return eval(__zp_src)'], childEval, childFunction);
+            childRunStrict = ttFunction(['__zp_self', '__zp_env', '__zp_src',
+              'with(__zp_env){const eval=__zp_self;' + ZP_WITH_PROLOGUE + 'return (()=>{"use strict";return eval(__zp_src)})()}'], childEval, childFunction);
           } catch { childRunSloppy = null; childRunStrict = null; }
         }
         return childRunSloppy ? { sloppy: childRunSloppy, strict: childRunStrict } : null;
@@ -185,12 +196,13 @@
         if (new.target) throw new TypeError('eval is not a constructor');
         const list = Array.isArray(args) ? args : [];
         if (callee !== childDynamicEval && callee !== root.eval) return Reflect.apply(callee, undefined, list);
-        const src = list[0];
-        if (typeof src !== 'string') return childDynamicEval(src);
+        const arg = list[0];
+        const src = ttEvalSource(arg, 'eval', childTT);
+        if (src === null) return arg;
         const directive = childStrictRE.test(src);
-        if (!childEval || (globalSite === 1 && !callerStrict && !directive)) return childDynamicEval(src);
+        if (!childEval || (globalSite === 1 && !callerStrict && !directive)) return childEvalText(src);
         const runners = childRunners();
-        if (!runners) return childDynamicEval(src);
+        if (!runners) return childEvalText(src);
         const rewritten = pageRewriteHooks.rewrite(src, 'classic-local');
         let d = {};
         if (desc && typeof desc === 'object') {
@@ -204,8 +216,8 @@
         childLex = newMap();
         try {
           const that = this;
-          if (callerStrict || directive) return runners.strict.call(that, childEval, env, rewritten);
-          return runners.sloppy.call(that, childEval, env, 'with(__zp_env){' + ZP_WITH_PROLOGUE + rewritten + '\n}');
+          if (callerStrict || directive) return runners.strict.call(that, childEval, env, ttScript(rewritten));
+          return runners.sloppy.call(that, childEval, env, ttScript('with(__zp_env){' + ZP_WITH_PROLOGUE + rewritten + '\n}'));
         } finally {
           childLex = prevLex;
         }
@@ -274,7 +286,7 @@
       const childRunRewrittenModule = code => {
         const blob = new (w.Blob || Blob)([String(code || '')], { type: 'text/javascript' });
         const url = (w.URL && w.URL.createObjectURL || URL.createObjectURL).call(w.URL || URL, blob);
-        const p = w.eval ? w.eval('import(' + JSON.stringify(url) + ')') : import(url);
+        const p = w.eval ? w.eval(ttScript('import(' + JSON.stringify(url) + ')')) : import(url);
         Promise.resolve(p).finally(() => { try { (w.URL && w.URL.revokeObjectURL || URL.revokeObjectURL).call(w.URL || URL, url); } catch {} });
         return p;
       };

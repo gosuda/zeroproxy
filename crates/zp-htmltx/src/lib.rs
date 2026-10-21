@@ -1881,7 +1881,7 @@ mod tests {
         use zp_shared::csp::filter_meta_csp;
         let out = filter_meta_csp("script-src 'none'; connect-src https://api.t");
         assert!(out.contains("script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' blob:"), "{out}");
-        assert!(out.contains("connect-src https://api.t 'self' blob: data:"), "{out}");
+        assert!(out.contains("connect-src https://api.t 'self'") && !out.contains("connect-src https://api.t 'self' blob:"), "{out}");
         assert_eq!(filter_meta_csp("img-src 'none'"), "img-src 'none'");
         assert_eq!(filter_meta_csp("img-src https:"), "img-src https: 'self'");
         assert_eq!(filter_meta_csp("sandbox allow-scripts"), "");

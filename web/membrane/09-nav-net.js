@@ -152,7 +152,7 @@
       if (!code) return false;
       try {
         // Execute the rewritten body in global scope.
-        Native.FunctionCtor('"use strict";\n' + code).call(globalThis);
+        ttFunction(['"use strict";\n' + code]).call(globalThis);
       } catch {}
       if (ev) { ev.preventDefault(); ev.stopImmediatePropagation(); }
       return true;

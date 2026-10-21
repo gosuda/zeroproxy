@@ -4,6 +4,7 @@
     try { fn(); zpTrace('install:' + name + ':done'); }
     catch (e) { zpTrace('install:' + name + ':err', String(e && e.message || e).slice(0, 200)); throw e; }
   }
+  ttPolicy();
   __zpStep('ToStringMasking', () => installToStringMasking(root));
   define(root, '__ZP_SET_BASE', updateVirtualBase);
   __zpStep('Phase2Membrane', installPhase2Membrane);

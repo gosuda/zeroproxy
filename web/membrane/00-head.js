@@ -199,6 +199,7 @@
   let cachedUADataBrands = null;
   clearBootConfig();
   const Native = captureNative(root);
+  ttWrapNatives(Native);
   // Bind the native URL constructor before installStorageFacades replaces
   // root.URL with the virtualizing ZPURL wrapper.
   const URL = Native.URL || root.URL;

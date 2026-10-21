@@ -68,6 +68,7 @@
 
   function installDOMHooks(w) {
     const inIframeRealm = (w !== root);
+    const wtt = ttOfWindow(w);
     const transformHTMLOpts = inIframeRealm ? { inIframe: true } : undefined;
     // Enable SW-less subresource relay rewriting when document.write targets a document not controlled by the service worker.
     const writeOptsFor = doc => {
@@ -81,6 +82,7 @@
       const colon = key.indexOf(':');
       const localKey = colon < 0 ? key : key.slice(colon + 1);
       const ln = this.localName;
+      v = ttAttributeValue(this, key, v, 'setAttribute', wtt);
       if (isZPAttrName(key)) return undefined;
       if (localKey === 'ping' && (ln === 'a' || ln === 'area')) {
         try { Native.setAttribute.call(this, 'data-zp-blocked-ping', String(v)); } catch {}
@@ -175,6 +177,7 @@
       const colon = key.indexOf(':');
       const localKey = colon < 0 ? key : key.slice(colon + 1);
       const ln = this.localName;
+      v = ttAttributeValue(this, key, v, 'setAttributeNS', wtt);
       // Delegate null-namespace lowercase attribute writes to setAttribute so all policy and URL hooks apply uniformly.
       if ((ns === null || ns === undefined || ns === '') && String(k) === key) {
         return this.setAttribute(k, v);
@@ -339,8 +342,8 @@
       if (typeof w.ShadowRoot.prototype.setHTMLUnsafe === 'function') {
         const nativeSetHTML = w.ShadowRoot.prototype.setHTMLUnsafe;
         define(w.ShadowRoot.prototype, 'setHTMLUnsafe', function(html) {
-          const markup = transformHTML(String(html), transformHTMLOpts);
-          const ret = nativeSetHTML.call(this, markup);
+          const markup = transformHTML(String(ttCompliant('HTML', 'ShadowRoot setHTMLUnsafe', html, '', wtt)), transformHTMLOpts);
+          const ret = nativeSetHTML.call(this, ttHTML(markup));
           if (markupHasFrames(markup)) restoreParkedFrames(this);
           return ret;
         });
@@ -355,8 +358,8 @@
     if (typeof w.Element.prototype.setHTMLUnsafe === 'function') {
       const nativeElSetHTML = w.Element.prototype.setHTMLUnsafe;
       define(w.Element.prototype, 'setHTMLUnsafe', function(html) {
-        const markup = transformHTML(String(html), transformHTMLOpts);
-        const ret = nativeElSetHTML.call(this, markup);
+        const markup = transformHTML(String(ttCompliant('HTML', 'Element setHTMLUnsafe', html, '', wtt)), transformHTMLOpts);
+        const ret = nativeElSetHTML.call(this, ttHTML(markup));
         if (markupHasFrames(markup)) restoreParkedFrames(this);
         return ret;
       });
@@ -383,7 +386,7 @@
     if (typeof w.Document.parseHTMLUnsafe === 'function') {
       const nativeParseUnsafe = w.Document.parseHTMLUnsafe;
       define(w.Document, 'parseHTMLUnsafe', function(html) {
-        return nativeParseUnsafe.call(w.Document, transformHTML(String(html), Object.assign({}, transformHTMLOpts, { document: true })));
+        return nativeParseUnsafe.call(w.Document, ttHTML(transformHTML(String(ttCompliant('HTML', 'Document parseHTMLUnsafe', html, '', wtt)), Object.assign({}, transformHTMLOpts, { document: true }))));
       });
     }
     // Scrub getHTML and getHTMLUnsafe via an inert clone when shadow roots are not requested, or at the string level otherwise.
@@ -408,7 +411,7 @@
       });
     }
     define(w.Element.prototype, 'insertAdjacentHTML', function(pos, html) {
-      const markup = transformHTML(String(html), transformHTMLOpts);
+      const markup = transformHTML(String(ttCompliant('HTML', 'Element insertAdjacentHTML', html, '', wtt)), transformHTMLOpts);
       const ret = Native.insertAdjacentHTML.call(this, pos, markup);
       syncBaseElement(this); enforceSubtreePolicies(this);
       if (markupHasFrames(markup)) {
@@ -425,9 +428,9 @@
       if (docProto.write) {
         const protoWrite = docProto.write;
         define(docProto, 'write', function(...parts) {
-          const html = parts.map(p => transformWrittenHTML(String(p), writeOptsFor(this))).join('');
+          const html = parts.map(p => transformWrittenHTML(String(ttCompliant('HTML', 'Document write', p, '', wtt)), writeOptsFor(this))).join('');
           if (deferredScriptDepth > 0 && documentIsClosed(this)) return appendWrittenHTML(this, html);
-          const ret = protoWrite.apply(this, [html]);
+          const ret = protoWrite.apply(this, [ttHTML(html)]);
           if (html.indexOf('data-zp-frame-src') !== -1) restoreParkedFrames(this);
           return ret;
         });
@@ -435,9 +438,9 @@
       if (docProto.writeln) {
         const protoWriteln = docProto.writeln;
         define(docProto, 'writeln', function(...parts) {
-          const html = parts.map(p => transformWrittenHTML(String(p), writeOptsFor(this))).join('') + '\n';
+          const html = parts.map(p => transformWrittenHTML(String(ttCompliant('HTML', 'Document writeln', p, '', wtt)), writeOptsFor(this))).join('') + '\n';
           if (deferredScriptDepth > 0 && documentIsClosed(this)) return appendWrittenHTML(this, html);
-          const ret = protoWriteln.apply(this, [html]);
+          const ret = protoWriteln.apply(this, [ttHTML(html)]);
           if (html.indexOf('data-zp-frame-src') !== -1) restoreParkedFrames(this);
           return ret;
         });
@@ -447,6 +450,7 @@
     function patchHTMLSetter(proto, prop) {
       const d = Object.getOwnPropertyDescriptor(proto, prop);
       if (!d || !d.set) return;
+      const sink = (w.ShadowRoot && proto === w.ShadowRoot.prototype ? 'ShadowRoot ' : 'Element ') + prop;
       try {
         defineMasked(proto, prop, {
           get() {
@@ -461,25 +465,27 @@
             return d.get ? sanitizeSerializedNode(this, prop === 'outerHTML') : '';
           },
           set(v) {
+            // innerHTML and outerHTML take null as the empty string; a Trusted value or, in a document that enforces, the default policy decides the rest.
+            v = ttCompliant('HTML', sink, v === null ? '' : v, '', wtt);
             if (this && this.localName === 'template' && prop === 'innerHTML') {
-              d.set.call(this, String(v));
+              d.set.call(this, ttHTML(String(v)));
               enforceSubtreePolicies(this.content);
               instrumentDescendantIframes(this.content);
               return;
             }
             if (prop === 'innerHTML' && this && this.localName === 'style') {
               originalTextMeta.set(this, String(v == null ? '' : v));
-              d.set.call(this, rewriteCSSText(v));
+              d.set.call(this, ttHTML(rewriteCSSText(v)));
               return;
             }
             // Do not run HTML markup transformation on raw-text elements (such as <script> or <textarea>) whose content is a single text node.
             if (prop === 'innerHTML' && this && RAW_TEXT_CONTEXTS.has(this.localName)) {
-              d.set.call(this, String(v));
+              d.set.call(this, ttHTML(String(v)));
               return;
             }
             const holder = prop === 'outerHTML' ? this.parentNode : this;
             const markup = transformHTML(String(v), transformHTMLOpts);
-            d.set.call(this, markup);
+            d.set.call(this, ttHTML(markup));
             if (markupHasFrames(markup)) restoreParkedFrames(holder);
             syncBaseElement(this);
             instrumentDescendantIframes(this);

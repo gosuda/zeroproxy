@@ -2682,6 +2682,77 @@ function createTargetServer(requests, pendingResponses) {
       </script></body>`);
       return;
     }
+    if (url.pathname === '/xtte') {
+      // A document that enforces Trusted Types and registers a recording default policy: every string a sink receives reaches the policy.
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Security-Policy': "require-trusted-types-for 'script'; trusted-types rec default" });
+      res.end(`<!doctype html><title>tte</title><body><script>
+        var out = { calls: [] };
+        var flat = function (s) { return String(s).slice(0, 26).split(String.fromCharCode(10)).join('~'); };
+        var rec = function (kind) { return function (s, type, sink) { out.calls.push(kind + '|' + type + '|' + sink + '|' + flat(s)); return s; }; };
+        trustedTypes.createPolicy('default', { createHTML: rec('H'), createScript: rec('S'), createScriptURL: rec('U') });
+        var t = function (k, fn) { try { var v = fn(); out[k] = v === undefined ? 'ok' : String(v).slice(0, 60); } catch (e) { out[k] = 'threw:' + e.name + ':' + String(e.message).slice(0, 90); } };
+        var d = document.body;
+        t('names', function () {
+          var r = [];
+          ['rec', 'nope', 'default'].forEach(function (n) { try { trustedTypes.createPolicy(n, {}); r.push(n + ':ok'); } catch (e) { r.push(n + ':' + e.name + ':' + String(e.message).slice(0, 60)); } });
+          return r.join(',');
+        });
+        t('surface', function () { return [trustedTypes.getAttributeType('script', 'src'), trustedTypes.getPropertyType('div', 'innerHTML'), trustedTypes.isHTML(trustedTypes.emptyHTML), trustedTypes.isScript('x'), trustedTypes.defaultPolicy.name].join(','); });
+        t('innerHTML', function () { d.innerHTML = '<i id=a>x</i>'; return document.getElementById('a') ? 'built' : 'missing'; });
+        t('insertAdjacentHTML', function () { d.insertAdjacentHTML('beforeend', '<u id=b>y</u>'); return !!document.getElementById('b'); });
+        t('outerHTML', function () { var e = document.createElement('p'); d.appendChild(e); e.outerHTML = '<p id=c>z</p>'; return !!document.getElementById('c'); });
+        t('srcdoc', function () { var f = document.createElement('iframe'); f.srcdoc = '<b>q</b>'; d.appendChild(f); return f.getAttribute('srcdoc'); });
+        t('eval', function () { return eval('1 + 2'); });
+        t('indirectEval', function () { return (0, eval)('3 + 4'); });
+        t('Function', function () { return new Function('a', 'return a * 5')(2); });
+        t('scriptText', function () { var s = document.createElement('script'); s.text = 'window.__st = 6'; d.appendChild(s); return window.__st; });
+        t('scriptSrc', function () { var s = document.createElement('script'); s.src = '/xtte-none.js'; return s.getAttribute('src'); });
+        t('onclickAttr', function () { var b = document.createElement('button'); b.setAttribute('onclick', 'window.__oc = 1'); d.appendChild(b); b.click(); return window.__oc; });
+        t('parse', function () { return new DOMParser().parseFromString('<p>w</p>', 'text/html').body.innerHTML; });
+        t('fragment', function () { return document.createRange().createContextualFragment('<p>v</p>').childNodes.length; });
+        setTimeout('window.__t = 1', 0);
+        setTimeout(function () { out.timer = window.__t; window.__xtte = out; }, 150);
+      </script></body>`);
+      return;
+    }
+    if (url.pathname === '/xttn') {
+      // Enforced, with no default policy: a string at a sink is refused, a Trusted value is accepted. The directive arrives by header or by <meta>.
+      const via = url.searchParams.get('via');
+      const meta = via === 'meta';
+      const headers = { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' };
+      // A report-only policy reports and enforces nothing: the page behaves as if it had none.
+      if (via === 'report-only') headers['Content-Security-Policy-Report-Only'] = "require-trusted-types-for 'script'";
+      else if (!meta) headers['Content-Security-Policy'] = "require-trusted-types-for 'script'";
+      res.writeHead(200, headers);
+      res.end(`<!doctype html><title>ttn</title>${meta ? `<meta http-equiv="Content-Security-Policy" content="require-trusted-types-for 'script'">` : ''}<body><script>
+        var out = {};
+        var pol = trustedTypes.createPolicy('p', { createHTML: function (s) { return s; }, createScript: function (s) { return s; }, createScriptURL: function (s) { return s; } });
+        var t = function (k, fn) { try { var v = fn(); out[k] = v === undefined ? 'ok' : String(v).slice(0, 60); } catch (e) { out[k] = 'threw:' + e.name + ':' + String(e.message).slice(0, 160); } };
+        var d = document.body;
+        t('stringHTML', function () { d.innerHTML = '<i>x</i>'; });
+        t('trustedHTML', function () { d.innerHTML = pol.createHTML('<i id=a>x</i>'); return !!document.getElementById('a'); });
+        t('stringAdjacent', function () { d.insertAdjacentHTML('beforeend', '<u>y</u>'); });
+        t('stringEval', function () { return eval('1 + 1'); });
+        t('trustedEval', function () { return eval(pol.createScript('1 + 1')); });
+        t('stringFunction', function () { return new Function('return 1'); });
+        t('stringTimeout', function () { setTimeout('1', 0); });
+        t('stringScriptSrc', function () { var s = document.createElement('script'); s.src = '/xttn-none.js'; });
+        t('trustedScriptSrc', function () { var s = document.createElement('script'); s.src = pol.createScriptURL('/xttn-none.js'); return s.getAttribute('src'); });
+        t('stringScriptText', function () { var s = document.createElement('script'); s.text = 'window.__bad = 1'; });
+        t('trustedScriptText', function () { var s = document.createElement('script'); s.text = pol.createScript('window.__good = 1'); d.appendChild(s); return window.__good; });
+        t('stringSrcdoc', function () { var f = document.createElement('iframe'); f.srcdoc = '<b>q</b>'; });
+        t('stringHandler', function () { var b = document.createElement('button'); b.setAttribute('onclick', 'window.__oc = 1'); });
+        t('trustedHandler', function () { var b = document.createElement('button'); b.setAttribute('onclick', pol.createScript('window.__oc = 2')); d.appendChild(b); b.click(); return window.__oc; });
+        t('stringWorker', function () { new Worker('/xttn-none.js'); });
+        t('stringParse', function () { return new DOMParser().parseFromString('<p>w</p>', 'text/html').body.innerHTML; });
+        t('stringFragment', function () { return document.createRange().createContextualFragment('<p>v</p>').childNodes.length; });
+        t('identity', function () { var h = pol.createHTML('<b>'); return [trustedTypes.isHTML(h), trustedTypes.isScript(h), String(h), JSON.stringify(h), Object.prototype.toString.call(h)].join('|'); });
+        t('plainText', function () { d.textContent = 'plain'; return d.textContent; });
+        out.policies = (function () { try { trustedTypes.createPolicy('q', {}); return 'q:ok'; } catch (e) { return 'q:' + e.name; } })();
+        window.__xttn = out;
+      </script></body>`);
+      return;
+    }
     if (url.pathname === '/xdeval') {
       const cases = `
         var out = {};
@@ -7806,6 +7877,77 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     }
     fs.writeFileSync(path.join(artifacts, 'trusted-script-code.json'), JSON.stringify({ direct, proxied }, null, 2));
     assert.deepEqual(direct, { indirect: 2, direct: 42, declared: 7, plainObject: true, fn: 3, timers: Array(3).fill(`${targetBase}/xtt`) });
+    assert.deepEqual(proxied, direct);
+  });
+
+  // The same Trusted Types fixture read in a native browser and through the proxy.
+  const compareTrustedTypes = async (route, key) => {
+    const targetBase = `http://${targetHost}:${targetPort}`;
+    // puppeteer's waitForFunction compiles its predicate from a string, which a document that enforces Trusted Types refuses: poll with evaluate.
+    const read = async (page, timeout) => {
+      const end = Date.now() + timeout;
+      for (;;) {
+        const v = await page.evaluate(k => window[k], key);
+        if (v) return v;
+        assert.ok(Date.now() < end, `${key} never appeared`);
+        await new Promise(r => setTimeout(r, 100));
+      }
+    };
+    const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    let direct;
+    try {
+      const directPage = await directBrowser.newPage();
+      await directPage.goto(`${targetBase}${route}`, { waitUntil: 'domcontentloaded' });
+      direct = await read(directPage, 60000);
+    } finally {
+      await directBrowser.close();
+    }
+    const fresh = await openProxiedPage(`${targetBase}${route}`);
+    let proxied;
+    try {
+      proxied = await read(fresh, 120000);
+    } finally {
+      await fresh.close();
+    }
+    fs.writeFileSync(path.join(artifacts, `trusted-types-${key}.json`), JSON.stringify({ direct, proxied }, null, 2));
+    return { direct, proxied };
+  };
+
+  await t.test('a document that enforces Trusted Types hands every sink string to its default policy, as natively', async () => {
+    const { direct, proxied } = await compareTrustedTypes('/xtte', '__xtte');
+    assert.equal(direct.innerHTML, 'built', 'the native reference changed');
+    assert.equal(direct.eval, '3');
+    assert.equal(direct.timer, 1, 'a string timer still runs once the default policy has seen it');
+    for (const sink of ['Element innerHTML', 'Element insertAdjacentHTML', 'Element outerHTML', 'HTMLIFrameElement srcdoc', 'eval', 'HTMLScriptElement text', 'HTMLScriptElement src', 'Element onclick', 'Window setTimeout']) {
+      assert.ok(direct.calls.some(c => c.includes(`|${sink}|`)), `the native reference never reported ${sink}: ${direct.calls.join(' ; ')}`);
+    }
+    assert.deepEqual(proxied.calls, direct.calls, 'the default policy hears the same inputs, types and sinks in the same order');
+    assert.deepEqual(proxied, direct);
+  });
+
+  for (const via of ['header', 'meta']) {
+    await t.test(`a document that enforces Trusted Types by ${via} refuses strings and accepts Trusted values, as natively`, async () => {
+      const { direct, proxied } = await compareTrustedTypes(`/xttn?via=${via}`, '__xttn');
+      for (const k of ['stringHTML', 'stringAdjacent', 'stringScriptSrc', 'stringScriptText', 'stringTimeout', 'stringSrcdoc', 'stringHandler', 'stringWorker', 'stringParse', 'stringFragment']) {
+        assert.match(direct[k], /^threw:TypeError:Failed to (set|execute|construct) [^:]+: This document requires 'Trusted(HTML|Script|ScriptURL)' assignment\.$/, `${k}: the native reference changed`);
+      }
+      assert.match(direct.stringEval, /^threw:EvalError:/);
+      assert.equal(direct.trustedHTML, 'true');
+      assert.equal(direct.trustedEval, '2');
+      assert.equal(direct.trustedScriptText, '1');
+      assert.equal(direct.trustedHandler, '2');
+      assert.equal(direct.plainText, 'plain', 'text that is no code or markup needs no policy');
+      assert.equal(direct.policies, 'q:ok', 'no name list: any policy name is allowed');
+      assert.deepEqual(proxied, direct);
+    });
+  }
+
+  await t.test('a report-only Trusted Types policy enforces nothing, as natively', async () => {
+    const { direct, proxied } = await compareTrustedTypes('/xttn?via=report-only', '__xttn');
+    for (const k of ['stringHTML', 'stringAdjacent', 'stringScriptSrc', 'stringScriptText', 'stringTimeout', 'stringSrcdoc', 'stringHandler']) {
+      assert.equal(direct[k], 'ok', `${k}: the native reference changed`);
+    }
+    assert.equal(direct.stringEval, '2');
     assert.deepEqual(proxied, direct);
   });
 

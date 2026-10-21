@@ -62,7 +62,7 @@
         + 'return __zp_inner__.apply(__zp_self, __zp_args);';
       // Use `__zp_self` rather than a rewriter helper name because in a child frame sharing a reused
       // window, `Native.FunctionCtor` may already be a parent facade that rewrites the wrapper.
-      return Reflect.construct(Native.FunctionCtor, ['__zp_scope', '__zp_args', '__zp_self', src]);
+      return ttFunction(['__zp_scope', '__zp_args', '__zp_self', src]);
     }
     function nestedCall(compiled, thisArg, callArgs, newTarget, sloppy) {
       // Sloppy functions coerce nullish `this` (or raw `root` from unwrapped callers)
@@ -76,6 +76,12 @@
       const body = parts.length ? parts[parts.length - 1] : '';
       const params = new Array(parts.length > 0 ? parts.length - 1 : 0);
       for (let i = 0; i < params.length; i++) params[i] = parts[i];
+      if (ttEnforced()) {
+        const wanted = '(' + dynamicSource(kind, params, body) + ')';
+        const made = ttCompliant('Script', 'Function', wanted);
+        // A default policy that changed the source decides what is compiled.
+        if (made !== wanted) return dynamicEval.call(undefined, ttScript(made));
+      }
       // Match the outer `fn` wrapper's function kind (`async`, `generator`, `asyncGenerator`)
       // to the inner function to preserve prototype identity.
       const compiled = compileNested(params, body, kind);
@@ -99,15 +105,7 @@
     }
     // Extract source text for `eval`: either a string or a TrustedScript instance,
     // which Chrome evaluates even when Trusted Types are not enforced by CSP.
-    function evalSource(x) {
-      if (typeof x === 'string') return x;
-      try {
-        if (x !== null && typeof x === 'object' && Native.ttIsScript && Reflect.apply(Native.ttIsScript, Native.trustedTypes, [x])) {
-          return Reflect.apply(Native.ttScriptText, x, []);
-        }
-      } catch {}
-      return null;
-    }
+    function evalSource(x, sink) { return ttEvalSource(x, sink); }
     function isEvalExpressionCandidate(text) {
       return !/^(?:function|class|var|let|const|if|for|while|do|switch|try|throw|return|break|continue|with|import|export|debugger)\b/.test(text.trimStart());
     }
@@ -128,7 +126,7 @@
           const cacheable = rewritten.length <= 65536;
           expr = cacheable ? evalExpressionCache.get(rewritten) : undefined;
           if (expr === undefined) {
-            expr = Reflect.construct(Native.FunctionCtor, ['__zp_scope', 'with(__zp_scope){' + ZP_WITH_PROLOGUE + 'return (' + rewritten + '\n);}']);
+            expr = ttFunction(['__zp_scope', 'with(__zp_scope){' + ZP_WITH_PROLOGUE + 'return (' + rewritten + '\n);}']);
             if (cacheable) {
               evalExpressionCache.set(rewritten, expr);
               if (evalExpressionCache.size > 256) evalExpressionCache.delete(evalExpressionCache.keys().next().value);
@@ -171,9 +169,9 @@
     // inside it act as a native direct eval over an environment combining caller local accessors (`desc`)
     // and `withScope`. Declared with `var` to avoid a TDZ before initialization completes.
     var __zp_eval_desc = null;
-    const zpDirectEvalRunner = Native.FunctionCtor(
+    const zpDirectEvalRunner = ttFunction([
       'eval', '__zp_env', '__zp_src',
-      'return eval(__zp_src)');
+      'return eval(__zp_src)']);
     // Strict direct eval cannot contain a `with` statement inside the evaluated source,
     // so the runner wraps a strict arrow function inside an outer `with(__zp_env)` block.
     // Built lazily and falls back to `null` if `Native.FunctionCtor` rejects `with`.
@@ -181,9 +179,9 @@
     const strictRunnerOrNull = () => {
       if (zpDirectEvalStrictRunner === undefined) {
         try {
-          zpDirectEvalStrictRunner = Native.FunctionCtor(
+          zpDirectEvalStrictRunner = ttFunction([
             '__zp_self', '__zp_env', '__zp_src',
-            'with(__zp_env){const eval=__zp_self;' + ZP_WITH_PROLOGUE + 'return (()=>{"use strict";return eval(__zp_src)})()}');
+            'with(__zp_env){const eval=__zp_self;' + ZP_WITH_PROLOGUE + 'return (()=>{"use strict";return eval(__zp_src)})()}']);
         } catch { zpDirectEvalStrictRunner = null; }
       }
       return zpDirectEvalStrictRunner;
@@ -250,10 +248,10 @@
         const that = this === root ? scope : this;
         if (strictSrc) {
           const strictRunner = strictRunnerOrNull();
-          if (strictRunner) return strictRunner.call(that, Native.globalEval, env, rewritten + tag);
-          return zpDirectEvalRunner.call(that, Native.globalEval, env, '"use strict";' + rewritten + tag);
+          if (strictRunner) return strictRunner.call(that, Native.globalEval, env, ttScript(rewritten + tag));
+          return zpDirectEvalRunner.call(that, Native.globalEval, env, ttScript('"use strict";' + rewritten + tag));
         }
-        return zpDirectEvalRunner.call(that, Native.globalEval, env, 'with(__zp_env){' + ZP_WITH_PROLOGUE + rewritten + '\n}' + tag);
+        return zpDirectEvalRunner.call(that, Native.globalEval, env, ttScript('with(__zp_env){' + ZP_WITH_PROLOGUE + rewritten + '\n}' + tag));
       } finally {
         __zp_eval_desc = prev;
         __zp_lex_env = prevLexEnv;
@@ -1315,7 +1313,7 @@
       } catch {}
       if (nullishOps === null) {
         try {
-          nullishOps = Native.globalEval('({ get: (b, p) => b[p], set: (b, p) => { b[p] = 0; }, has: (b, p) => Reflect.has(b, p), rget: (b, p) => Reflect.get(b, p), rset: (b, p) => Reflect.set(b, p, 0), del: (b, p) => delete b[p], keys: b => Object.keys(b), own: b => Reflect.ownKeys(b) })\n//# sourceURL=' + virtualURL.href);
+          nullishOps = Native.globalEval(ttScript('({ get: (b, p) => b[p], set: (b, p) => { b[p] = 0; }, has: (b, p) => Reflect.has(b, p), rget: (b, p) => Reflect.get(b, p), rset: (b, p) => Reflect.set(b, p, 0), del: (b, p) => delete b[p], keys: b => Object.keys(b), own: b => Reflect.ownKeys(b) })\n//# sourceURL=' + virtualURL.href));
         } catch { nullishOps = false; }
       }
       if (nullishOps && nullishOps[op]) nullishOps[op](base, prop);
@@ -1906,7 +1904,7 @@
     function parseSyntaxError(message) {
       let err = null;
       try {
-        const make = Native.globalEval('(function (m) { return new SyntaxError(m); })\n//# sourceURL=' + virtualURL.href);
+        const make = Native.globalEval(ttScript('(function (m) { return new SyntaxError(m); })\n//# sourceURL=' + virtualURL.href));
         err = make(String(message));
       } catch {}
       if (!err || typeof err !== 'object') err = normalizedError('NotSupportedError');
@@ -2076,10 +2074,10 @@
       if (geval) {
         // Wrap sloppy classic scripts in `with(__zp_lex_scope)` to bind the global lexical environment
         // (strict scripts cannot sit inside a top-level `with` and run directly).
-        if (!ZP_STRICT_DIRECTIVE_RE.test(code)) return geval('with(__zp_lex_scope){' + ZP_WITH_PROLOGUE + code + '\n}' + tagged);
-        return geval(code + tagged);
+        if (!ZP_STRICT_DIRECTIVE_RE.test(code)) return geval(ttScript('with(__zp_lex_scope){' + ZP_WITH_PROLOGUE + code + '\n}' + tagged));
+        return geval(ttScript(code + tagged));
       }
-      return Native.FunctionCtor(code).call(root);
+      return ttFunction([code]).call(root);
     }
     define(root, '__ZP_EXEC_INLINE_SCRIPT', source => execGlobalScript(rewriteWithPageRewriter(decodeInlineEntities(source), 'classic')));
     define(root, '__ZP_EXEC_INLINE_MODULE', source => {
@@ -2099,7 +2097,7 @@
       promise.finally(() => { try { (Native.revokeObjectURL || URL.revokeObjectURL).call(URL, url); } catch {} });
       return promise;
     });
-    define(root, '__ZP_EXEC_EVENT', (selfValue, event, source) => Native.FunctionCtor('event', rewriteWithPageRewriter(source, 'event-handler')).call(selfValue, event));
+    define(root, '__ZP_EXEC_EVENT', (selfValue, event, source) => ttFunction(['event', rewriteWithPageRewriter(source, 'event-handler')]).call(selfValue, event));
     define(root, 'eval', dynamicEval);
     define(root, 'Function', dynamicFunction);
     // Virtualize `.constructor` on function prototypes: record per-instance overrides in a
@@ -2120,17 +2118,16 @@
     // Wrap non-function timer handlers (`setTimeout("code")`) so they compile and execute via
     // `dynamicEval` when the timer fires rather than in the unrewritten native global scope,
     // surfacing any `SyntaxError` at fire time to match native browser behavior.
-    function timerHandler(handler) {
+    function timerHandler(handler, sink) {
       if (typeof handler === 'function') return handler;
       // Coerce non-function handlers (strings, `TrustedScript`, or objects with `toString()`) to source text.
-      let text = evalSource(handler);
-      if (text === null) text = String(handler);
+      const text = ttIsTrusted('Script', handler) ? ttText('Script', handler) : ttCompliant('Script', sink, String(handler));
       // Evaluate as global code via indirect `dynamicEval` when the timer fires.
-      return function () { return dynamicEval.call(undefined, text); };
+      return function () { return dynamicEval.call(undefined, ttScript(text)); };
     }
-    if (Native.setTimeout) define(root, 'setTimeout', function(handler, delay, ...args) { return Native.setTimeout(timerHandler(handler), delay, ...args); });
-    if (Native.setInterval) define(root, 'setInterval', function(handler, delay, ...args) { return Native.setInterval(timerHandler(handler), delay, ...args); });
+    if (Native.setTimeout) define(root, 'setTimeout', function(handler, delay, ...args) { return Native.setTimeout(timerHandler(handler, 'Window setTimeout'), delay, ...args); });
+    if (Native.setInterval) define(root, 'setInterval', function(handler, delay, ...args) { return Native.setInterval(timerHandler(handler, 'Window setInterval'), delay, ...args); });
     // `document.write` and `document.writeln` are installed per-realm in `installDOMHooks`.
-    if (Native.DOMParserParseFromString && root.DOMParser) define(root.DOMParser.prototype, 'parseFromString', function(markup, type) { return Native.DOMParserParseFromString.call(this, String(type).toLowerCase() === 'text/html' ? transformHTML(String(markup), { document: true }) : markup, type); });
-    if (Native.rangeCreateContextualFragment && root.Range) define(root.Range.prototype, 'createContextualFragment', function(markup) { return Native.rangeCreateContextualFragment.call(this, transformHTML(String(markup))); });
+    if (Native.DOMParserParseFromString && root.DOMParser) define(root.DOMParser.prototype, 'parseFromString', function(markup, type) { const m = ttCompliant('HTML', 'DOMParser parseFromString', markup); return Native.DOMParserParseFromString.call(this, String(type).toLowerCase() === 'text/html' ? transformHTML(String(m), { document: true }) : m, type); });
+    if (Native.rangeCreateContextualFragment && root.Range) define(root.Range.prototype, 'createContextualFragment', function(markup) { return Native.rangeCreateContextualFragment.call(this, transformHTML(String(ttCompliant('HTML', 'Range createContextualFragment', markup)))); });
   }

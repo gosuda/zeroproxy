@@ -299,9 +299,9 @@ test('compileNested: new Function parameters and arguments are not shadowed by t
     return rt.slice(start, next < 0 ? undefined : next);
   };
   const compileNested = new Function(
-    'zpTrace', 'rewriteDynamicFunctionBody', 'Native', 'ZP_WITH_PROLOGUE',
+    'zpTrace', 'rewriteDynamicFunctionBody', 'Native', 'ttFunction', 'ZP_WITH_PROLOGUE',
     grab('functionPrefix') + '\n' + grab('compileNested') + '\nreturn compileNested;'
-  )(() => {}, (params, body) => String(body), { FunctionCtor: Function },
+  )(() => {}, (params, body) => String(body), { FunctionCtor: Function }, args => Reflect.construct(Function, args),
     new Function(['  const ZP_WITH_HELPERS = [', '  const ZP_WITH_PROLOGUE = ']
       .map(start => rt.slice(rt.indexOf(start), rt.indexOf(';\n', rt.indexOf(start)) + 2)).join('') + 'return ZP_WITH_PROLOGUE;')());
 

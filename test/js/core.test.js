@@ -126,3 +126,26 @@ test('sites: the proxy CSP admits site hosts only for tabs that use site frames'
   assert.equal(/default-src [^;]*localhost/.test(meta), false);
   assert.equal(ctx.ZP.filterMetaCSP("frame-src https://x.test"), "frame-src https://x.test 'self' blob: data:", 'unchanged without a site source');
 });
+
+test('trusted types: the target\'s directives are carried and the membrane\'s policy name is admitted, as in the Rust filter', () => {
+  require('../../web/zp-core.js');
+  const ZP = globalThis.ZP;
+  assert.equal(ZP.TT_POLICY_NAME, 'zp-internal');
+  assert.deepEqual(ZP.trustedTypesDirectives("default-src 'none'; require-trusted-types-for 'script'; trusted-types a default"),
+    ["require-trusted-types-for 'script'", 'trusted-types a default zp-internal']);
+  assert.deepEqual(ZP.trustedTypesDirectives("trusted-types 'none'"), ['trusted-types zp-internal']);
+  assert.deepEqual(ZP.trustedTypesDirectives('trusted-types'), ['trusted-types zp-internal']);
+  assert.deepEqual(ZP.trustedTypesDirectives("trusted-types * 'allow-duplicates'"), ["trusted-types * 'allow-duplicates'"]);
+  assert.deepEqual(ZP.trustedTypesDirectives('trusted-types a zp-internal'), ['trusted-types a zp-internal']);
+  assert.deepEqual(ZP.trustedTypesDirectives("script-src 'self'; img-src https:"), []);
+  assert.deepEqual(ZP.trustedTypesPolicies("script-src 'self', require-trusted-types-for 'script', default-src 'none'; trusted-types x"),
+    ["require-trusted-types-for 'script'", 'trusted-types x zp-internal']);
+  assert.deepEqual(ZP.trustedTypesPolicies("script-src 'self'"), []);
+  assert.equal(ZP.requiresTrustedTypes("default-src 'none'; require-trusted-types-for 'script'"), true);
+  assert.equal(ZP.requiresTrustedTypes('trusted-types a'), false, 'a name list alone enforces no sink');
+  assert.equal(ZP.requiresTrustedTypes(''), false);
+  // The meta filter keeps them, and keeps a meta policy that has nothing else.
+  const meta = ZP.filterMetaCSP("default-src 'none'; require-trusted-types-for 'script'; trusted-types x default; script-src 'none'");
+  assert.ok(meta.includes("require-trusted-types-for 'script'") && meta.includes('trusted-types x default zp-internal'), meta);
+  assert.equal(ZP.filterMetaCSP("require-trusted-types-for 'script'"), "require-trusted-types-for 'script'");
+});

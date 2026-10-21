@@ -357,7 +357,7 @@
     'script-src': "'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' blob:",
     'script-src-elem': "'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' blob:",
     'script-src-attr': "'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' blob:",
-    'connect-src': "'self' blob: data:",
+    'connect-src': "'self'",
     'worker-src': "'self' blob:",
     'child-src': "'self' blob: data:",
     'frame-src': "'self' blob: data:",
@@ -367,9 +367,39 @@
     'default-src': "'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' blob: data:",
   };
   const META_CSP_RESOURCE = newSet(['img-src', 'media-src', 'font-src', 'object-src', 'manifest-src', 'prefetch-src', 'form-action', 'base-uri']);
+  // The name of the Trusted Types policy the membrane creates for its own string sinks; a document that restricts policy names must
+  // admit it. Keep in sync with TT_POLICY_NAME in crates/zp-shared/src/csp.rs.
+  const TT_POLICY_NAME = 'zp-internal';
+  // The Trusted Types directives of one CSP policy as the proxied document must carry them: `require-trusted-types-for` unchanged, and
+  // `trusted-types` with the membrane's policy name added (`'none'` and an empty list become that name alone; `*` already admits it).
+  function trustedTypesDirectives(policy) {
+    const out = [];
+    for (const segment of String(policy || '').split(';')) {
+      const parts = segment.trim().split(/\s+/).filter(Boolean);
+      const name = (parts.shift() || '').toLowerCase();
+      if (name === 'require-trusted-types-for') out.push((name + ' ' + parts.join(' ')).trim());
+      else if (name === 'trusted-types') {
+        if (!parts.length || parts.some(t => t.toLowerCase() === "'none'")) out.push(name + ' ' + TT_POLICY_NAME);
+        else {
+          if (!parts.includes('*') && !parts.includes(TT_POLICY_NAME)) parts.push(TT_POLICY_NAME);
+          out.push(name + ' ' + parts.join(' '));
+        }
+      }
+    }
+    return out;
+  }
+  // The Trusted Types part of a Content-Security-Policy header value (policies separated by commas): one TT-only policy for each of the
+  // target's policies that declares a Trusted Types directive. Appended to the proxy's own header, it makes the browser enforce them.
+  function trustedTypesPolicies(header) {
+    return String(header || '').split(',').map(trustedTypesDirectives).filter(d => d.length).map(d => d.join('; '));
+  }
+  // Whether the header value enforces Trusted Types on script sinks.
+  function requiresTrustedTypes(header) {
+    return trustedTypesPolicies(header).some(p => /(^|;\s*)require-trusted-types-for\b[^;]*'script'/i.test(p));
+  }
   // `siteFrameSrc` (see siteFrameSource) is also admitted in `frame-src` and `child-src`.
   function filterMetaCSP(content, siteFrameSrc) {
-    const out = [];
+    const out = trustedTypesDirectives(content);
     for (const segment of String(content || '').split(';')) {
       const seg = segment.trim();
       if (!seg) continue;
@@ -551,7 +581,7 @@
     Object.defineProperty(w, '__zp_bridge_factory', { value: factory, configurable: true, enumerable: false, writable: true });
     return null;
   }
-  const api = Object.freeze({ CONTROL_PREFIX, ASSET_PREFIX, TARGET_USER_AGENT, TARGET_SEC_CH_UA, TARGET_CHROME_FULL_VERSION, TARGET_UA_HIGH_ENTROPY, uaHighEntropyValues, clientEnvOf, chromeBrandList, bytesToBase64Url, base64UrlToBytes, webTransportGatewayRequest, relayOnlyRTCConfiguration, ENVELOPE_MIME,encodeEnvelope, decodeEnvelope, encryptShareURL, decryptShareURL, makeShareURL, makeSharePath, makeShareFragment, defaultRelayServer, relayServersForShare, isSharePath, shareRouteKey, controlPath, assetPath, assetURL, versionedAsset, apiPath, errorPath, INTERNAL_ASSET_SCRIPTS, isInternalAssetScriptPath, isInternalPath, canonicalTargetURL, canonicalWebSocketURL, encodeTargetURL, decodeTargetURL, randomId, fixedCSP, filterMetaCSP, parseRelayServersFromFragment, normalizeRelayServers, isLoopbackHost, registrableDomain, siteOf, sameSite, siteFrameCapable, siteFrameOrigin, siteFrameSource, redirectMethod, createFetchResponseAdapter, configureBridge, ERRORS, errorInfo, MSG });
+  const api = Object.freeze({ CONTROL_PREFIX, ASSET_PREFIX, TARGET_USER_AGENT, TARGET_SEC_CH_UA, TARGET_CHROME_FULL_VERSION, TARGET_UA_HIGH_ENTROPY, uaHighEntropyValues, clientEnvOf, chromeBrandList, bytesToBase64Url, base64UrlToBytes, webTransportGatewayRequest, relayOnlyRTCConfiguration, ENVELOPE_MIME,encodeEnvelope, decodeEnvelope, encryptShareURL, decryptShareURL, makeShareURL, makeSharePath, makeShareFragment, defaultRelayServer, relayServersForShare, isSharePath, shareRouteKey, controlPath, assetPath, assetURL, versionedAsset, apiPath, errorPath, INTERNAL_ASSET_SCRIPTS, isInternalAssetScriptPath, isInternalPath, canonicalTargetURL, canonicalWebSocketURL, encodeTargetURL, decodeTargetURL, randomId, fixedCSP, filterMetaCSP, parseRelayServersFromFragment, normalizeRelayServers, isLoopbackHost, registrableDomain, siteOf, sameSite, siteFrameCapable, siteFrameOrigin, siteFrameSource, TT_POLICY_NAME, trustedTypesDirectives, trustedTypesPolicies, requiresTrustedTypes, redirectMethod, createFetchResponseAdapter, configureBridge, ERRORS, errorInfo, MSG });
   // `configurable: true` allows the page prelude to delete `globalThis.ZP` after capturing it into a closure binding,
   // preventing `Object.getOwnPropertyNames(window)` from exposing `ZP` to target scripts.
   Object.defineProperty(globalThis, 'ZP', { value: api, enumerable: false, configurable: true, writable: false });

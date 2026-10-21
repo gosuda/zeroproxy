@@ -453,7 +453,11 @@
       try {
         defineMasked(scriptProto, prop, {
           get() { return d.get ? originalScriptText(this, d.get.call(this)) : ''; },
-          set(v) { d.set.call(this, v); if (this.isConnected) prepareScriptElement(this); },
+          set(v) {
+            const c = ttCompliant('Script', 'HTMLScriptElement ' + prop, v, '', ttOfNode(this));
+            d.set.call(this, typeof c === 'string' ? ttScript(c) : c);
+            if (this.isConnected) prepareScriptElement(this);
+          },
           configurable: false
         });
       } catch {}
@@ -471,7 +475,7 @@
           if (!masked) return deproxyURL(d.get.call(this), { scan: true });
           return masked;
         },
-        set(v) { setScriptSource(this, v); },
+        set(v) { setScriptSource(this, ttCompliant('ScriptURL', 'HTMLScriptElement src', v, '', ttOfNode(this))); },
         configurable: true
       });
     } catch {}

@@ -183,7 +183,7 @@
               return known || deproxyURL(d.get.call(this));
             },
           set(v) {
-            if (prop === 'srcdoc') setInjectedSrcdoc(this, v);
+            if (prop === 'srcdoc') setInjectedSrcdoc(this, ttCompliant('HTML', 'HTMLIFrameElement srcdoc', v, '', ttOfNode(this)));
             else this.setAttribute(prop, v);
             instrumentIframe(this);
           },
