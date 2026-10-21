@@ -111,7 +111,11 @@
     const create = kind === 'HTML' ? Native.ttCreateHTML : kind === 'Script' ? Native.ttCreateScript : Native.ttCreateScriptURL;
     const made = nativeApply(create, dp, [String(value), TT_KINDS[kind], sink]);
     if (made === null || made === undefined) throw ttViolation(kind, sink, via);
-    return ttText(kind, made);
+    const text = ttText(kind, made);
+    // The engine refuses a compilation (`eval`, `Function`) whose text the policy changed; every other sink takes the policy's text. A policy that
+    // answers null reads as an empty string here (the public API turns one into the other), which a compilation refuses the same way.
+    if ((sink === 'eval' || sink === 'Function') && text !== String(value)) throw ttViolation(kind, sink, via);
+    return text;
   }
   // `Reflect.construct(Function, args)` for source the membrane built itself. Chrome's Function constructor takes no Trusted* arguments, so in a
   // document that enforces Trusted Types the function is made by evaluating the source the constructor would have compiled as a TrustedScript.

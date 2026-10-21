@@ -76,12 +76,8 @@
       const body = parts.length ? parts[parts.length - 1] : '';
       const params = new Array(parts.length > 0 ? parts.length - 1 : 0);
       for (let i = 0; i < params.length; i++) params[i] = parts[i];
-      if (ttEnforced()) {
-        const wanted = '(' + dynamicSource(kind, params, body) + ')';
-        const made = ttCompliant('Script', 'Function', wanted);
-        // A default policy that changed the source decides what is compiled.
-        if (made !== wanted) return dynamicEval.call(undefined, ttScript(made));
-      }
+      // The `default` policy sees the source the engine would compile; one that changes it is a refusal (thrown by `ttCompliant`).
+      if (ttEnforced()) ttCompliant('Script', 'Function', '(' + dynamicSource(kind, params, body) + ')');
       // Match the outer `fn` wrapper's function kind (`async`, `generator`, `asyncGenerator`)
       // to the inner function to preserve prototype identity.
       const compiled = compileNested(params, body, kind);
@@ -2130,4 +2126,77 @@
     // `document.write` and `document.writeln` are installed per-realm in `installDOMHooks`.
     if (Native.DOMParserParseFromString && root.DOMParser) define(root.DOMParser.prototype, 'parseFromString', function(markup, type) { const m = ttCompliant('HTML', 'DOMParser parseFromString', markup); return Native.DOMParserParseFromString.call(this, String(type).toLowerCase() === 'text/html' ? transformHTML(String(m), { document: true }) : m, type); });
     if (Native.rangeCreateContextualFragment && root.Range) define(root.Range.prototype, 'createContextualFragment', function(markup) { return Native.rangeCreateContextualFragment.call(this, transformHTML(String(ttCompliant('HTML', 'Range createContextualFragment', markup)))); });
+    installEventWindowIdentity();
+    // Window identity across events. The page's `window` is the membrane's facade (`scope`), but the native event surface speaks of the real
+    // window: an event's `view`, `target`, `currentTarget`, `srcElement` and `composedPath()` hand it out, and the UI event constructors and
+    // their legacy `init*Event` methods take a real Window for `view`. Natively `e.currentTarget === window` and
+    // `new MouseEvent('click', { view: window })` are plain facts; here the first read the real window and the second threw. The page gets the
+    // facade back from what the browser hands out, and the browser gets the real window for what the page hands in.
+    function installEventWindowIdentity() {
+      const realWindowOf = v => (v === scope || v === withScope ? root : (v && typeof v === 'object' && crossWindowTargets.get(v)) || v);
+      const eventProto = root.Event && root.Event.prototype;
+      if (eventProto) {
+        for (const key of ['target', 'currentTarget', 'srcElement']) {
+          const d = Object.getOwnPropertyDescriptor(eventProto, key);
+          if (!d || typeof d.get !== 'function') continue;
+          const nativeGet = d.get;
+          defineMasked(eventProto, key, { get() { const v = Reflect.apply(nativeGet, this, []); return v === root ? scope : v; }, set: d.set, configurable: true, enumerable: d.enumerable });
+        }
+        const nativePath = eventProto.composedPath;
+        if (typeof nativePath === 'function') {
+          define(eventProto, 'composedPath', function composedPath() {
+            const path = Reflect.apply(nativePath, this, []);
+            for (let i = 0; i < path.length; i++) if (path[i] === root) path[i] = scope;
+            return path;
+          });
+        }
+      }
+      const uiProto = root.UIEvent && root.UIEvent.prototype;
+      const viewDesc = uiProto && Object.getOwnPropertyDescriptor(uiProto, 'view');
+      if (viewDesc && typeof viewDesc.get === 'function') {
+        const nativeView = viewDesc.get;
+        defineMasked(uiProto, 'view', { get() { const v = Reflect.apply(nativeView, this, []); return v ? windowHandleFor(v) : v; }, set: viewDesc.set, configurable: true, enumerable: viewDesc.enumerable });
+      }
+      // The constructors: a class that reads `view` from its init dictionary gets the real window. A Proxy keeps everything else native
+      // (`new.target` and subclassing, statics, `length`, `name`), with `prototype.constructor` and the parent link pointing at the replacements.
+      const replacements = newWeakMap();
+      for (const name of ['UIEvent', 'MouseEvent', 'PointerEvent', 'KeyboardEvent', 'FocusEvent', 'InputEvent', 'CompositionEvent', 'WheelEvent', 'TouchEvent', 'DragEvent']) {
+        const Native_ = root[name];
+        if (typeof Native_ !== 'function') continue;
+        const replacement = new Proxy(Native_, {
+          construct(target, args, newTarget) {
+            const init = args.length > 1 ? args[1] : undefined;
+            if (init !== null && typeof init === 'object') {
+              let view;
+              try { view = init.view; } catch { view = undefined; }
+              const real = view === undefined || view === null ? view : realWindowOf(view);
+              if (real !== view) {
+                // Everything else in the dictionary is read from the page's own object, so its getters still run once each.
+                const copy = Object.create(init);
+                Object.defineProperty(copy, 'view', { value: real, writable: true, enumerable: true, configurable: true });
+                args = [args[0], copy].concat(Array.prototype.slice.call(args, 2));
+              }
+            }
+            return Reflect.construct(target, args, newTarget === replacement ? target : newTarget);
+          },
+          getPrototypeOf(target) { const parent = Reflect.getPrototypeOf(target); return replacements.get(parent) || parent; },
+        });
+        replacements.set(Native_, replacement);
+        try { Object.defineProperty(Native_.prototype, 'constructor', { value: replacement, writable: true, enumerable: false, configurable: true }); } catch {}
+        maskNativeFunction(replacement, name);
+        try { Object.defineProperty(root, name, { value: replacement, writable: true, enumerable: false, configurable: true }); } catch {}
+      }
+      // The legacy initializers take the window as their fourth argument.
+      for (const [name, method] of [['UIEvent', 'initUIEvent'], ['MouseEvent', 'initMouseEvent'], ['KeyboardEvent', 'initKeyboardEvent'], ['CompositionEvent', 'initCompositionEvent']]) {
+        const proto = root[name] && root[name].prototype;
+        const nativeInit = proto && Object.getOwnPropertyDescriptor(proto, method);
+        if (!nativeInit || typeof nativeInit.value !== 'function') continue;
+        const original = nativeInit.value;
+        define(proto, method, { [method](type) {
+          const args = Array.prototype.slice.call(arguments);
+          if (args.length > 3) args[3] = realWindowOf(args[3]);
+          return Reflect.apply(original, this, args);
+        } }[method]);
+      }
+    }
   }

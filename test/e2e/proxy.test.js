@@ -2753,6 +2753,89 @@ function createTargetServer(requests, pendingResponses) {
       </script></body>`);
       return;
     }
+    if (url.pathname === '/xperf.js') {
+      res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end('window.__perfScript = 1;');
+      return;
+    }
+    if (url.pathname === '/xperf') {
+      // The performance timeline a page serializes: names must be the target's, in `name` and in `toJSON()` alike, and a long frame lists only the page's scripts.
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(`<!doctype html><title>perf</title><body><script src="/xperf.js"><\/script><script>
+        fetch('/xperf.js').then(function (r) { return r.text(); }).then(function () {
+          setTimeout(function () { var t0 = Date.now(); while (Date.now() - t0 < 140); }, 20);
+          setTimeout(function () {
+            var entries = performance.getEntries();
+            var urls = function (json) { var r = []; json.replace(/"(name|sourceURL)":"([^"]*)"/g, function (m, k, v) { r.push(k + ':' + v); return m; }); return r; };
+            window.__xperf = {
+              names: entries.filter(function (e) { return (e.entryType === 'resource' || e.entryType === 'navigation') && !/favicon/.test(e.name); }).map(function (e) { return e.entryType + ':' + e.name; }).sort(),
+              jsonNames: urls(JSON.stringify(entries.filter(function (e) { return (e.entryType === 'resource' || e.entryType === 'navigation') && !/favicon/.test(e.name); }))).sort(),
+              allJson: JSON.stringify(entries),
+              loafScripts: performance.getEntriesByType('long-animation-frame').map(function (l) { return (l.scripts || []).map(function (s) { return s.sourceURL; }); }),
+              loafJson: JSON.stringify(performance.getEntriesByType('long-animation-frame')),
+              scriptJson: (function () { var l = performance.getEntriesByType('long-animation-frame')[0]; return l && l.scripts && l.scripts[0] ? JSON.stringify(l.scripts[0]) : ''; })()
+            };
+          }, 900);
+        });
+      <\/script></body>`);
+      return;
+    }
+    if (url.pathname === '/xevid') {
+      // Window identity across events, as page code reads it.
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(`<!doctype html><title>evid</title><body><script>
+        var out = {}; var rec = function (k, v) { out[k] = v; };
+        var cmp = function () { return Array.prototype.map.call(arguments, function (b) { return b ? 1 : 0; }).join(''); };
+        window.addEventListener('zpt', function (e) { rec('window listener: target,currentTarget,srcElement,this,windowEvent,path', cmp(e.target === window, e.currentTarget === window, e.srcElement === window, this === window, window.event === e, e.composedPath().indexOf(window) >= 0)); });
+        document.addEventListener('zpt', function (e) { rec('document listener: target,currentTarget,this,pathHasWindow', cmp(e.target === document.body, e.currentTarget === document, this === document, e.composedPath().indexOf(window) >= 0)); });
+        window.dispatchEvent(new Event('zpt'));
+        document.body.dispatchEvent(new Event('zpt', { bubbles: true, composed: true }));
+        ['UIEvent', 'MouseEvent', 'PointerEvent', 'KeyboardEvent', 'FocusEvent', 'InputEvent', 'WheelEvent', 'CompositionEvent'].forEach(function (name) {
+          try { var e = new window[name]('x', { view: window, bubbles: true }); rec(name + ' view:window -> view===window,===self,===defaultView,===top', cmp(e.view === window, e.view === self, e.view === document.defaultView, e.view === top)); }
+          catch (x) { rec(name + ' view:window', 'threw:' + x.name); }
+        });
+        try { var le = document.createEvent('MouseEvents'); le.initMouseEvent('click', true, true, window, 0, 0, 0, 0, 0, false, false, false, false, 0, null); rec('initMouseEvent(view=window)', cmp(le.view === window)); } catch (x) { rec('initMouseEvent(view=window)', 'threw:' + x.name); }
+        try { var ue = document.createEvent('UIEvents'); ue.initUIEvent('x', true, true, window, 0); rec('initUIEvent(view=window)', cmp(ue.view === window)); } catch (x) { rec('initUIEvent(view=window)', 'threw:' + x.name); }
+        document.body.addEventListener('click', function (e) { rec('real click: view===window,view===defaultView,target===body', cmp(e.view === window, e.view === document.defaultView, e.target === document.body)); });
+        document.body.click();
+        class MyMouse extends MouseEvent {}
+        rec('subclass of MouseEvent', (function () { var e = new MyMouse('c', { view: window }); return [e instanceof MouseEvent, e instanceof UIEvent, e.constructor === MyMouse, e.view === window].map(Number).join(''); })());
+        rec('shape: constructor,parent,name,length', cmp(new MouseEvent('c').constructor === MouseEvent, Object.getPrototypeOf(MouseEvent) === UIEvent, MouseEvent.name === 'MouseEvent', MouseEvent.length === 1) + String(MouseEvent.prototype.constructor === MouseEvent));
+        rec('toString', Function.prototype.toString.call(MouseEvent).replace(/\\s+/g, ' '));
+        window.addEventListener('message', function (e) { rec('message: source===window,target===window,currentTarget===window', cmp(e.source === window, e.target === window, e.currentTarget === window)); });
+        window.postMessage('x', '*');
+        setTimeout(function () { window.__xevid = out; }, 300);
+      <\/script></body>`);
+      return;
+    }
+    if (url.pathname === '/xttm') {
+      // A default policy that changes what it is given: the engine compiles the changed text for eval, runs it for a timer, uses it for markup,
+      // and refuses the Function constructor (whose text was already parsed) and a policy that answers null.
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Security-Policy': "require-trusted-types-for 'script'; trusted-types default" });
+      res.end(`<!doctype html><title>ttm</title><body><script>
+        var out = {};
+        trustedTypes.createPolicy('default', {
+          createHTML: function (s) { return s + '<!--p-->'; },
+          createScript: function (s, type, sink) {
+            if (sink === 'Function') return s + ' ';
+            if (sink === 'eval') return String(s).replace('1', '40');
+            if (sink === 'Window setTimeout') return 'window.__t = 2';
+            return s;
+          },
+          createScriptURL: function (s) { return s; }
+        });
+        var t = function (k, fn) { try { var v = fn(); out[k] = v === undefined ? 'ok' : String(v).slice(0, 60); } catch (e) { out[k] = 'threw:' + e.name + ':' + String(e.message).slice(0, 110); } };
+        var d = document.body;
+        t('new Function changed', function () { return new Function('return 5')(); });
+        t('Function changed', function () { return Function('return 6')(); });
+        t('eval changed', function () { return eval('1 + 2'); });
+        t('indirect eval changed', function () { return (0, eval)('1 + 3'); });
+        t('innerHTML changed', function () { d.innerHTML = '<i>x</i>'; return d.innerHTML; });
+        setTimeout('window.__t = 1', 0);
+        setTimeout(function () { out.timer = window.__t; window.__xttm = out; }, 120);
+      <\/script></body>`);
+      return;
+    }
     if (url.pathname === '/xttf') {
       // A srcdoc frame of a document that enforces Trusted Types is bound by the same policy and has a default policy of its own (none).
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Security-Policy': "require-trusted-types-for 'script'; trusted-types rec" });
@@ -8014,6 +8097,37 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     assert.match(direct.eval, /^threw:EvalError/);
     assert.equal(direct.has, 'null', 'a frame has a default policy of its own');
     assert.deepEqual(proxied, direct);
+  });
+
+  await t.test('a default policy that changes a string is obeyed by timers and markup and refused by eval and Function, as natively', async () => {
+    const { direct, proxied } = await compareTrustedTypes('/xttm', '__xttm');
+    assert.match(direct['eval changed'], /^threw:EvalError/, 'the engine refuses an eval whose text the policy changed');
+    assert.match(direct['indirect eval changed'], /^threw:EvalError/);
+    assert.match(direct['new Function changed'], /^threw:EvalError/, 'and a Function whose source it changed');
+    assert.equal(direct.timer, 2, 'a timer runs what the policy returned');
+    assert.match(direct['innerHTML changed'], /<i>x<\/i><!--p-->/, 'markup is what the policy returned');
+    assert.deepEqual(proxied, direct);
+  });
+
+  // The same fixture read natively and through the proxy, for a test that does not enforce Trusted Types (the helper above polls with evaluate).
+  await t.test('window identity holds across events: view, currentTarget, composedPath and the UI event constructors (matches native)', async () => {
+    const { direct, proxied } = await compareTrustedTypes('/xevid', '__xevid');
+    assert.equal(direct['MouseEvent view:window -> view===window,===self,===defaultView,===top'], '1111', 'the native reference changed');
+    assert.equal(direct['window listener: target,currentTarget,srcElement,this,windowEvent,path'], '010111');
+    assert.equal(direct['real click: view===window,view===defaultView,target===body'], '111');
+    assert.deepEqual(proxied, direct);
+  });
+
+  await t.test('the performance timeline a page serializes names the target, in toJSON as in name, and a long frame lists the page\'s own scripts (matches native)', async () => {
+    const { direct, proxied } = await compareTrustedTypes('/xperf', '__xperf');
+    assert.ok(direct.names.some(n => n.startsWith('resource:') && n.endsWith('/xperf.js')), 'the native reference changed');
+    assert.deepEqual(proxied.names, direct.names, 'resource and navigation names');
+    assert.deepEqual(proxied.jsonNames, direct.jsonNames, 'the serialized names are the names');
+    for (const k of ['allJson', 'loafJson', 'scriptJson']) assert.doesNotMatch(proxied[k], /\/zp\/|runtime-prelude|#k=/, `${k} names no proxy route`);
+    for (const list of proxied.loafScripts) for (const u of list) assert.doesNotMatch(String(u), /\/zp\//, 'a long frame lists no membrane script');
+    // Whatever the native frames attribute, every proxied script is one the page has.
+    const nativeScripts = new Set(direct.loafScripts.flat());
+    for (const list of proxied.loafScripts) for (const u of list) assert.ok(nativeScripts.size === 0 || nativeScripts.has(u), `an attribution the native frames lack: ${u}`);
   });
 
   await t.test('a report-only Trusted Types policy enforces nothing, as natively', async () => {

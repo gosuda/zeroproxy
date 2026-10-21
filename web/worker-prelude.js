@@ -140,7 +140,10 @@
     if (!dp) throw ttViolation(kind, sink);
     const made = Reflect.apply(kind === 'Script' ? nativeTT.createScript : nativeTT.createScriptURL, dp, [String(value), 'Trusted' + kind, sink]);
     if (made === null || made === undefined) throw ttViolation(kind, sink);
-    return ttText(kind, made);
+    const text = ttText(kind, made);
+    // A compilation (`eval`, `Function`) whose text the policy changed is refused; every other sink takes the policy's text.
+    if ((sink === 'eval' || sink === 'Function') && text !== String(value)) throw ttViolation(kind, sink);
+    return text;
   }
   // `new Function(...)` for source the prelude built itself. The Function constructor takes no Trusted value, so where the worker enforces Trusted Types
   // the function is made by evaluating the source the constructor would have compiled, as a Trusted script of the prelude's own policy.
@@ -178,11 +181,8 @@
       : ctor === NativeGeneratorFunctionCtor ? 'function*'
       : ctor === NativeAsyncGeneratorFunctionCtor ? 'async function*' : 'function';
     // Where the worker enforces Trusted Types, the `default` policy sees the source the engine would have compiled (and decides what is).
-    if (ttEnforced) {
-      const wanted = '(' + kind + ' anonymous(' + parts.join(',') + '\n) {\n' + body + '\n})';
-      const made = ttCompliant('Script', 'Function', wanted);
-      if (made !== wanted) return workerDynamicEval.call(undefined, ttScript(made));
-    }
+    // The `default` policy sees the source the engine would compile; one that changes it is a refusal (thrown by `ttCompliant`).
+    if (ttEnforced) ttCompliant('Script', 'Function', '(' + kind + ' anonymous(' + parts.join(',') + '\n) {\n' + body + '\n})');
     const wrapped = kind + ' __zp_dynamic__(' + parts.join(',') + '){\n' + body + '\n}';
     const code = zpRewrite(wrapped);
     const open = code.indexOf('{'), close = code.lastIndexOf('}');

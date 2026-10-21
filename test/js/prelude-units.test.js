@@ -1604,3 +1604,20 @@ test('trusted types: eval source is the Trusted value\'s string, a string after 
   const off = ttEnv({ enforce: false });
   assert.equal(off.env.ttEvalSource('2 + 2'), '2 + 2');
 });
+
+test('trusted types: a default policy that changes a compilation is refused, and every other sink takes the policy\'s text', () => {
+  const t = ttEnv();
+  t.factory.createPolicy('default', {
+    createHTML: s => s + '<!--p-->',
+    createScript: (s, _type, sink) => (sink === 'eval' || sink === 'Function' ? s + ' ' : sink === 'Window setTimeout' ? 'later()' : s),
+    createScriptURL: s => s,
+  });
+  assert.throws(() => t.env.ttCompliant('Script', 'eval', '1 + 2'), EvalError, 'eval whose text the policy changed');
+  assert.throws(() => t.env.ttCompliant('Script', 'Function', '(function anonymous(\n) {\n\n})'), EvalError, 'Function whose source the policy changed');
+  assert.equal(t.env.ttCompliant('Script', 'Window setTimeout', 'now()'), 'later()', 'a timer runs the text the policy returned');
+  assert.equal(t.env.ttCompliant('HTML', 'Element innerHTML', '<i>'), '<i><!--p-->', 'markup is what the policy returned');
+  const same = ttEnv();
+  same.factory.createPolicy('default', { createHTML: s => s, createScript: s => s, createScriptURL: s => s });
+  assert.equal(same.env.ttCompliant('Script', 'eval', '1 + 2'), '1 + 2', 'a policy that returns the text unchanged lets the compilation through');
+  assert.equal(same.env.ttCompliant('Script', 'Function', '(function anonymous(\n) {\n\n})'), '(function anonymous(\n) {\n\n})');
+});
