@@ -2753,6 +2753,79 @@ function createTargetServer(requests, pendingResponses) {
       </script></body>`);
       return;
     }
+    if (url.pathname === '/xstack2') {
+      // Exact stacks (line and column kept) for the kinds of code a script compiles at run time.
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(`<!doctype html><title>stack2</title><body><script>
+var out = {};
+var T = function (k, f) { try { out[k] = f(); } catch (e) { out[k] = 'THREW ' + e.name + ': ' + e.message; } };
+T('direct', function () { return new Error('e1').stack; });
+T('nested', function () { function a() { return b(); } function b() { return new Error('e2').stack; } return a(); });
+T('thrown', function () { try { null.x; } catch (e) { return e.stack; } });
+T('eval', function () { return eval('new Error("e3").stack'); });
+T('evalFn', function () { return eval('(function g() { return new Error("e4").stack; })()'); });
+T('evalMulti', function () { return eval('var a = 1;\\nvar b = 2;\\n(function h() {\\n  return new Error("e4b").stack;\\n})()'); });
+T('Function', function () { return new Function('return new Error("e5").stack')(); });
+T('FunctionArgs', function () { return new Function('a', 'b', 'return new Error("e6").stack')(1, 2); });
+T('indirect', function () { return (0, eval)('new Error("e7").stack'); });
+T('arrow', function () { return (() => new Error('e8').stack)(); });
+T('method', function () { return ({ m() { return new Error('e9').stack; } }).m(); });
+T('class', function () { class K { constructor() { this.s = new Error('e10').stack; } } return new K().s; });
+T('getter', function () { return ({ get g() { return new Error('e11').stack; } }).g; });
+T('native', function () { try { [].forEach.call(null, 1); } catch (e) { return e.stack; } });
+T('json', function () { try { JSON.parse('{'); } catch (e) { return e.stack; } });
+T('evalThrows', function () { try { eval('null.y'); } catch (e) { return e.stack; } });
+T('fnThrows', function () { try { new Function('null.z')(); } catch (e) { return e.stack; } });
+T('evalSyntax', function () { try { eval('var ='); } catch (e) { return e.name + ': ' + e.message; } });
+T('sourceURL', function () { return eval('new Error("e12").stack\\n//# sourceURL=probe.js'); });
+T('captured', function () { var o = {}; Error.captureStackTrace(o); return o.stack; });
+T('limit', function () { return Error.stackTraceLimit; });
+T('callee', function () { return (function () { return new Error('e13').stack; }).call(null); });
+var N = function (k, f) { try { f(); out[k] = 'no throw'; } catch (e) { out[k] = String(e.stack).split('\\n').slice(0, 3).join(' | '); } };
+N('nat_fnToStringObj', function () { Function.prototype.toString.call({}); });
+N('nat_fnToStringFnProto', function () { Function.prototype.toString.call(Object.create(Function.prototype)); });
+N('nat_fnToStringWindow', function () { Function.prototype.toString.call(window); });
+N('nat_strToStringWindow', function () { String.prototype.toString.call(window); });
+N('nat_fnToStringDocument', function () { Function.prototype.toString.call(document); });
+N('nat_fnToStringLocation', function () { Function.prototype.toString.call(location); });
+N('nat_fnToStringNavigator', function () { Function.prototype.toString.call(navigator); });
+N('nat_fnToStringGlobalThis', function () { Function.prototype.toString.call(globalThis); });
+N('nat_fnToStringSelf', function () { Function.prototype.toString.call(self); });
+N('nat_fnToStringTop', function () { Function.prototype.toString.call(top); });
+N('nat_fnToStringHistory', function () { Function.prototype.toString.call(history); });
+N('nat_fnToStringStorage', function () { Function.prototype.toString.call(localStorage); });
+N('nat_fnToStringProxy', function () { Function.prototype.toString.call(new Proxy({}, {})); });
+N('nat_fnToStringNum', function () { (function () {}).toString.call(1); });
+N('nat_fnToStringReflect', function () { Reflect.apply(Function.prototype.toString, {}, []); });
+N('nat_symToString', function () { Symbol.prototype.toString.call({}); });
+N('nat_dateToString', function () { Date.prototype.toString.call({}); });
+N('nat_regexpToString', function () { RegExp.prototype.toString.call(1); });
+N('nat_errorToString', function () { Error.prototype.toString.call(1); });
+N('nat_strToString', function () { String.prototype.toString.call({}); });
+N('nat_numToString', function () { Number.prototype.toString.call({}); });
+N('nat_locToString', function () { Location.prototype.toString.call({}); });
+N('nat_urlToString', function () { URL.prototype.toString.call({}); });
+N('nat_locToStringOwn', function () { location.toString.call({}); });
+N('nat_illegalGetter', function () { Object.getOwnPropertyDescriptor(Node.prototype, 'nodeType').get.call({}); });
+N('nat_illegalMethod', function () { Node.prototype.cloneNode.call({}); });
+N('nat_illegalDocCookie', function () { Object.getOwnPropertyDescriptor(Document.prototype, 'cookie').get.call({}); });
+N('nat_illegalHref', function () { Object.getOwnPropertyDescriptor(Location.prototype, 'href').get.call({}); });
+N('nat_illegalNav', function () { Object.getOwnPropertyDescriptor(Navigator.prototype, 'userAgent').get.call({}); });
+N('nat_illegalFetch', function () { fetch.call({}, '/x'); });
+N('nat_illegalTimeout', function () { setTimeout.call({}, function () {}, 0); });
+N('nat_illegalQuery', function () { document.querySelector.call({}, 'a'); });
+N('nat_illegalAddEvt', function () { EventTarget.prototype.addEventListener.call({}, 'x', function () {}); });
+N('nat_toPrimitive', function () { String(Object.create(null)); });
+N('nat_toPrimitiveSym', function () { '' + Symbol(); });
+N('nat_newTarget', function () { Reflect.construct(function () {}, [], 1); });
+N('nat_proxyRevoked', function () { var r = Proxy.revocable({}, {}); r.revoke(); r.proxy.x; });
+setTimeout(function tm() { out.timeout = new Error('e14').stack; }, 0);
+Promise.resolve().then(function pr() { out.promise = new Error('e15').stack; });
+new Promise(function (res) { res(); }).then(function () { return null.x; }).catch(function (e) { out.rejection = e.stack; });
+setTimeout(function () { window.__xstack2 = out; }, 80);
+      <\/script></body>`);
+      return;
+    }
     if (url.pathname === '/xperf.js') {
       res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end('window.__perfScript = 1;');
@@ -8128,6 +8201,30 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     // Whatever the native frames attribute, every proxied script is one the page has.
     const nativeScripts = new Set(direct.loafScripts.flat());
     for (const list of proxied.loafScripts) for (const u of list) assert.ok(nativeScripts.size === 0 || nativeScripts.has(u), `an attribution the native frames lack: ${u}`);
+  });
+
+  await t.test('stacks of page code and of builtin frames match native, page positions aside', async () => {
+    const { direct, proxied } = await compareTrustedTypes('/xstack2', '__xstack2');
+    // Page positions differ by construction (the rewriter reformats the script), so only the shape of each frame is compared.
+    const shape = v => String(v).replace(/http:\/\/[^\s/]+\/xstack2:\d+:\d+/g, 'PAGE').replace(/localhost:\d+/g, 'HOST');
+    // Known gaps, each measured and described in the trap notebook (stack-fidelity-2026-10-21); a key that starts to match must leave this list.
+    const knownGaps = new Set([
+      'eval', 'evalFn', 'evalMulti', 'Function', 'FunctionArgs', 'indirect', 'evalThrows', 'fnThrows', 'sourceURL', // membrane frames and eval origins of compiled code
+      'getter', 'captured', 'evalSyntax', // `Object.get g [as g]`, the header of Error.captureStackTrace on a plain object, the SyntaxError message
+      'nat_fnToStringLocation', 'nat_fnToStringStorage', 'nat_fnToStringProxy', // type name of a facade or Proxy receiver
+      'nat_locToStringOwn', 'nat_illegalHref', 'nat_illegalTimeout', // facade members that do not reject an invalid receiver
+    ]);
+    const diffs = [];
+    let compared = 0;
+    for (const k of Object.keys(direct)) {
+      if (knownGaps.has(k)) continue;
+      compared++;
+      if (shape(direct[k]) !== shape(proxied[k])) diffs.push(`${k}\n   native : ${shape(direct[k])}\n   proxied: ${shape(proxied[k])}`);
+    }
+    assert.ok(compared >= 30, `only ${compared} probes compared`);
+    assert.equal(diffs.length, 0, `\n${diffs.join('\n')}`);
+    const stale = [...knownGaps].filter(k => shape(direct[k]) === shape(proxied[k]));
+    assert.deepEqual(stale, [], 'known gaps that now match: remove them from the list');
   });
 
   await t.test('a report-only Trusted Types policy enforces nothing, as natively', async () => {

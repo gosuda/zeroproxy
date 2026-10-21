@@ -143,10 +143,18 @@
       try { return execGlobalScript(globalCode); }
       finally { __zp_lex_env = prevLexEnv; }
     }
-    const dynamicFunction = function Function(...args) { return compileDynamic(Native.FunctionCtor, args, 'function'); };
-    const dynamicAsyncFunction = function AsyncFunction(...args) { return compileDynamic(NativeAsyncFunction, args, 'async'); };
-    const dynamicGeneratorFunction = function GeneratorFunction(...args) { return compileDynamic(NativeGeneratorFunction, args, 'generator'); };
-    const dynamicAsyncGeneratorFunction = function AsyncGeneratorFunction(...args) { return compileDynamic(NativeAsyncGeneratorFunction, args, 'asyncGenerator'); };
+    // Declared under object-literal keys: the minifier renames function names but keeps these keys, and V8 names the type of an
+    // object that inherits `constructor` from the function's debug name (stack frames read `Function.toString`, not `x.toString`).
+    const dynamicConstructors = {
+      Function: function (...args) { return compileDynamic(Native.FunctionCtor, args, 'function'); },
+      AsyncFunction: function (...args) { return compileDynamic(NativeAsyncFunction, args, 'async'); },
+      GeneratorFunction: function (...args) { return compileDynamic(NativeGeneratorFunction, args, 'generator'); },
+      AsyncGeneratorFunction: function (...args) { return compileDynamic(NativeAsyncGeneratorFunction, args, 'asyncGenerator'); },
+    };
+    const dynamicFunction = dynamicConstructors.Function;
+    const dynamicAsyncFunction = dynamicConstructors.AsyncFunction;
+    const dynamicGeneratorFunction = dynamicConstructors.GeneratorFunction;
+    const dynamicAsyncGeneratorFunction = dynamicConstructors.AsyncGeneratorFunction;
     function setDynamicConstructorIdentity(fn, name, proto) {
       try { Object.defineProperty(fn, 'name', { value: name, configurable: true }); } catch {}
       try { Object.defineProperty(fn, 'length', { value: 1, configurable: true }); } catch {}
@@ -2096,19 +2104,16 @@
     define(root, '__ZP_EXEC_EVENT', (selfValue, event, source) => ttFunction(['event', rewriteWithPageRewriter(source, 'event-handler')]).call(selfValue, event));
     define(root, 'eval', dynamicEval);
     define(root, 'Function', dynamicFunction);
-    // Virtualize `.constructor` on function prototypes: record per-instance overrides in a
-    // WeakMap so `fn.constructor = ...` succeeds in strict mode, and return the override or
-    // dynamic constructor wrapper on reads.
-    const constructorOverrides = newWeakMap();
+    // Point `.constructor` on function prototypes at the dynamic constructor wrappers. It must stay a
+    // writable data property: `fn.constructor = ...` then creates an own property as natively, and V8
+    // names the type of an object that inherits Function.prototype from that data property (an
+    // accessor made `Function.prototype.toString.call(Object.create(Function.prototype))` report
+    // `Object.toString` in its stack instead of `Function.toString`).
     for (const [ctor, wrapper] of dynamicConstructorWrappers) {
       if (ctor && ctor.prototype) try {
         // Skip prototypes whose `constructor` property is already non-configurable.
         if (propertyLocked(ctor.prototype, 'constructor')) continue;
-        defineMasked(ctor.prototype, 'constructor', {
-          get() { return constructorOverrides.get(this) || wrapper; },
-          set(value) { try { constructorOverrides.set(this, value); } catch {} },
-          enumerable: false, configurable: false
-        });
+        Object.defineProperty(ctor.prototype, 'constructor', { value: wrapper, enumerable: false, configurable: false, writable: true });
       } catch {}
     }
     // Wrap non-function timer handlers (`setTimeout("code")`) so they compile and execute via

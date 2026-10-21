@@ -136,7 +136,8 @@
         const text = ttEvalSource(value, 'eval', childTT);
         return text === null ? value : childEvalText(text);
       };
-      childFunctionFacade = function Function(...args) {
+      // Under an object-literal key so the minifier keeps the debug name `Function` that V8 prints in stack frames.
+      const childConstructors = { Function: function (...args) {
         // Validate and convert parameters via the native constructor without
         // executing the unrewritten body.
         if (ttEnforced()) {
@@ -151,7 +152,8 @@
         const compiled = childExecGlobal(pageRewriteHooks.rewrite('(' + source + ')', 'classic'));
         toStringMap.set(compiled, source);
         return compiled;
-      };
+      } };
+      childFunctionFacade = childConstructors.Function;
       Object.defineProperty(childFunctionFacade, 'prototype', { value: childFunction.prototype });
       Object.defineProperty(childFunctionFacade, 'length', { value: 1 });
       maskNativeFunction(childDynamicEval, 'eval');
@@ -315,13 +317,8 @@
     if (root.__ZP_EXEC_EVENT && !define(w, '__ZP_EXEC_EVENT', root.__ZP_EXEC_EVENT)) throw normalizedError('SecurityError');
     if (root.__ZP_SET_BASE && !define(w, '__ZP_SET_BASE', root.__ZP_SET_BASE)) throw normalizedError('SecurityError');
     if (childFunction && childFunction.prototype) try {
-      // Route `Function.prototype.constructor` in the child realm to `childFunctionFacade`.
-      const childConstructorOverrides = newWeakMap();
-      defineMasked(childFunction.prototype, 'constructor', {
-        get() { return childConstructorOverrides.get(this) || childFunctionFacade; },
-        set(value) { try { childConstructorOverrides.set(this, value); } catch {} },
-        enumerable: false, configurable: false
-      });
+      // Route `Function.prototype.constructor` in the child realm to `childFunctionFacade` (a writable data property, as in the main realm).
+      Object.defineProperty(childFunction.prototype, 'constructor', { value: childFunctionFacade, enumerable: false, configurable: false, writable: true });
     } catch {}
     if (root.fetch && !define(w, 'fetch', root.fetch.bind(root))) throw normalizedError('SecurityError');
     installNavigatorIdentity(w);
