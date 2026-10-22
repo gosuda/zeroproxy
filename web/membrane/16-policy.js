@@ -66,7 +66,7 @@
     }
     if ((tag === 'iframe' || tag === 'frame') && localKey === 'srcdoc') {
       const raw = Native.getAttribute.call(el, 'srcdoc');
-      if (raw && !srcdocMeta.has(el) && raw.indexOf(srcdocPrelude()) < 0) setInjectedSrcdoc(el, raw);
+      if (raw && !srcdocMeta.has(el) && raw.indexOf('id="__zp-boot"') < 0) setInjectedSrcdoc(el, raw);
       instrumentIframe(el);
       return;
     }

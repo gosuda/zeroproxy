@@ -134,10 +134,13 @@
       const childDynamicEval = function dynamicEval(value) {
         if (new.target) throw new TypeError('eval is not a constructor');
         const text = ttEvalSource(value, 'eval', childTT);
-        return text === null ? value : childEvalText(text);
+        if (text === null) return value;
+        cspCheckEval(w.document, value);
+        return childEvalText(text);
       };
       // Under an object-literal key so the minifier keeps the debug name `Function` that V8 prints in stack frames.
       const childConstructors = { Function: function (...args) {
+        cspCheckEval(w.document);
         // Validate and convert parameters via the native constructor without
         // executing the unrewritten body.
         if (ttEnforced()) {
@@ -200,6 +203,7 @@
         if (callee !== childDynamicEval && callee !== root.eval) return Reflect.apply(callee, undefined, list);
         const arg = list[0];
         const src = ttEvalSource(arg, 'eval', childTT);
+        if (src !== null) cspCheckEval(w.document, arg);
         if (src === null) return arg;
         const directive = childStrictRE.test(src);
         if (!childEval || (globalSite === 1 && !callerStrict && !directive)) return childEvalText(src);

@@ -587,12 +587,27 @@
     const locGet = p => () => new URL(virtualURL.href)[p];
     for (const p of ['href','protocol','host','hostname','port','pathname','search','hash','origin']) defineAccessor(w.Location && w.Location.prototype, p, locGet(p), p === 'href' ? v => { setVirtualLocation(v); } : p === 'hash' ? v => { updateVirtualHash(v); } : undefined);
     define(w.Location && w.Location.prototype, 'toString', function(){ return virtualURL.href; });
-    defineAccessor(w.Document && w.Document.prototype, 'URL', () => virtualURL.href);
-    defineAccessor(w.Document && w.Document.prototype, 'documentURI', () => virtualURL.href);
+    // An `about:` document (a blank or srcdoc frame, `createHTMLDocument()`) is not at the embedder's virtual URL: it reports its own, and its
+    // referrer is the document that embeds it.
+    const nativeDocURL = Native.documentURLDesc && Native.documentURLDesc.get;
+    const nativeDocReferrer = (nativeReflectGOPD(w.Document && w.Document.prototype, 'referrer') || {}).get;
+    const aboutURLOf = doc => { try { const n = nativeDocURL && Reflect.apply(nativeDocURL, doc, []); return typeof n === 'string' && /^about:/i.test(n) ? n : null; } catch { return null; } };
+    // The engine hands the embedder's physical URL, cut to its origin when the referrer policy says so: the same cut of the virtual URL.
+    const aboutReferrerOf = doc => {
+      try {
+        const raw = nativeDocReferrer ? Reflect.apply(nativeDocReferrer, doc, []) : '';
+        if (!raw) return '';
+        const u = new Native.URL(raw);
+        if (u.origin !== proxyOrigin) return raw;
+        return u.pathname === '/' && !u.search ? virtualURL.origin + '/' : virtualURL.href.split('#')[0];
+      } catch { return ''; }
+    };
+    defineAccessor(w.Document && w.Document.prototype, 'URL', function () { const a = aboutURLOf(this); return a !== null ? a : virtualURL.href; });
+    defineAccessor(w.Document && w.Document.prototype, 'documentURI', function () { const a = aboutURLOf(this); return a !== null ? a : virtualURL.href; });
     // Define `baseURI` on `Node.prototype` where the DOM IDL declares it, rather than
     // adding an own property to `Document.prototype`.
     defineAccessor(w.Node && w.Node.prototype, 'baseURI', () => baseURL);
-    defineAccessor(w.Document && w.Document.prototype, 'referrer', () => virtualReferrer());
+    defineAccessor(w.Document && w.Document.prototype, 'referrer', function () { return aboutURLOf(this) !== null ? aboutReferrerOf(this) : virtualReferrer(); });
     defineAccessor(w.Document && w.Document.prototype, 'cookie', () => { if (opaqueDocument) throw opaqueDenied("Failed to read the 'cookie' property from 'Document'"); return documentCookieString(); }, v => { if (opaqueDocument) throw opaqueDenied("Failed to set the 'cookie' property on 'Document'"); const s = String(v); setDocumentCookie(s); sendCookieSet(s); });
     installURLProp(w.HTMLAnchorElement && w.HTMLAnchorElement.prototype, 'href');
     installURLProp(w.HTMLAreaElement && w.HTMLAreaElement.prototype, 'href');

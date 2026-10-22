@@ -172,23 +172,29 @@
     function installFrameProp(proto, prop) {
       const d = Object.getOwnPropertyDescriptor(proto, prop);
       if (!d || !d.set) return;
+      // A native attribute accessor rejects a receiver of the wrong type with the engine's own "Illegal invocation" and is no constructor, so it
+      // has no `prototype`: these are made as accessors of an object literal, and brand-check first, handing a wrong receiver to the native
+      // accessor, which throws it.
+      const isFrame = el => { try { Reflect.apply(d.get, el, []); return true; } catch { return false; } };
+      const holder = {
+        get [prop]() {
+          if (!isFrame(this)) return Reflect.apply(d.get, this, []);
+          if (prop === 'srcdoc') return srcdocMeta.has(this) ? srcdocMeta.get(this) : Reflect.apply(d.get, this, []);
+          const raw = Native.getAttribute.call(this, prop);
+          if (raw === null) return '';
+          const known = urlMeta.get(this) || Native.getAttribute.call(this, 'data-zp-target-url');
+          return known || deproxyURL(Reflect.apply(d.get, this, []));
+        },
+        set [prop](v) {
+          if (!isFrame(this)) return Reflect.apply(d.set, this, arguments);
+          if (prop === 'srcdoc') setInjectedSrcdoc(this, ttCompliant('HTML', 'HTMLIFrameElement srcdoc', v, '', ttOfNode(this)));
+          else this.setAttribute(prop, v);
+          instrumentIframe(this);
+        },
+      };
+      const own = Object.getOwnPropertyDescriptor(holder, prop);
       try {
-        defineMasked(proto, prop, {
-          get: prop === 'srcdoc'
-            ? function () { return srcdocMeta.has(this) ? srcdocMeta.get(this) : d.get.call(this); }
-            : function () {
-              const raw = Native.getAttribute.call(this, prop);
-              if (raw === null) return '';
-              const known = urlMeta.get(this) || Native.getAttribute.call(this, 'data-zp-target-url');
-              return known || deproxyURL(d.get.call(this));
-            },
-          set(v) {
-            if (prop === 'srcdoc') setInjectedSrcdoc(this, ttCompliant('HTML', 'HTMLIFrameElement srcdoc', v, '', ttOfNode(this)));
-            else this.setAttribute(prop, v);
-            instrumentIframe(this);
-          },
-          configurable: false
-        });
+        defineMasked(proto, prop, { get: own.get, set: own.set, configurable: false });
         const installed = Object.getOwnPropertyDescriptor(proto, prop);
         if (installed && typeof installed.get === 'function' && installed.get !== d.get) maskAccessorFn(installed.get, 'get', prop);
         if (installed && typeof installed.set === 'function') maskAccessorFn(installed.set, 'set', prop);

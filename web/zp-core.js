@@ -393,6 +393,26 @@
   function trustedTypesPolicies(header) {
     return String(header || '').split(',').map(trustedTypesDirectives).filter(d => d.length).map(d => d.join('; '));
   }
+  // The first policy of a Content-Security-Policy value (a header's policies are separated by commas; a `<meta>` holds one) that refuses
+  // to evaluate strings, or '' when none does. Scripts fall under `script-src`, else `default-src`; such a directive must list `'unsafe-eval'`.
+  // The proxy's own policy has to allow eval for the membrane, so the page-visible refusal is made from the target's policy.
+  function evalBlockingPolicy(value) {
+    for (const policy of String(value || '').split(',')) {
+      const directives = newMap();
+      for (const segment of policy.split(';')) {
+        const parts = segment.trim().split(/\s+/).filter(Boolean);
+        const name = (parts.shift() || '').toLowerCase();
+        if (name && !directives.has(name)) directives.set(name, parts.map(p => p.toLowerCase()));
+      }
+      const sources = directives.get('script-src') || directives.get('default-src');
+      if (sources && !sources.includes("'unsafe-eval'")) return policy.trim();
+    }
+    return '';
+  }
+  // The name of the directive that decides eval in `policy` (see evalBlockingPolicy).
+  function evalBlockingDirective(policy) {
+    return /(^|;)\s*script-src(\s|;|$)/i.test(String(policy || '')) ? 'script-src' : 'default-src';
+  }
   // Whether the header value enforces Trusted Types on script sinks.
   function requiresTrustedTypes(header) {
     return trustedTypesPolicies(header).some(p => /(^|;\s*)require-trusted-types-for\b[^;]*'script'/i.test(p));
@@ -581,7 +601,7 @@
     Object.defineProperty(w, '__zp_bridge_factory', { value: factory, configurable: true, enumerable: false, writable: true });
     return null;
   }
-  const api = Object.freeze({ CONTROL_PREFIX, ASSET_PREFIX, TARGET_USER_AGENT, TARGET_SEC_CH_UA, TARGET_CHROME_FULL_VERSION, TARGET_UA_HIGH_ENTROPY, uaHighEntropyValues, clientEnvOf, chromeBrandList, bytesToBase64Url, base64UrlToBytes, webTransportGatewayRequest, relayOnlyRTCConfiguration, ENVELOPE_MIME,encodeEnvelope, decodeEnvelope, encryptShareURL, decryptShareURL, makeShareURL, makeSharePath, makeShareFragment, defaultRelayServer, relayServersForShare, isSharePath, shareRouteKey, controlPath, assetPath, assetURL, versionedAsset, apiPath, errorPath, INTERNAL_ASSET_SCRIPTS, isInternalAssetScriptPath, isInternalPath, canonicalTargetURL, canonicalWebSocketURL, encodeTargetURL, decodeTargetURL, randomId, fixedCSP, filterMetaCSP, parseRelayServersFromFragment, normalizeRelayServers, isLoopbackHost, registrableDomain, siteOf, sameSite, siteFrameCapable, siteFrameOrigin, siteFrameSource, TT_POLICY_NAME, trustedTypesDirectives, trustedTypesPolicies, requiresTrustedTypes, redirectMethod, createFetchResponseAdapter, configureBridge, ERRORS, errorInfo, MSG });
+  const api = Object.freeze({ CONTROL_PREFIX, ASSET_PREFIX, TARGET_USER_AGENT, TARGET_SEC_CH_UA, TARGET_CHROME_FULL_VERSION, TARGET_UA_HIGH_ENTROPY, uaHighEntropyValues, clientEnvOf, chromeBrandList, bytesToBase64Url, base64UrlToBytes, webTransportGatewayRequest, relayOnlyRTCConfiguration, ENVELOPE_MIME,encodeEnvelope, decodeEnvelope, encryptShareURL, decryptShareURL, makeShareURL, makeSharePath, makeShareFragment, defaultRelayServer, relayServersForShare, isSharePath, shareRouteKey, controlPath, assetPath, assetURL, versionedAsset, apiPath, errorPath, INTERNAL_ASSET_SCRIPTS, isInternalAssetScriptPath, isInternalPath, canonicalTargetURL, canonicalWebSocketURL, encodeTargetURL, decodeTargetURL, randomId, fixedCSP, filterMetaCSP, parseRelayServersFromFragment, normalizeRelayServers, isLoopbackHost, registrableDomain, siteOf, sameSite, siteFrameCapable, siteFrameOrigin, siteFrameSource, TT_POLICY_NAME, trustedTypesDirectives, trustedTypesPolicies, requiresTrustedTypes, evalBlockingPolicy, evalBlockingDirective, redirectMethod, createFetchResponseAdapter, configureBridge, ERRORS, errorInfo, MSG });
   // `configurable: true` allows the page prelude to delete `globalThis.ZP` after capturing it into a closure binding,
   // preventing `Object.getOwnPropertyNames(window)` from exposing `ZP` to target scripts.
   Object.defineProperty(globalThis, 'ZP', { value: api, enumerable: false, configurable: true, writable: false });

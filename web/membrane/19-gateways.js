@@ -70,12 +70,16 @@
   // genuine native RTCPeerConnection while ICE configuration is forced through
   // `ZP.relayOnlyRTCConfiguration` (`boot.rtcICEServers` and
   // `iceTransportPolicy: 'relay'`), so only relay candidates are gathered and
-  // DTLS/SRTP stay end-to-end. Without TURN credentials, falls back to the
-  // virtual gateway stub.
+  // DTLS/SRTP stay end-to-end. Without TURN credentials the connection is
+  // configured with no ICE servers at all, so it gathers no candidate and sends
+  // no packet: `createOffer`, `createDataChannel` and the rest of the local API
+  // work as in a browser (a page that builds an offer to read its codecs gets
+  // one) but nothing connects. The virtual gateway stub remains for a browser
+  // without `RTCPeerConnection`.
   function makeRTCPeerConnectionConstructor(w, name) {
     const NativeRTC = w.RTCPeerConnection || w.webkitRTCPeerConnection;
     const ice = (boot && Array.isArray(boot.rtcICEServers)) ? boot.rtcICEServers.filter(s => s && s.urls) : [];
-    if (typeof NativeRTC !== 'function' || !ice.length) {
+    if (typeof NativeRTC !== 'function') {
       return makeVirtualGateway(name, { code: 'RTC_GATEWAY_UNAVAILABLE', kind: 'WebRTC' });
     }
     // Preserve the page-supplied configuration so `getConfiguration()` returns

@@ -50,7 +50,15 @@
   const ttMake = (create, s) => { const p = ttPolicy(); return p ? nativeApply(create, p, [s]) : s; };
   // A Trusted* value for a string the membrane built. The native sink accepts it whether or not the document enforces Trusted Types.
   function ttHTML(s) { return ttMake(Native.ttCreateHTML, s); }
-  function ttScript(s) { return ttMake(Native.ttCreateScript, s); }
+  // The Trusted scripts the membrane made for its own use carry this mark: running them is not the page's string evaluation (see cspCheckEval).
+  // It is a registry symbol because a frame the membrane contains and the membrane booted inside that frame are separate instances that share
+  // the window, and each must recognize the other's scripts.
+  const TT_OWN_SCRIPT = Symbol.for('zeroproxy.ownScript');
+  function ttScript(s) {
+    const v = ttMake(Native.ttCreateScript, s);
+    if (v !== null && typeof v === 'object') Reflect.defineProperty(v, TT_OWN_SCRIPT, { value: true });
+    return v;
+  }
   function ttScriptURL(s) { return ttMake(Native.ttCreateScriptURL, s); }
   // Whether the document enforces Trusted Types on script sinks: from the response header (the boot config) or from a `<meta>` policy,
   // re-read only when the number of `<meta>` elements changes.
@@ -120,7 +128,10 @@
   // `Reflect.construct(Function, args)` for source the membrane built itself. Chrome's Function constructor takes no Trusted* arguments, so in a
   // document that enforces Trusted Types the function is made by evaluating the source the constructor would have compiled as a TrustedScript.
   function ttFunction(args, evalFn, FunctionCtor) {
-    if (!ttEnforced() || !ttPolicy()) return Reflect.construct(FunctionCtor || Native.FunctionCtor, args);
+    if (!ttEnforced() || !ttPolicy()) {
+      cspInternal++;
+      try { return Reflect.construct(FunctionCtor || Native.FunctionCtor, args); } finally { cspInternal--; }
+    }
     const parts = new Array(args.length);
     for (let i = 0; i < args.length; i++) parts[i] = String(args[i]);
     const body = parts.length ? parts[parts.length - 1] : '';
@@ -182,4 +193,81 @@
   function ttEvalSource(x, sink, tt) {
     if (typeof x === 'string') return ttCompliant('Script', sink || 'eval', x, '', tt);
     return ttIsTrusted('Script', x) ? ttText('Script', x) : null;
+  }
+
+  // String evaluation under the target's Content-Security-Policy (see ZP.evalBlockingPolicy). The proxy's own policy has to allow `eval` for
+  // the membrane, so a target policy that refuses it (a `script-src` without 'unsafe-eval') is enforced here instead: for the policy of the
+  // response (the boot config), for every `<meta>` policy of the document (the original text the transformer kept), and, for a document
+  // with no response of its own (`about:blank`, `srcdoc`), for those of its embedder. A refusal is the engine's: an `EvalError` and a
+  // `securitypolicyviolation` event at the document.
+  const cspEvalMetas = newWeakMap();
+  const cspRefusals = newWeakSet();
+  function cspEvalBlockOfMetas(doc) {
+    let rec = cspEvalMetas.get(doc);
+    if (!rec) { rec = { list: nativeApply(Native.documentGetElementsByTagName, doc, ['meta']), count: -1, block: '' }; cspEvalMetas.set(doc, rec); }
+    const n = rec.list.length;
+    if (n === rec.count) return rec.block;
+    rec.count = n;
+    rec.block = '';
+    for (let i = 0; i < n && !rec.block; i++) {
+      const m = rec.list[i];
+      const equiv = nativeApply(Native.getAttribute, m, ['http-equiv']);
+      if (!equiv || !/^content-security-policy$/i.test(equiv)) continue;
+      const original = nativeApply(Native.getAttribute, m, ['data-zp-blocked-content']);
+      rec.block = ZP.evalBlockingPolicy(original !== null ? original : nativeApply(Native.getAttribute, m, ['content']));
+    }
+    return rec.block;
+  }
+  // The policy text that refuses string evaluation in `doc`, or ''.
+  function cspEvalBlock(doc) {
+    if (typeof boot.cspEvalBlock === 'string' && boot.cspEvalBlock) return boot.cspEvalBlock;
+    try {
+      if (!doc || !Native.documentGetElementsByTagName) return '';
+      let block = cspEvalBlockOfMetas(doc);
+      if (block || doc === root.document) return block;
+      for (let d = doc, hops = 0; d && !block && hops < 8; hops++) {
+        if (!/^about:/i.test(String(nativeApply(Native.documentURLDesc.get, d, [])))) break;
+        const frame = d.defaultView && d.defaultView.frameElement;
+        d = frame && frame.ownerDocument;
+        if (d) block = cspEvalBlockOfMetas(d);
+      }
+      return block;
+    } catch { return ''; }
+  }
+  function cspReportEval(doc, policy) {
+    try {
+      const win = (doc && doc.defaultView) || root;
+      const Event_ = win.SecurityPolicyViolationEvent;
+      if (typeof Event_ !== 'function') return;
+      const directive = ZP.evalBlockingDirective(policy);
+      const init = {
+        bubbles: true, composed: true, blockedURI: 'eval', columnNumber: 0, lineNumber: 0, sourceFile: '', statusCode: 200, sample: '', referrer: '',
+        disposition: 'enforce', effectiveDirective: 'script-src', violatedDirective: directive, originalPolicy: policy,
+        documentURI: doc === root.document ? virtualURL.href : String(nativeApply(Native.documentURLDesc.get, doc, [])),
+      };
+      const send = () => Native.setTimeout(() => { try { doc.dispatchEvent(new Event_('securitypolicyviolation', init)); } catch {} }, 0);
+      // The engine reports a violation as a task of its own, which a document still loading hands out after its load: an embedder that
+      // listens from its frame's `load` event hears the violations of the frame's scripts.
+      if (doc.readyState !== 'complete' && win.addEventListener) win.addEventListener('load', send, { once: true });
+      else send();
+    } catch {}
+  }
+  // Throws what the engine throws when the target's policy refuses to evaluate a string in `doc` (`arg` is what was given to `eval`; none for
+  // `Function`). With Trusted Types required the engine words it as a Trusted Types refusal.
+  let cspInternal = 0;
+  function cspCheckEval(doc, arg) {
+    // The membrane evaluates its own scripts through the same natives (a frame it contains may hold the page-facing `eval` already): those it
+    // made with its own Trusted Types policy, or while building a function, are none of the page's string evaluation. Without that policy it
+    // cannot tell its calls from the page's, and enforces nothing.
+    if (cspInternal > 0 || (arg !== null && typeof arg === 'object' && arg[TT_OWN_SCRIPT] === true) || !ttPolicy()) return;
+    const policy = cspEvalBlock(doc);
+    if (!policy) return;
+    cspReportEval(doc, policy);
+    const directive = ZP.evalBlockingDirective(policy);
+    const text = policy.split(';').map(s => s.trim()).find(s => s.toLowerCase().startsWith(directive)) || policy;
+    const err = ttEnforced()
+      ? new EvalError("Evaluating a string as JavaScript violates this document's Trusted Type assignment requirements.")
+      : new EvalError("Evaluating a string as JavaScript violates the following Content Security Policy directive because 'unsafe-eval' is not an allowed source of script: " + text + "\".\n");
+    cspRefusals.add(err);
+    throw err;
   }

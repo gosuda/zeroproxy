@@ -923,14 +923,31 @@
       if (relay) Native.setAttribute.call(node, attrName, relay);
     }
   }
-  function srcdocPrelude() { return '<script src="' + ZP.assetURL('zp-core.js') + '"><\/script><script src="' + ZP.assetURL('zp-page-bundle.js') + '"><\/script><script id="__zp-boot" type="application/json">' + bootJSON() + '<\/script><script src="' + ZP.assetURL('runtime-prelude.js') + '"><\/script>'; }
+  function srcdocPrelude(extraBoot) { return '<script src="' + ZP.assetURL('zp-core.js') + '"><\/script><script src="' + ZP.assetURL('zp-page-bundle.js') + '"><\/script><script id="__zp-boot" type="application/json">' + bootJSON(extraBoot) + '<\/script><script src="' + ZP.assetURL('runtime-prelude.js') + '"><\/script>'; }
+  // The policy that refuses string evaluation for a srcdoc document: the one it inherits from this document, else one of its own `<meta>` tags.
+  // The membrane booted inside the frame cannot read the originals the transformer keeps (the natives it captured are this realm's wrappers),
+  // so it is told here, in its boot config.
+  function srcdocEvalBlock(markup) {
+    const inherited = cspEvalBlock(root.document);
+    if (inherited) return inherited;
+    for (const tag of String(markup).match(/<meta\b[^>]*>/gi) || []) {
+      if (!/http-equiv\s*=\s*["']?content-security-policy["'\s>\/]/i.test(tag)) continue;
+      const m = /\bcontent\s*=\s*(?:"([^"]*)"|'([^']*)')/i.exec(tag);
+      if (!m) continue;
+      const value = (m[1] !== undefined ? m[1] : m[2]).replace(/&#0*39;|&#x0*27;|&apos;/gi, "'").replace(/&quot;/gi, '"').replace(/&amp;/gi, '&');
+      const block = ZP.evalBlockingPolicy(value);
+      if (block) return block;
+    }
+    return '';
+  }
   // Keep any leading doctype ahead of the injected prelude scripts so the srcdoc frame does not fall into quirks mode.
   function injectSrcdoc(s) {
     const markup = forSrcdocMarkup(() => transformHTML(String(s), { document: true }));
     const doctype = /^<!DOCTYPE[^>]*>/i.exec(markup);
-    return (doctype ? doctype[0] : '') + srcdocPrelude() + (doctype ? markup.slice(doctype[0].length) : markup);
+    const block = srcdocEvalBlock(s);
+    return (doctype ? doctype[0] : '') + srcdocPrelude(block ? { cspEvalBlock: block } : null) + (doctype ? markup.slice(doctype[0].length) : markup);
   }
-  function bootJSON() { return JSON.stringify(Object.assign({}, boot, { servers: activeServers, proxyOrigin })).replace(/[<>&]/g, c => c === '<' ? '\\u003c' : c === '>' ? '\\u003e' : '\\u0026'); }
+  function bootJSON(extra) { return JSON.stringify(Object.assign({}, boot, { servers: activeServers, proxyOrigin }, extra)).replace(/[<>&]/g, c => c === '<' ? '\\u003c' : c === '>' ? '\\u003e' : '\\u0026'); }
   function rewriteEventAttribute(source) { return 'return ' + ZP_EVENT_CALL_HEAD + 'this,event,' + JSON.stringify(String(source || '')).replace(/</g, '\\u003c') + ')'; }
   function syncBaseElement(node) {
     if (!node) return;

@@ -2753,6 +2753,96 @@ function createTargetServer(requests, pendingResponses) {
       </script></body>`);
       return;
     }
+    if (url.pathname === '/xcspeval') {
+      // A target policy that refuses string evaluation (no 'unsafe-eval'): `eval`, `Function` and a string timer are refused as the engine refuses them,
+      // and the document hears of each as a `securitypolicyviolation` event. The proxy's own policy has to allow eval for the membrane.
+      const variant = url.searchParams.get('v') || 'header';
+      const policy = "script-src 'self' 'unsafe-inline'";
+      const headers = { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' };
+      if (variant === 'header') headers['Content-Security-Policy'] = policy;
+      if (variant === 'allowed') headers['Content-Security-Policy'] = policy + " 'unsafe-eval'";
+      res.writeHead(200, headers);
+      const meta = variant === 'meta' ? `<meta http-equiv="content-security-policy" content="${policy}">` : '';
+      res.end(`<!doctype html>${meta}<title>cspeval</title><body><script>
+var out = { events: [] };
+document.addEventListener('securitypolicyviolation', function (e) { out.events.push(e.violatedDirective + '|' + e.effectiveDirective + '|' + e.blockedURI + '|' + e.disposition); });
+var T = function (k, f) { try { out[k] = String(f()); } catch (e) { out[k] = e.name + ': ' + e.message; } };
+T('eval', function () { return eval('1+1'); });
+T('directScope', function () { var local = 5; return eval('local + 1'); });
+T('indirect', function () { return (0, eval)('2+1'); });
+T('Function', function () { return new Function('return 4')(); });
+T('FunctionCall', function () { return Function('a', 'return a * 2')(4); });
+T('AsyncFunction', function () { return Object.getPrototypeOf(async function () {}).constructor('return 1').name; });
+T('functionObject', function () { return typeof eval + ',' + typeof Function; });
+T('timer', function () { setTimeout('window.__timerRan = 1', 0); return 'scheduled'; });
+T('notAString', function () { return eval(42); });
+setTimeout(function () { out.timerRan = String(window.__timerRan); }, 150);
+setTimeout(function () { window.__xcsp = out; }, 400);
+<\/script></body>`);
+      return;
+    }
+    if (url.pathname === '/xcspsrcdoc') {
+      // The same refusal in a frame whose policy is its own `<meta>`: called from the embedder and from inside the frame.
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      const child = `<meta http-equiv="content-security-policy" content="script-src 'unsafe-inline'"><script>window.__inside = (function () { var r = {}; try { r.eval = String(eval('1+1')); } catch (e) { r.eval = e.name; } try { r.fn = String(new Function('return 2')()); } catch (e) { r.fn = e.name; } return JSON.stringify(r); })();<\/script>`;
+      res.end(`<!doctype html><title>cspsrcdoc</title><body><script>
+var out = { events: [] };
+var T = function (k, f) { try { out[k] = String(f()); } catch (e) { out[k] = e.name + ': ' + e.message; } };
+var f = document.createElement('iframe');
+f.setAttribute('sandbox', 'allow-same-origin allow-scripts');
+f.srcdoc = ${JSON.stringify(child).replace(/</g, '\\u003c')};
+f.addEventListener('load', function () {
+  var cw = f.contentWindow, cd = f.contentDocument;
+  cd.addEventListener('securitypolicyviolation', function (e) { out.events.push(e.violatedDirective + '|' + e.effectiveDirective + '|' + e.blockedURI + '|' + e.disposition); });
+  T('inside', function () { return cw.__inside; });
+  T('eval', function () { return cw.eval('1+1'); });
+  T('indirect', function () { return (0, cw.eval)('2+1'); });
+  T('Function', function () { return new cw.Function('return 4')(); });
+  T('own', function () { return eval('1+1'); });
+  setTimeout(function () { window.__xcsp = out; }, 300);
+});
+document.body.appendChild(f);
+<\/script></body>`);
+      return;
+    }
+    if (url.pathname === '/xframes') {
+      // How a blank or srcdoc frame reports itself, and the shape of the iframe accessors a page can inspect.
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(`<!doctype html><title>frames</title><body><script>
+var out = {};
+var T = function (k, f) { try { var v = f(); out[k] = v === undefined ? 'undefined' : String(v); } catch (e) { out[k] = 'threw ' + e.name + ': ' + e.message; } };
+var report = function (label, f) {
+  var cw = f.contentWindow, cd = f.contentDocument;
+  T(label + '.href', function () { return cw.location.href; });
+  T(label + '.parts', function () { return [cw.location.origin, cw.location.protocol, cw.location.host, cw.location.pathname, String(cw.location)].join(' ; '); });
+  T(label + '.document', function () { return [cd.URL, cd.documentURI, cd.baseURI === document.baseURI].join(' ; '); });
+  T(label + '.referrer', function () { return cd.referrer; });
+  T(label + '.origin', function () { return cw.origin === location.origin; });
+};
+var blank = document.createElement('iframe'); document.body.appendChild(blank);
+report('blank', blank);
+var made = document.implementation.createHTMLDocument('x');
+T('createHTMLDocument', function () { return [made.URL, made.documentURI, made.referrer].join(' ; '); });
+var doc = document.createElement('iframe'); doc.srcdoc = '<p>x</p>';
+doc.addEventListener('load', function () {
+  report('srcdoc', doc);
+  var P = HTMLIFrameElement.prototype;
+  ['src', 'srcdoc'].forEach(function (k) {
+    var d = Object.getOwnPropertyDescriptor(P, k);
+    T(k + '.keys', function () { return Reflect.ownKeys(d.get).join(',') + ' | ' + Reflect.ownKeys(d.set).join(','); });
+    T(k + '.construct', function () { try { new d.get(); return 'constructed'; } catch (e) { return e.name + ': ' + e.message; } });
+    [['null', null], ['undefined', undefined], ['number', 5], ['object', {}], ['div', document.createElement('div')], ['window', window]].forEach(function (r) {
+      T(k + '.getOn.' + r[0], function () { return d.get.call(r[1]); });
+      T(k + '.setOn.' + r[0], function () { return d.set.call(r[1], 'x'); });
+    });
+    T(k + '.names', function () { return d.get.name + ',' + d.set.name + ',' + d.get.length + ',' + d.set.length; });
+  });
+  window.__xframes = out;
+});
+document.body.appendChild(doc);
+<\/script></body>`);
+      return;
+    }
     if (url.pathname === '/xstack2') {
       // Exact stacks (line and column kept) for the kinds of code a script compiles at run time.
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
@@ -6063,21 +6153,30 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
 
   await t.test('synchronous and navigated iframe isolation', async () => {
   const iframeIsolation = await page.evaluate(async target => {
-    const blockedChannel = win => {
+    // A page's RTCPeerConnection works locally but is contained: whatever ICE servers and policy it asks for, it gathers no candidate, so
+    // nothing leaves the browser and nothing can connect.
+    const blockedChannel = async win => {
       let pc;
-      try { pc = new win.RTCPeerConnection(); pc.createDataChannel('escape-probe'); return 'allowed'; }
-      catch (err) { return err.name; }
+      try {
+        pc = new win.RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }], iceTransportPolicy: 'all' });
+        let candidates = 0;
+        pc.addEventListener('icecandidate', e => { if (e.candidate) candidates++; });
+        pc.createDataChannel('escape-probe');
+        await pc.setLocalDescription(await pc.createOffer());
+        await new Promise(r => setTimeout(r, 1500));
+        return candidates === 0 ? 'contained' : 'leak:' + candidates;
+      } catch (err) { return err.name; }
       finally { if (pc) pc.close(); }
     };
 
     const sync = document.createElement('iframe');
     document.body.appendChild(sync);
-    const syncRTC = blockedChannel(sync.contentWindow);
-    const docRTC = blockedChannel(sync.contentDocument.defaultView);
+    const syncRTC = await blockedChannel(sync.contentWindow);
+    const docRTC = await blockedChannel(sync.contentDocument.defaultView);
 
     const modern = document.createElement('iframe');
     document.body.append(modern);
-    const modernRTC = blockedChannel(modern.contentWindow);
+    const modernRTC = await blockedChannel(modern.contentWindow);
     const ws = new modern.contentWindow.WebSocket('ws://evil.example/socket');
     const websocketURL = ws.url;
     const childCanvasMask = modern.contentWindow.HTMLCanvasElement.prototype.toDataURL.toString();
@@ -6116,9 +6215,9 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     observed.remove();
     return { syncRTC, docRTC, modernRTC, websocketURL, childCanvasMask, childFunctionHref, frameTitle, visibleSrc, visibleAttribute, visibleNodeValue, removedSrc, attachedNode, replacedNode };
   }, `http://${targetHost}:${targetPort}/next`);
-  assert.equal(iframeIsolation.syncRTC, 'NotSupportedError');
-  assert.equal(iframeIsolation.docRTC, 'NotSupportedError');
-  assert.equal(iframeIsolation.modernRTC, 'NotSupportedError');
+  assert.equal(iframeIsolation.syncRTC, 'contained');
+  assert.equal(iframeIsolation.docRTC, 'contained');
+  assert.equal(iframeIsolation.modernRTC, 'contained');
   assert.equal(iframeIsolation.websocketURL, 'ws://evil.example/socket');
   assert.equal(iframeIsolation.frameTitle, 'E2E Next');
   assert.equal(iframeIsolation.visibleSrc, `http://${targetHost}:${targetPort}/next`);
@@ -6128,7 +6227,8 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
   assert.equal(iframeIsolation.attachedNode, true);
   assert.equal(iframeIsolation.replacedNode, true);
   assert.equal(iframeIsolation.childCanvasMask, 'function toDataURL() { [native code] }');
-  assert.equal(iframeIsolation.childFunctionHref, `http://${targetHost}:${targetPort}/#compound-tail`);
+  // A blank frame is at `about:blank`, as natively; it is the page that is at the virtual address.
+  assert.equal(iframeIsolation.childFunctionHref, 'about:blank');
   });
 
   await t.test('child frame messaging preserves parent navigation', async () => {
@@ -6801,13 +6901,22 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
         catch (err) { return 'gateway-stub:' + (err && err.name || String(err)); }
       } catch (err) { return 'throw:' + (err && err.name || String(err)); }
     })();
-    out.rtcPeerConnection = (() => {
+    out.rtcPeerConnection = await (async () => {
       try {
         const RTC = __zp_get(globalThis, 'RTCPeerConnection');
         if (typeof RTC !== 'function') return 'absent';
-        const pc = new RTC();
-        try { pc.createDataChannel('chan'); return 'allowed:dc'; }
-        catch (err) { return 'gateway-stub:' + (err && err.name || String(err)); }
+        // The page asks for a STUN server and every candidate type, and tries to widen the policy again once the connection exists.
+        const pc = new RTC({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }], iceTransportPolicy: 'all' });
+        let candidates = 0;
+        pc.addEventListener('icecandidate', e => { if (e.candidate) candidates++; });
+        try {
+          pc.setConfiguration({ iceServers: [{ urls: 'stun:stun.cloudflare.com:3478' }], iceTransportPolicy: 'all' });
+          pc.createDataChannel('chan');
+          await pc.setLocalDescription(await pc.createOffer());
+          await new Promise(r => setTimeout(r, 1500));
+          return candidates === 0 ? 'contained:0' : 'allowed:' + candidates;
+        } catch (err) { return 'gateway-stub:' + (err && err.name || String(err)); }
+        finally { pc.close(); }
       } catch (err) { return 'throw:' + (err && err.name || String(err)); }
     })();
 
@@ -6857,7 +6966,7 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
   await t.test('cachesAPI', () => { assert.equal(escapeMatrix.cachesAPI, 'isolated', `caches leak: ${escapeMatrix.cachesAPI}`); });
   await t.test('performanceTimeOrigin', () => { assert.equal(escapeMatrix.performanceTimeOrigin, 'numeric', `timeOrigin: ${escapeMatrix.performanceTimeOrigin}`); });
   await t.test('webTransport', () => { assert.match(escapeMatrix.webTransport, /^(?:gateway-stub|absent)/, `WebTransport leak: ${escapeMatrix.webTransport}`); });
-  await t.test('rtcPeerConnection', () => { assert.match(escapeMatrix.rtcPeerConnection, /^(?:gateway-stub|absent)/, `RTCPeerConnection leak: ${escapeMatrix.rtcPeerConnection}`); });
+  await t.test('rtcPeerConnection', () => { assert.match(escapeMatrix.rtcPeerConnection, /^(?:gateway-stub|absent|contained:0)/, `RTCPeerConnection leak: ${escapeMatrix.rtcPeerConnection}`); });
   });
 
   await t.test('A-section escapes stay virtual or fail closed', async t => {
@@ -6890,7 +6999,7 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
       assert.equal(probes.lookupGetter, virtual, `__lookupGetter__: ${probes.lookupGetter}`);
     });
     await t.test('iframe contentDocument.location exposes no proxy URL', () => {
-      assert.match(probes.contentDocLocation, virtualURLRe, `contentDocument.location: ${probes.contentDocLocation}`);
+      assert.equal(probes.contentDocLocation, 'about:blank', `contentDocument.location: ${probes.contentDocLocation}`);
       assert.ok(noProxy(probes.contentDocLocation), `contentDocument.location leaked proxy: ${probes.contentDocLocation}`);
     });
     await t.test('navigation.navigate refuses javascript:', () => {
@@ -7001,7 +7110,7 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     await t.test('srcdoc loads with injected prelude', () => {
       assert.equal(probes.srcdocLoad, 'v:inner sd', `srcdocLoad: ${probes.srcdocLoad}`);
       assert.equal(probes.srcdocScript, 'v:sd-ran', `srcdocScript: ${probes.srcdocScript}`);
-      assert.equal(probes.srcdocLocation, `v:${targetBase}/iframe-probes`, `srcdocLocation: ${probes.srcdocLocation}`);
+      assert.equal(probes.srcdocLocation, 'v:about:srcdoc', `srcdocLocation: ${probes.srcdocLocation}`);
     });
     await t.test('blob: iframe src is fail-closed', () => {
       assert.match(probes.blobBlocked, /^v:contained:/, `blobBlocked: ${probes.blobBlocked}`);
@@ -7174,10 +7283,21 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     assert.equal(new URL(page.url()).origin, proxyOrigin, `page escaped proxy: ${page.url()}`);
   });
 
+  // `page.waitForFunction` compiles its predicate from a string, which a document whose policy refuses string evaluation refuses, as the
+  // engine would (an earlier suite leaves such a `<meta>` policy in this page until it navigates): poll with `evaluate`, which does not.
+  const pollPage = async (p, predicate, { timeout = 30000, polling = 100 } = {}) => {
+    const end = Date.now() + timeout;
+    for (;;) {
+      try { if (await p.evaluate(predicate)) return; } catch { /* the page is navigating */ }
+      if (Date.now() > end) throw new Error('pollPage timed out');
+      await new Promise(r => setTimeout(r, polling));
+    }
+  };
+
   await t.test('dynamic code suite', async t => {
     await page.evaluate(u => { __zp_get(globalThis, 'location').href = u; }, `http://${targetHost}:${targetPort}/dyn-probes`);
     try {
-      await page.waitForFunction(() => window.__dynProbes && window.__dynProbes.done, { timeout: 30000 });
+      await pollPage(page, () => window.__dynProbes && window.__dynProbes.done, { timeout: 30000 });
     } catch (e) {
       console.log('dyn probes wait failed');
       throw e;
@@ -7278,7 +7398,7 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
   await t.test('perf suite', async t => {
     await page.evaluate(u => { __zp_get(globalThis, 'location').href = u; }, `http://${targetHost}:${targetPort}/perf-probes`);
     try {
-      await page.waitForFunction(() => window.__perfProbes && window.__perfProbes.done, { timeout: 60000 });
+      await pollPage(page, () => window.__perfProbes && window.__perfProbes.done, { timeout: 60000 });
     } catch (e) {
       console.log('perf probes wait failed');
       throw e;
@@ -8227,6 +8347,35 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     assert.deepEqual(stale, [], 'known gaps that now match: remove them from the list');
   });
 
+  // The proxy's own policy has to allow eval for the membrane, so the target's refusal of it is made by the membrane.
+  await t.test('a policy that refuses string evaluation refuses it here too: header, meta, and a srcdoc frame (matches native)', async () => {
+    for (const variant of ['header', 'meta', 'allowed']) {
+      const { direct, proxied } = await compareTrustedTypes(`/xcspeval?v=${variant}`, '__xcsp');
+      assert.deepEqual(proxied, direct, variant);
+      if (variant !== 'allowed') {
+        assert.match(direct.eval, /EvalError: Evaluating a string as JavaScript violates the following Content Security Policy directive because 'unsafe-eval'/, `native ${variant}: ${direct.eval}`);
+        assert.equal(direct.timerRan, 'undefined', 'a refused string timer must not run');
+        assert.ok(direct.events.length >= 6, `native ${variant} events: ${JSON.stringify(direct.events)}`);
+      } else {
+        assert.equal(direct.eval, '2');
+      }
+    }
+    const frame = await compareTrustedTypes('/xcspsrcdoc', '__xcsp');
+    assert.deepEqual(frame.proxied, frame.direct, 'srcdoc frame');
+    assert.match(frame.direct.eval, /EvalError/, JSON.stringify(frame.direct));
+  });
+
+  await t.test('a blank or srcdoc frame reports its own URL, and the iframe accessors are built-ins that reject a wrong receiver (matches native)', async () => {
+    const { direct, proxied } = await compareTrustedTypes('/xframes', '__xframes');
+    const diffs = Object.keys(direct).filter(k => direct[k] !== proxied[k]).map(k => `${k}\n   native : ${direct[k]}\n   proxied: ${proxied[k]}`);
+    assert.equal(diffs.length, 0, `\n${diffs.join('\n')}`);
+    assert.equal(direct['blank.href'], 'about:blank');
+    assert.equal(direct['srcdoc.href'], 'about:srcdoc');
+    assert.equal(direct['createHTMLDocument'].split(' ; ')[0], 'about:blank');
+    assert.equal(direct['srcdoc.construct'], 'TypeError: d.get is not a constructor', 'a built-in accessor is no constructor');
+    assert.equal(direct['srcdoc.keys'], 'length,name | length,name', 'and has no prototype');
+  });
+
   await t.test('a report-only Trusted Types policy enforces nothing, as natively', async () => {
     const { direct, proxied } = await compareTrustedTypes('/xttn?via=report-only', '__xttn');
     for (const k of ['stringHTML', 'stringAdjacent', 'stringScriptSrc', 'stringScriptText', 'stringTimeout', 'stringSrcdoc', 'stringHandler']) {
@@ -9119,13 +9268,8 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
         paSurfaces: 'Privacy Sandbox APIs removed: keyed to the proxy origin',
         swRegs: 'the virtual SW facade always reports one fake registration (D3 fail-soft)',
         dynamicBase: "base-uri 'none': a runtime <base> does not move the virtual base",
-        framesByName: 'a srcdoc child reports the parent virtual URL, not about:srcdoc',
-        windowByName: 'same as framesByName',
         framesItem: 'V8 names the rewritten callee in "is not a function" messages',
         withEvalScope: 'direct eval inside with() does not see the with-object',
-        // Contained blank pages report a virtual URL instead of about:blank because they execute through the membrane.
-        staleBlankEval: 'a contained about:blank child reports the parent virtual URL, as framesByName',
-        pendingRouteEval: 'the blank page in front of a pending route is contained; it reports the destination',
         parseHTMLUnsafeHook: 'a base-less parsed document resolves anchor href against the virtual base',
         ownKeysLeak: 'a var from a script rejected for redeclaration survives (eval instantiation)',
         // Not a divergence: the probe folds in a clock reading.
@@ -9175,8 +9319,9 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     assert.match(probes.namedOpen, /^v:navigated:http:\/\/localhost:\d+\/frame-dest\|not found\|true$/, `namedOpen: ${probes.namedOpen}`);
     assert.match(probes.childLocAssign, /^v:(http:\/\/localhost:\d+\/frame-html)\|\1\|\1$/, `childLocAssign: ${probes.childLocAssign}`);
     assert.match(probes.routedPlainEval, /^v:http:\/\/localhost:\d+\/frame-plain$/, `routedPlainEval: ${probes.routedPlainEval}`);
-    assert.match(probes.staleBlankEval, /^v:http:\/\/localhost:\d+\/surface-probes$/, `staleBlankEval: ${probes.staleBlankEval}`);
-    assert.match(probes.pendingRouteEval, /^v:http:\/\/localhost:\d+\/frame-plain$/, `pendingRouteEval: ${probes.pendingRouteEval}`);
+    // A contained blank frame is at `about:blank` and the page in front of a pending route at the address the engine reports: both match native
+    // (the differential above), as does a srcdoc child (`framesByName`).
+    assert.equal(probes.staleBlankEval, 'v:about:blank', `staleBlankEval: ${probes.staleBlankEval}`);
     assert.match(probes.childSharedWorker, /^v:clean:/, `childSharedWorker: ${probes.childSharedWorker}`);
     assert.equal(probes.withShadow, 'v:obj-first', `withShadow: ${probes.withShadow}`);
     assert.equal(probes.withDocIdentity, 'v:identity-ok', `withDocIdentity: ${probes.withDocIdentity}`);

@@ -78,6 +78,7 @@
       for (let i = 0; i < params.length; i++) params[i] = parts[i];
       // The `default` policy sees the source the engine would compile; one that changes it is a refusal (thrown by `ttCompliant`).
       if (ttEnforced()) ttCompliant('Script', 'Function', '(' + dynamicSource(kind, params, body) + ')');
+      cspCheckEval(root.document);
       // Match the outer `fn` wrapper's function kind (`async`, `generator`, `asyncGenerator`)
       // to the inner function to preserve prototype identity.
       const compiled = compileNested(params, body, kind);
@@ -96,6 +97,8 @@
       } else {
         fn = function anonymous() { 'use strict'; return nestedCall(compiled, this, arguments, new.target, sloppy); };
       }
+      // The minifier renames the function expressions above, and a function's `name` is the name it was written with.
+      Object.defineProperty(fn, 'name', { value: 'anonymous', configurable: true });
       toStringMap.set(fn, dynamicSource(kind, params, body));
       return fn;
     }
@@ -113,6 +116,7 @@
       // Per PerformEval step 1, non-string arguments (other than TrustedScript) are returned as-is without evaluation.
       const text = evalSource(source);
       if (text === null) return source;
+      cspCheckEval(root.document, source);
       let expr = null;
       if (isEvalExpressionCandidate(text)) {
         // Run expression candidates through the rewriter so computed member accesses (`x['location']`) are mediated.
@@ -201,6 +205,7 @@
       // Return non-string arguments (other than TrustedScript) unchanged without evaluation.
       const src = evalSource(arg);
       if (src === null) return arg;
+      cspCheckEval(root.document, arg);
       // Top-level sloppy direct eval runs as global code so `this` is the global facade;
       // inside a function, preserve the caller's `this`.
       const asGlobal = globalSite === 1 && !callerStrict && !STRICT_PROLOGUE_RE.test(src);
@@ -394,8 +399,12 @@
         return null;
       }
       const methodCache = newMap();
+      // An `about:` document (a blank or srcdoc frame) is at no virtual URL: it reports its own, as natively.
+      const isAboutLocation = () => { try { return Reflect.get(nativeLoc, 'protocol', nativeLoc) === 'about:'; } catch { return false; } };
       const handler = {
         get(target, prop) {
+          if (typeof prop === 'string' && LOC_VIRT_PROPS.has(prop) && isAboutLocation()) return Reflect.get(nativeLoc, prop, nativeLoc);
+          if (prop === 'toString' && isAboutLocation()) return function toString() { return Reflect.get(nativeLoc, 'href', nativeLoc); };
           if (typeof prop === 'string' && LOC_VIRT_PROPS.has(prop)) {
             // Fall back to the embedder's `virtualURL` for `about:blank` and `srcdoc` child frames.
             if (local) return virtualURL[prop];
@@ -2124,7 +2133,8 @@
       // Coerce non-function handlers (strings, `TrustedScript`, or objects with `toString()`) to source text.
       const text = ttIsTrusted('Script', handler) ? ttText('Script', handler) : ttCompliant('Script', sink, String(handler));
       // Evaluate as global code via indirect `dynamicEval` when the timer fires.
-      return function () { return dynamicEval.call(undefined, ttScript(text)); };
+      // A string the target's policy refuses to evaluate is dropped when its timer fires (the violation is reported), as the engine does.
+      return function () { try { cspCheckEval(root.document); return dynamicEval.call(undefined, ttScript(text)); } catch (e) { if (cspRefusals.has(e)) return undefined; throw e; } };
     }
     if (Native.setTimeout) define(root, 'setTimeout', function(handler, delay, ...args) { return Native.setTimeout(timerHandler(handler, 'Window setTimeout'), delay, ...args); });
     if (Native.setInterval) define(root, 'setInterval', function(handler, delay, ...args) { return Native.setInterval(timerHandler(handler, 'Window setInterval'), delay, ...args); });

@@ -149,3 +149,22 @@ test('trusted types: the target\'s directives are carried and the membrane\'s po
   assert.ok(meta.includes("require-trusted-types-for 'script'") && meta.includes('trusted-types x default zp-internal'), meta);
   assert.equal(ZP.filterMetaCSP("require-trusted-types-for 'script'"), "require-trusted-types-for 'script'");
 });
+
+test('a policy that refuses string evaluation: script-src (else default-src) without \'unsafe-eval\'', () => {
+  const ZP = loadCore();
+  assert.equal(ZP.evalBlockingPolicy(''), '');
+  assert.equal(ZP.evalBlockingPolicy(undefined), '');
+  assert.equal(ZP.evalBlockingPolicy("img-src 'self'"), '', 'no script directive: nothing refuses eval');
+  assert.equal(ZP.evalBlockingPolicy("script-src 'self' 'unsafe-inline'"), "script-src 'self' 'unsafe-inline'");
+  assert.equal(ZP.evalBlockingPolicy("script-src 'self' 'unsafe-eval'"), '');
+  assert.equal(ZP.evalBlockingPolicy("SCRIPT-SRC 'self' 'UNSAFE-EVAL'"), '', 'directive names and keywords are case-insensitive');
+  assert.equal(ZP.evalBlockingPolicy("default-src 'self'"), "default-src 'self'", 'default-src decides when script-src is absent');
+  assert.equal(ZP.evalBlockingPolicy("default-src 'self'; script-src 'unsafe-eval'"), '', 'script-src wins over default-src');
+  assert.equal(ZP.evalBlockingPolicy("script-src 'nonce-abc' 'strict-dynamic'"), "script-src 'nonce-abc' 'strict-dynamic'", 'strict-dynamic does not allow eval');
+  assert.equal(ZP.evalBlockingPolicy("script-src-elem 'self'"), '', 'script-src-elem is not what eval answers to');
+  // A header holds policies separated by commas, and each one must allow it: the first that refuses is the answer.
+  assert.equal(ZP.evalBlockingPolicy("script-src 'unsafe-eval', script-src 'self'"), "script-src 'self'");
+  assert.equal(ZP.evalBlockingPolicy("script-src 'unsafe-eval', default-src 'unsafe-eval'"), '');
+  assert.equal(ZP.evalBlockingDirective("img-src 'self'; script-src 'self'"), 'script-src');
+  assert.equal(ZP.evalBlockingDirective("default-src 'self'"), 'default-src');
+});
