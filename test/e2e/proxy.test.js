@@ -3244,8 +3244,6 @@ document.body.appendChild(doc);
         // What the policy-gated APIs answer where their feature is refused (the cross-origin frame without delegation): the
         // browser's own error, at once. The frame that is delegated only reads the values that follow from 'fullscreen'.
         out.fullscreenEnabled = document.fullscreenEnabled;
-        var gl = function (c, kind, attrs) { try { var g = c.getContext(kind, attrs); return g ? g.getContextAttributes().powerPreference : 'null'; } catch (e) { return e.name; } };
-        out.power = [gl(document.createElement('canvas'), 'webgl2'), gl(document.createElement('canvas'), 'webgl', { powerPreference: 'high-performance' }), gl(new OffscreenCanvas(8, 8), 'webgl2', { powerPreference: 'low-power' })].join();
         if (location.pathname === '/xfp-cross') {
           out.gated = {};
           var settle = function (name, f) {

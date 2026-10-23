@@ -498,16 +498,6 @@
         return !policy.allowsFeature(name);
       } catch { return false; }
     }
-    // screen.isExtended is false when window-management is disallowed in a cross-origin frame.
-    if (w.Screen && w.Screen.prototype) {
-      const ied = Object.getOwnPropertyDescriptor(w.Screen.prototype, 'isExtended');
-      if (ied && typeof ied.get === 'function') {
-        replaceNativeAccessor(w.Screen.prototype, 'isExtended', function () {
-          const v = Reflect.apply(ied.get, this, []);
-          return v && featureDeniedHere('window-management') ? false : v;
-        });
-      }
-    }
     // Policy-gated APIs in a frame that is cross-origin to its embedder.
     // Underneath, every frame is the proxy origin, so the browser's own policy check lets a cross-origin frame use what only a
     // same-origin one may: each feature whose default allowlist is 'self' and that the embedder did not delegate with `allow`.
@@ -614,24 +604,6 @@
           const v = Reflect.apply(fd.get, this, []);
           return v && featureDeniedHere('fullscreen') ? false : v;
         });
-      }
-    }
-    // A WebGL context made in a cross-origin frame is on the low-power GPU whatever it asked for: natively the attribute reads
-    // "low-power" for a request of "default", "high-performance" and "low-power" alike, on WebGL and WebGL2, canvas and
-    // OffscreenCanvas, while the top frame honours the request. Turnstile's widget reads the attribute.
-    if (crossOriginFrame) {
-      for (const Ctor of [w.HTMLCanvasElement, w.OffscreenCanvas]) {
-        replaceNativeMethod(Ctor && Ctor.prototype, 'getContext', orig => ({ getContext(...args) {
-          try {
-            if (/^(experimental-)?webgl2?$/.test(String(args[0]))) {
-              const given = args[1];
-              if (given === undefined || given === null || typeof given === 'object' || typeof given === 'function') {
-                args = [args[0], Object.create(given || null, { powerPreference: { value: 'low-power', enumerable: true } }), ...args.slice(2)];
-              }
-            }
-          } catch {}
-          return Reflect.apply(orig, this, args);
-        } }).getContext);
       }
     }
     // Scope Notification.permission per target origin while keeping the native consent prompt.
