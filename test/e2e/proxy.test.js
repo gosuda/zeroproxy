@@ -8083,10 +8083,15 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     for (const run of [direct, proxied]) {
       for (const k of identity) assert.deepEqual([run.blob[k], run.file[k]], [run.page[k], run.page[k]], k);
     }
+    // A worker's hooks print their own source and its navigator getters are not native-shaped: that is not pinned (a worker is not asked to look
+    // like a browser's). What is pinned for workers is the placement (`protoMembers`: the hook sits where the native member lives, so no native
+    // is left reachable behind it) and what a library reads to tell a worker from a page.
+    const workerShapeOnly = ['srcFetch', 'srcSetTimeout', 'srcPostMessage', 'srcImportScripts', 'srcXHROpen', 'srcFunction', 'srcEval', 'uaShape', 'platformShape', 'uaDataShape'];
     const diff = {};
     for (const realm of ['page', 'blob', 'file']) {
       for (const k of Object.keys(direct[realm] || {})) {
         if (identity.includes(k)) continue;
+        if (realm !== 'page' && workerShapeOnly.includes(k)) continue;
         if (JSON.stringify(direct[realm][k]) !== JSON.stringify((proxied[realm] || {})[k])) diff[realm + '.' + k] = [direct[realm][k], (proxied[realm] || {})[k]];
       }
     }

@@ -24,10 +24,11 @@
   };
   const newWeakMap = () => sealedSetProto(new WeakMap(), SEALED_WEAKMAP);
   const newWeakSet = () => sealedSetProto(new WeakSet(), SEALED_WEAKSET);
-  // Snapshot of the worker realm's native globals and prototype members before installing hooks. Most worker globals
+  // Owner and descriptor of the worker realm's native globals before hooks are installed. Most worker globals
   // (`fetch`, `setTimeout`, `importScripts`, `location`, `origin`) live on `WorkerGlobalScope.prototype` rather than
-  // `self`; `settleNatives` restores each hook to the native owner object with matching descriptor flags, `name`,
-  // `length`, and `toString` output so prototype calls cannot bypass hooks.
+  // `self`; `settleNatives` moves each hook to the native owner object, because a native member read off the prototype
+  // and called with a missing receiver runs on the real global (`WorkerGlobalScope.prototype.setTimeout.call(undefined,
+  // code)` would run `code` unrewritten, with the real global as `this`).
   const ZP_HIDDEN_RE = /^(?:__zp_|__ZP_|ZPBundle$|ZPPageBundleWBG$|ZeroProxyRT$|ZP$)/;
   // Runtime helpers referenced by rewritten code (`zp-rewriter` RUNTIME_HELPERS). Every `with` block binds these as
   // block constants read off the global object so the `with` target proxy is not queried for helper names on each lookup.
@@ -37,29 +38,14 @@
     '__zp_getOwnPropertyNames', '__zp_module_url', '__zp_with_get', '__zp_with_set', '__zp_with_assign',
     '__zp_with_update', '__zp_with_delete', '__zp_with_d', '__zp_lex_decl', '__zp_lex_bind', '__zp_fast', '__zp_fastset'];
   const ZP_WITH_PROLOGUE = 'const{' + ZP_WITH_HELPERS.join(',') + '}=(function(){return this})();';
-  const origFnToString = Function.prototype.toString;
-  // Maps each wrapper function to the `toString()` text of the native function it replaces.
-  const maskedSource = newWeakMap();
-  const nativeSnapshot = (() => {
+  const nativeGlobals = (() => {
     const global = newMap();
     for (let o = self; o && o !== Object.prototype; o = Object.getPrototypeOf(o)) {
       for (const k of Object.getOwnPropertyNames(o)) {
         if (!global.has(k) && !ZP_HIDDEN_RE.test(k)) global.set(k, { owner: o, desc: Object.getOwnPropertyDescriptor(o, k) });
       }
     }
-    const members = newMap();
-    const take = o => {
-      if (!o || (typeof o !== 'object' && typeof o !== 'function') || members.has(o)) return;
-      const m = newMap();
-      for (const k of Object.getOwnPropertyNames(o)) { try { m.set(k, Object.getOwnPropertyDescriptor(o, k)); } catch {} }
-      members.set(o, m);
-    };
-    for (const { desc } of global.values()) {
-      const v = desc.value;
-      if (typeof v === 'function') { take(v); try { if (v.prototype) take(v.prototype); } catch {} }
-      else if (v && typeof v === 'object') take(v);
-    }
-    return { global, members };
+    return global;
   })();
   // In module workers, `importScripts` exists on `WorkerGlobalScope` but throws a TypeError when called; detect module
   // workers via `mod=1` in the bootstrap URL fragment (the module bootstrap loads `zp-core.js` beforehand).
@@ -328,9 +314,6 @@
     try { if (value.prototype) return value; } catch { return value; }
     try { if (!/\{\s*\[native code\]\s*\}/.test(nativeFnToString.call(value))) return value; } catch { return value; }
     const bound = value.bind(self);
-    try { Object.defineProperty(bound, 'name', { value: value.name, configurable: true }); } catch {}
-    // Preserve the unbound method's `toString()` text instead of `function () { [native code] }`.
-    try { maskedSource.set(bound, nativeFnToString.call(value)); } catch {}
     globalMethodBindings.set(value, bound);
     return bound;
   }
@@ -1441,7 +1424,7 @@
         : orig.bind(NativeURLCtor);
       try { Object.defineProperty(ZPWorkerURL[sm], 'name', { value: sm, configurable: true }); } catch {}
     }
-    Object.defineProperty(self, 'URL', { value: ZPWorkerURL, writable: true, enumerable: true, configurable: true });
+    Object.defineProperty(self, 'URL', { value: ZPWorkerURL, writable: true, enumerable: false, configurable: true });
     if (self.webkitURL) try { Object.defineProperty(self, 'webkitURL', { value: ZPWorkerURL, writable: true, enumerable: true, configurable: true }); } catch {}
   } catch {}
   // Partition `BroadcastChannel` names by virtual origin (`zp:b:<fnv(origin)>:`) to match the page realm.
@@ -1458,7 +1441,7 @@
         return ch;
       };
       try { ZPWorkerBC.prototype = NativeBC.prototype; } catch {}
-      Object.defineProperty(self, 'BroadcastChannel', { value: ZPWorkerBC, writable: true, enumerable: true, configurable: true });
+      Object.defineProperty(self, 'BroadcastChannel', { value: ZPWorkerBC, writable: true, enumerable: false, configurable: true });
     }
   } catch {}
   try {
@@ -1590,56 +1573,23 @@
     } }).getOwnPropertyDescriptors;
   } catch {}
   hideZPNames();
-  // Restore pre-prelude prototype placement, descriptor flags, `name`, `length`, and `Function.prototype.toString` output on wrapped globals.
+  // Move each hook to the object that owns the native member of the same name (`nativeGlobals`). The native stays reachable
+  // from there otherwise: `WorkerGlobalScope.prototype.setTimeout.call(undefined, code)` runs `code` unrewritten on the real global.
   (function settleNatives() {
-    const toStringHook = ({ toString() { const m = maskedSource.get(this); return m !== undefined ? m : Reflect.apply(origFnToString, this, []); } }).toString;
-    try { Object.defineProperty(Function.prototype, 'toString', { value: toStringHook, writable: true, enumerable: false, configurable: true }); } catch {}
-    const mirror = (fn, nat) => {
-      if (typeof fn !== 'function' || typeof nat !== 'function' || fn === nat) return;
-      try { maskedSource.set(fn, Reflect.apply(origFnToString, nat, [])); } catch {}
-      try { Object.defineProperty(fn, 'name', { value: nat.name, configurable: true }); } catch {}
-      try { Object.defineProperty(fn, 'length', { value: nat.length, configurable: true }); } catch {}
-    };
-    const settle = (obj, key, nat) => {
-      const cur = Object.getOwnPropertyDescriptor(obj, key);
-      if (!cur || !nat) return;
-      if (cur.value === nat.value && cur.get === nat.get && cur.set === nat.set && cur.enumerable === nat.enumerable
-          && cur.configurable === nat.configurable && cur.writable === nat.writable) return;
-      mirror(cur.value, nat.value); mirror(cur.get, nat.get); mirror(cur.set, nat.set);
-      if (!cur.configurable) return;
-      const next = 'value' in cur
-        ? { value: cur.value, writable: 'writable' in nat ? nat.writable : true, enumerable: nat.enumerable, configurable: nat.configurable }
-        : { get: cur.get, set: cur.set, enumerable: nat.enumerable, configurable: nat.configurable };
-      try { Object.defineProperty(obj, key, next); } catch {}
-    };
-    const settleMembers = (obj, natMap) => {
-      if (!obj || !natMap) return;
-      for (const [k, nat] of natMap) if (Object.prototype.hasOwnProperty.call(obj, k)) settle(obj, k, nat);
-    };
-    for (const [key, { owner, desc: nat }] of nativeSnapshot.global) {
+    for (const [key, { owner, desc: nat }] of nativeGlobals) {
       const own = owner === self ? null : Object.getOwnPropertyDescriptor(self, key);
-      if (own && own.configurable) {
-        let moved;
-        if ('get' in nat && 'value' in own) {
-          const v = own.value;
-          moved = { get: Object.getOwnPropertyDescriptor({ get [key]() { return v; } }, key).get, set: undefined, enumerable: nat.enumerable, configurable: nat.configurable };
-        } else if ('get' in own) {
-          moved = { get: own.get, set: own.set, enumerable: nat.enumerable, configurable: nat.configurable };
-        } else {
-          moved = { value: own.value, writable: nat.writable, enumerable: nat.enumerable, configurable: nat.configurable };
-        }
-        try { delete self[key]; Object.defineProperty(owner, key, moved); } catch {}
+      if (!own || !own.configurable) continue;
+      let moved;
+      if ('get' in nat && 'value' in own) {
+        const v = own.value;
+        moved = { get: Object.getOwnPropertyDescriptor({ get [key]() { return v; } }, key).get, set: undefined, enumerable: nat.enumerable, configurable: nat.configurable };
+      } else if ('get' in own) {
+        moved = { get: own.get, set: own.set, enumerable: nat.enumerable, configurable: nat.configurable };
+      } else {
+        moved = { value: own.value, writable: nat.writable, enumerable: nat.enumerable, configurable: nat.configurable };
       }
-      settle(owner, key, nat);
-      const cur = Object.getOwnPropertyDescriptor(owner, key);
-      const natV = nat.value, curV = cur && cur.value;
-      if (typeof natV === 'function' && typeof curV === 'function' && curV !== natV) {
-        settleMembers(curV, nativeSnapshot.members.get(natV));
-        try { if (curV.prototype && natV.prototype && curV.prototype !== natV.prototype) settleMembers(curV.prototype, nativeSnapshot.members.get(natV.prototype)); } catch {}
-      }
+      try { delete self[key]; Object.defineProperty(owner, key, moved); } catch {}
     }
-    for (const [obj, natMap] of nativeSnapshot.members) settleMembers(obj, natMap);
-    mirror(toStringHook, origFnToString);
   })();
   // Re-run `hideZPNames` after the bootstrap loads `zp-page-bundle.js` so `ZPBundle` is also non-enumerable.
   expose('__zp_settle', hideZPNames);
