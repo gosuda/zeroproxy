@@ -150,6 +150,9 @@ test('E2 real-site regression — fresh profile, no stale SW', async (t) => {
         () => navigator.serviceWorker && navigator.serviceWorker.controller,
         { timeout: 30000 },
       );
+      // The launcher keeps its Open button disabled ("Preparing isolated transport…") for a while after the controller exists, and a click on a
+      // disabled button is dropped: the page then stays on the launcher. Interval polling, because a covered page gets no animation frames.
+      await page.waitForSelector('#open button:not([disabled])', { timeout: 60000, polling: 200 });
       await page.evaluate((url, arm) => {
         const input = document.querySelector('input#url');
         if (input) { input.value = url; input.dispatchEvent(new Event('input', { bubbles: true })); }
@@ -158,8 +161,7 @@ test('E2 real-site regression — fresh profile, no stale SW', async (t) => {
           if (cc && !cc.checked) { cc.checked = true; cc.dispatchEvent(new Event('change', { bubbles: true })); }
         }
       }, target.url, !!target.challengeCompat);
-      const openBtn = await page.$('button');
-      if (openBtn) await openBtn.click();
+      await page.click('#open button');
 
       // Wait up to 45 s for the proxied target's title. Because `location` is virtualized,
       // detect navigation completion via the target-specific title regex.
