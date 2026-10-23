@@ -6,6 +6,7 @@ Keep each summary to a single line under 160 characters and point every detail l
 
 | Date | Category | Summary | Detail |
 |---|---|---|---|
+| 2026-10-23 | membrane / pruning | Fidelity-only code removed one piece at a time, Glassdoor kept 6/6 each step. Stack text, iframe shape, timeline JSON, guard layer. | rewriter.md#prune-fidelity-2026-10-23 |
 | 2026-10-23 | rewriter / fixed | A first statement that is a rewritten call or assignment carried a second copy of the declaration prelude: SyntaxError. | rewriter.md#lex-prelude-duplicated-2026-10-23 |
 | 2026-10-23 | real-site / resolved | Glassdoor passes on the real path 8/8: a form posts a bare Content-Type; a fixed-delay click is ignored while the widget verifies. | sw-integration.md#form-submission-fidelity-2026-10-23 |
 | 2026-10-22 | real-site / resolution | Glassdoor Turnstile passes in the lab (6/6): contained RTCPeerConnection, CSP eval refusal, about: frame URLs, all three needed. Real path: see 10-23. | rewriter.md#glassdoor-resolved-2026-10-22 |
