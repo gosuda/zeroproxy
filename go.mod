@@ -7,8 +7,8 @@ require (
 	github.com/hashicorp/yamux v0.1.2
 	github.com/pion/logging v0.2.4
 	github.com/pion/turn/v4 v4.1.4
-	github.com/quic-go/quic-go v0.59.0
-	github.com/quic-go/webtransport-go v0.10.0
+	github.com/quic-go/quic-go v0.60.0
+	github.com/quic-go/webtransport-go v0.11.1
 )
 
 require (
