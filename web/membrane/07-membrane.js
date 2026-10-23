@@ -152,7 +152,6 @@
     const dynamicGeneratorFunction = function GeneratorFunction(...args) { return compileDynamic(NativeGeneratorFunction, args, 'generator'); };
     const dynamicAsyncGeneratorFunction = function AsyncGeneratorFunction(...args) { return compileDynamic(NativeAsyncGeneratorFunction, args, 'asyncGenerator'); };
     function setDynamicConstructorIdentity(fn, name, proto) {
-      try { Object.defineProperty(fn, 'name', { value: name, configurable: true }); } catch {}
       try { Object.defineProperty(fn, 'length', { value: 1, configurable: true }); } catch {}
       if (proto) try { Object.defineProperty(fn, 'prototype', { value: proto, enumerable: false, configurable: false, writable: false }); } catch {}
       maskNativeFunction(fn, name);
@@ -161,7 +160,6 @@
     setDynamicConstructorIdentity(dynamicAsyncFunction, 'AsyncFunction', NativeAsyncFunction && NativeAsyncFunction.prototype);
     setDynamicConstructorIdentity(dynamicGeneratorFunction, 'GeneratorFunction', NativeGeneratorFunction && NativeGeneratorFunction.prototype);
     setDynamicConstructorIdentity(dynamicAsyncGeneratorFunction, 'AsyncGeneratorFunction', NativeAsyncGeneratorFunction && NativeAsyncGeneratorFunction.prototype);
-    try { Object.defineProperty(dynamicEval, 'name', { value: 'eval', configurable: true }); } catch {}
     try { Object.defineProperty(dynamicEval, 'length', { value: 1, configurable: true }); } catch {}
     maskNativeFunction(dynamicEval, 'eval');
     // Caller-scope support for direct `eval(x)` rewritten to `__zp_eval.call(this, callee, [x], desc, ...)`.
@@ -917,7 +915,6 @@
       if (!m[name]) {
         const fn = function () { return Reflect.apply(win[name], win, []); };
         try {
-          Object.defineProperty(fn, 'name', { value: name, configurable: true });
           Object.defineProperty(fn, 'length', { value: 0, configurable: true });
         } catch {}
         maskNativeFunction(fn, name);

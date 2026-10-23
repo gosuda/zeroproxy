@@ -347,7 +347,6 @@
     for (const name of Object.keys(gatewayMeta)) {
       const meta = gatewayMeta[name];
       const blockCtor = typeof meta.ctor === 'function' ? meta.ctor() : makeVirtualGateway(name, meta);
-      try { Object.defineProperty(blockCtor, 'name', { value: name, configurable: true }); } catch {}
       maskNativeFunction(blockCtor, name);
       const ok = define(w, name, blockCtor);
       if (strict && name in w && !ok) throw normalizedError('SecurityError');

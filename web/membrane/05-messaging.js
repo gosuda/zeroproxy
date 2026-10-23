@@ -267,7 +267,6 @@
     // Match native postMessage.length (1) and .name.
     try {
       Object.defineProperty(wrapped, 'length', { value: 1, configurable: true });
-      Object.defineProperty(wrapped, 'name', { value: 'postMessage', configurable: true });
     } catch {}
     maskNativeFunction(wrapped, 'postMessage');
     try { const fp = Object.getPrototypeOf(originalPm); if (fp && Object.getPrototypeOf(wrapped) !== fp) Object.setPrototypeOf(wrapped, fp); } catch {}

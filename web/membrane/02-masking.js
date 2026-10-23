@@ -57,10 +57,7 @@
       Object.defineProperty(obj, key, { value, enumerable: nativeEnumerability(obj, key), configurable: false, writable: true });
       if (prev && typeof prev.value === 'function') lengthLike(value, prev.value);
       else if (typeof inherited === 'function' && inherited !== value) lengthLike(value, inherited);
-      // Preserve the property key as `.name` in case minification renamed the wrapper function.
-      if (typeof value === 'function' && value.name !== key) {
-        try { Object.defineProperty(value, 'name', { value: key, configurable: true }); } catch {}
-      }
+      // `maskNativeFunction` names the wrapper after its key, which the minifier would otherwise have renamed.
       maskNativeFunction(value, key);
       return true;
     } catch { return false; }
@@ -404,7 +401,7 @@
   // Set constructor `.name`, `Symbol.toStringTag`, and static interface
   // constants to match native WebIDL class shapes.
   function brandLikeNative(ctor, proto, name) {
-    try { if (ctor) Object.defineProperty(ctor, 'name', { value: name, configurable: true }); } catch {}
+    nameLike(ctor, name);
     try { if (proto) Object.defineProperty(proto, Symbol.toStringTag, { value: name, configurable: true }); } catch {}
     adoptNativeShape(ctor, proto, name);
   }

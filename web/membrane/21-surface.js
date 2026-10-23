@@ -95,7 +95,6 @@
         };
         const ZPNotification = function Notification(title, opts) { return new NativeNotification(title, rewriteIconOpts(opts)); };
         ZPNotification.prototype = NativeNotification.prototype;
-        try { Object.defineProperty(ZPNotification, 'name', { value: 'Notification', configurable: true }); } catch {}
         try { Object.defineProperty(ZPNotification, 'length', { value: NativeNotification.length, configurable: true }); } catch {}
         maskNativeFunction(ZPNotification, 'Notification');
         for (const k of ['permission', 'maxActions']) {

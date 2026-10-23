@@ -193,7 +193,6 @@
           const onError = arguments[errorIndex];
           if (typeof onError === 'function') Native.setTimeout(() => { try { onError(normalizedError('SecurityError')); } catch {} }, 0);
         };
-        Object.defineProperty(denied, 'name', { value: legacy, configurable: true });
         Object.defineProperty(denied, 'length', { value: length, configurable: true });
         maskNativeFunction(denied, legacy);
         define(w, legacy, denied);
