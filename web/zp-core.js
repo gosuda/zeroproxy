@@ -513,6 +513,15 @@
     const p = new URL(proxyOrigin);
     return p.protocol + '//' + siteLabel(siteOf(targetUrl)) + '.localhost' + (p.port ? ':' + p.port : '');
   }
+  // Whether `origin` is one of the hosts `siteFrameOrigin` mints for `proxyOrigin`: the address of a frame this proxy routed, as opposed to
+  // a URL of the page's own.
+  function isSiteFrameOrigin(proxyOrigin, origin) {
+    if (!siteFrameCapable(proxyOrigin)) return false;
+    try {
+      const p = new URL(proxyOrigin), u = new URL(String(origin));
+      return u.protocol === p.protocol && u.port === p.port && /^s-[a-z0-9-]*-[0-9a-f]{8}.localhost$/.test(u.hostname);
+    } catch { return false; }
+  }
   // CSP source matching every site host of a loopback proxy origin.
   function siteFrameSource(proxyOrigin) {
     if (!siteFrameCapable(proxyOrigin)) return '';
@@ -599,7 +608,7 @@
     Object.defineProperty(w, '__zp_bridge_factory', { value: factory, configurable: true, enumerable: false, writable: true });
     return null;
   }
-  const api = Object.freeze({ CONTROL_PREFIX, ASSET_PREFIX, TARGET_USER_AGENT, TARGET_SEC_CH_UA, TARGET_CHROME_FULL_VERSION, TARGET_UA_HIGH_ENTROPY, uaHighEntropyValues, clientEnvOf, chromeBrandList, bytesToBase64Url, base64UrlToBytes, webTransportGatewayRequest, relayOnlyRTCConfiguration, ENVELOPE_MIME,encodeEnvelope, decodeEnvelope, encryptShareURL, decryptShareURL, makeShareURL, makeSharePath, makeShareFragment, defaultRelayServer, relayServersForShare, isSharePath, shareRouteKey, controlPath, assetPath, assetURL, versionedAsset, apiPath, errorPath, INTERNAL_ASSET_SCRIPTS, isInternalAssetScriptPath, isInternalPath, canonicalTargetURL, canonicalWebSocketURL, encodeTargetURL, decodeTargetURL, randomId, fixedCSP, filterMetaCSP, parseRelayServersFromFragment, normalizeRelayServers, isLoopbackHost, registrableDomain, siteOf, sameSite, siteFrameCapable, siteFrameOrigin, siteFrameSource, TT_POLICY_NAME, trustedTypesDirectives, trustedTypesPolicies, requiresTrustedTypes, evalBlockingPolicy, evalBlockingDirective, redirectMethod, createFetchResponseAdapter, configureBridge, ERRORS, errorInfo, MSG });
+  const api = Object.freeze({ CONTROL_PREFIX, ASSET_PREFIX, TARGET_USER_AGENT, TARGET_SEC_CH_UA, TARGET_CHROME_FULL_VERSION, TARGET_UA_HIGH_ENTROPY, uaHighEntropyValues, clientEnvOf, chromeBrandList, bytesToBase64Url, base64UrlToBytes, webTransportGatewayRequest, relayOnlyRTCConfiguration, ENVELOPE_MIME,encodeEnvelope, decodeEnvelope, encryptShareURL, decryptShareURL, makeShareURL, makeSharePath, makeShareFragment, defaultRelayServer, relayServersForShare, isSharePath, shareRouteKey, controlPath, assetPath, assetURL, versionedAsset, apiPath, errorPath, INTERNAL_ASSET_SCRIPTS, isInternalAssetScriptPath, isInternalPath, canonicalTargetURL, canonicalWebSocketURL, encodeTargetURL, decodeTargetURL, randomId, fixedCSP, filterMetaCSP, parseRelayServersFromFragment, normalizeRelayServers, isLoopbackHost, registrableDomain, siteOf, sameSite, siteFrameCapable, siteFrameOrigin, isSiteFrameOrigin, siteFrameSource, TT_POLICY_NAME, trustedTypesDirectives, trustedTypesPolicies, requiresTrustedTypes, evalBlockingPolicy, evalBlockingDirective, redirectMethod, createFetchResponseAdapter, configureBridge, ERRORS, errorInfo, MSG });
   // `configurable: true` allows the page prelude to delete `globalThis.ZP` after capturing it into a closure binding,
   // preventing `Object.getOwnPropertyNames(window)` from exposing `ZP` to target scripts.
   Object.defineProperty(globalThis, 'ZP', { value: api, enumerable: false, configurable: true, writable: false });

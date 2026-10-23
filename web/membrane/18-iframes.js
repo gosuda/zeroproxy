@@ -229,6 +229,11 @@
     }
     return frames;
   }
+  // Whether `raw` is the address of a frame this proxy routed to a site-frame host: a share path on one of the hosts `siteFrameOrigin` mints.
+  // (A share path on the proxy's own origin is told apart by the origin; these live elsewhere.)
+  function isSiteFrameAddress(raw) {
+    try { const u = new Native.URL(String(raw)); return ZP.isSharePath(u.pathname) && ZP.isSiteFrameOrigin(mainProxyOrigin, u.origin); } catch { return false; }
+  }
   // Route a frame's `src` through an asynchronously activated proxy share path.
   // Connected frames already showing a routed document keep that document until the new route commits;
   // other frames use an `about:blank` placeholder whose synthetic `load` event is swallowed.

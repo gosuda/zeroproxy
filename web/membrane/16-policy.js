@@ -81,6 +81,9 @@
     if (!raw) return;
     // Upgrade already-proxied subresource URLs to blob URLs when inside an SW-less frame.
     if (String(raw).startsWith(proxyOrigin)) { upgradeSWLessURL(el, key, String(raw)); return; }
+    // The address of a frame we already routed to a site-frame host is our own write, not a URL of the page's: routed again as a target it is
+    // wrapped once more, its new address is observed, and so on, every round a third longer.
+    if ((tag === 'iframe' || tag === 'frame') && localKey === 'src' && isSiteFrameAddress(raw)) return;
     // Leave safe blob: URLs and SW-less placeholders untouched so they are not re-proxied in a loop.
     if (/^blob:/i.test(String(raw))) return;
     if (String(raw) === SWLESS_ERROR) return;
