@@ -738,6 +738,12 @@ Frame target and cross-site containment defects:
     the real global (the rewriter treats worker code as page code); the brands follow the persona when the engine's differ. Pin: e2e `a worker sees the environment a browser gives it (matches native)`: page, blob and file worker, 38 readings
     each, all equal to native except the identity, which page and workers report alike (mutation: hooks left on the
     instance, no source mask, no entry filter fails); matrix `sloppy_function_this_maps_only_the_real_global` (worker).
+    *Update 2026-10-23 (`10659af`, `1bde685`, `421c90a`):* only the placement stays. The source mask, `name`/`length` and flag
+    normalization, the key-list wrappers and the resource-entry filter were removed as concealment. The words "contained in practice" above were
+    wrong: a probe (`.lean-ctx/worker-escape.js`) showed that with the hooks left on the instance,
+    `WorkerGlobalScope.prototype.setTimeout.call(undefined, code)` (WebIDL turns the missing receiver into the real global) ran `code` unrewritten
+    with the real global as `this`. The move is rule 4 (and rule 3 for the `caches`/`indexedDB` accessors). Pin: `protoMembers` in the
+    e2e above; the worker's source and navigator-getter shapes are no longer compared.
 80. **The page's navigator and resource timing kept three leftovers.** Seven ad-auction methods (`joinAdInterestGroup`, …)
     were denied as own properties of `navigator`: natively it has none; the identity accessors (`userAgent`, `platform`,
     `userAgentData`, …) were non-configurable where the browser's are configurable; and a worker's bootstrap appeared in
@@ -1291,7 +1297,7 @@ helpers missing from the worker realm (`__zp_okeys`, `__zp_delete`, `__zp_oget`,
 `__zp_rget`, `__zp_with_*` …): **fixed** (item 19; static-policy guard).
 Native methods through `self`, the `Function.prototype` facade, and blob
 sources revoked right after `new Worker()`: **fixed** (items 22, 23).
-Worker hooks wearing the natives' shape (source, placement, flags): **fixed** (item 79). Residuals: `navigator` is the spoofed
+Worker hooks wearing the natives' shape (source, placement, flags): **fixed** (item 79; since 2026-10-23 only the placement, which is containment). Residuals: `navigator` is the spoofed
 build identity (intentional); termination mid-request and multi-target workers
 : **unverified**.
 
