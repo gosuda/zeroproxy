@@ -1,0 +1,2 @@
+rustls-rustcrypto-0.0.2-alpha
+ZeroProxy fork: the signature algorithm ids come from rustls-pki-types (alg_id) instead of rustls-webpki 0.102, which Cargo.lock then no longer carries (RUSTSEC advisories on 0.102.8)
