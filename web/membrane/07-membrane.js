@@ -523,8 +523,8 @@
         };
         const replace = function replace(value) { navigate(value, true); };
         maskNativeFunction(replace, 'replace');
-        const deny = () => { throw crossOriginDenied('refuse', undefined, 'Location'); };
-        const denyRead = prop => { throw crossOriginDenied('read a named property', prop, 'Location'); };
+        const deny = () => { throw crossOriginDenied(); };
+        const denyRead = () => { throw crossOriginDenied(); };
         const hrefAccessor = () => {
           const s = function (v) { navigate(v, false); };
           maskAccessorFn(s, 'set', 'href');
@@ -535,10 +535,10 @@
           get(_target, prop) {
             if (prop === 'replace') return replace;
             if (prop === 'then' || CROSS_ORIGIN_SYMBOLS.includes(prop)) return undefined;
-            return denyRead(prop);
+            return denyRead();
           },
           set(_target, prop, value) {
-            if (prop !== 'href') throw crossOriginDenied('set a named property', prop, 'Location');
+            if (prop !== 'href') throw crossOriginDenied();
             navigate(value, false);
             return true;
           },
@@ -550,7 +550,7 @@
             if (prop === 'then' || prop === Symbol.toStringTag || prop === Symbol.hasInstance || prop === Symbol.isConcatSpreadable) {
               return { value: undefined, writable: false, enumerable: false, configurable: true };
             }
-            return denyRead(prop);
+            return denyRead();
           },
           deleteProperty: deny,
           defineProperty: deny,
@@ -904,25 +904,10 @@
       containSameOriginChildWindow(raw);
       return win;
     }
-    // Construct a `SecurityError` DOMException matching Chrome's cross-origin Window and Location error messages.
-    const INDEX_NAME_RE = /^(?:0|[1-9]\d*)$/;
-    function crossOriginDenied(verb, prop, iface) {
-      const face = iface || 'Window';
-      const indexed = typeof prop === 'string' && INDEX_NAME_RE.test(prop);
-      // Format symbol names in brackets, omitting `Symbol.toPrimitive` and descriptionless symbols.
-      const nameText = typeof prop === 'symbol'
-        ? (prop === Symbol.toPrimitive || !prop.description ? '' : " '[" + prop.description + "]'")
-        : " '" + String(prop) + "'";
-      let lead = '';
-      if (verb === 'read a named property' || (verb === 'check a named property' && indexed)) {
-        lead = indexed ? 'Failed to read an indexed property [' + prop + "] from '" + face + "': "
-          : 'Failed to read a named property' + nameText + " from '" + face + "': ";
-      } else if (verb === 'set a named property') {
-        lead = indexed ? 'Failed to set an indexed property [' + prop + "] on '" + face + "': "
-          : 'Failed to set a named property' + nameText + " on '" + face + "': ";
-      }
+    // Every refusal of a cross-origin window or Location is a `SecurityError` with the sentence Chrome ends them all with.
+    function crossOriginDenied() {
       try {
-        return new Native.DOMException(lead + 'Blocked a frame with origin "' + displayOrigin(securityOrigin()) + '" from accessing a cross-origin frame.', 'SecurityError');
+        return new Native.DOMException('Blocked a frame with origin "' + displayOrigin(securityOrigin()) + '" from accessing a cross-origin frame.', 'SecurityError');
       } catch { return normalizedError('SecurityError'); }
     }
     // Cache one stable wrapper per cross-origin window method (`close`, `focus`, `blur`).
@@ -979,39 +964,39 @@
         if (setter) { s = function (v) { setter(v); }; maskAccessorFn(s, 'set', name); }
         return { get: g, set: s, enumerable: false, configurable: true };
       };
-      const denyMutation = (verb, prop) => { throw crossOriginDenied(verb, prop); };
+      const denyMutation = () => { throw crossOriginDenied(); };
       // Use an extensible null-prototype target so Proxy traps are unconstrained by target invariants.
       facade = new Proxy(Object.create(null), {
         get(_t, prop) {
           if (typeof prop === 'symbol') {
             if (CROSS_ORIGIN_SYMBOLS.includes(prop)) return undefined;
-            throw crossOriginDenied('read a named property', prop);
+            throw crossOriginDenied();
           }
           if (prop === 'then') return undefined;
           if (CROSS_ORIGIN_WINDOW_NAME_SET.has(prop)) return read(prop);
           if (isIndex(prop)) return windowHandleFor(win[prop]);
           const named = namedChild(prop);
           if (named) return windowHandleFor(named);
-          throw crossOriginDenied('read a named property', prop);
+          throw crossOriginDenied();
         },
         set(_t, prop, value) {
           if (prop === 'location') { crossWindowLocation(win).href = value; return true; }
-          throw crossOriginDenied('set a named property', prop);
+          throw crossOriginDenied();
         },
         has(_t, prop) {
           if (typeof prop === 'string' && (CROSS_ORIGIN_WINDOW_NAME_SET.has(prop) || isIndex(prop))) return true;
-          throw crossOriginDenied('check a named property', prop);
+          throw crossOriginDenied();
         },
-        deleteProperty(_t, prop) { return denyMutation('delete a named property', prop); },
-        defineProperty(_t, prop) { return denyMutation('define a named property', prop); },
-        setPrototypeOf() { return denyMutation('set the prototype', 'prototype'); },
-        preventExtensions() { return denyMutation('prevent extensions', 'extensions'); },
+        deleteProperty(_t, prop) { return denyMutation(); },
+        defineProperty(_t, prop) { return denyMutation(); },
+        setPrototypeOf() { return denyMutation(); },
+        preventExtensions() { return denyMutation(); },
         isExtensible() { return true; },
         getPrototypeOf() { return null; },
         getOwnPropertyDescriptor(_t, prop) {
           if (typeof prop === 'symbol') {
             if (CROSS_ORIGIN_SYMBOLS.includes(prop)) return { value: undefined, writable: false, enumerable: false, configurable: true };
-            throw crossOriginDenied('read a named property', prop);
+            throw crossOriginDenied();
           }
           if (prop === 'then') return { value: undefined, writable: false, enumerable: false, configurable: true };
           switch (prop) {
@@ -1024,7 +1009,7 @@
           if (isIndex(prop)) return { value: windowHandleFor(win[prop]), writable: false, enumerable: true, configurable: true };
           const named = namedChild(prop);
           if (named) return { value: windowHandleFor(named), writable: false, enumerable: false, configurable: true };
-          throw crossOriginDenied('read a named property', prop);
+          throw crossOriginDenied();
         },
         ownKeys() {
           const keys = [];
