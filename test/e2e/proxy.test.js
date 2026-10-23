@@ -3000,6 +3000,15 @@ document.body.appendChild(doc);
       res.end('<!doctype html><title>domscan</title><body><div id="root"></div><script>(' + domScanProbe.toString() + ')()<\/script></body>');
       return;
     }
+    if (url.pathname === '/xnested') {
+      // A script in a blank child frame makes an iframe of another site (the shape of an ad container that builds its creative's frame).
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end('<!doctype html><title>nested</title><body><script>' +
+        'var c = document.createElement("iframe"); document.body.appendChild(c);' +
+        'var d = c.contentDocument, f = d.createElement("iframe"); f.setAttribute("src", "http://127.0.0.1:' + req.socket.localPort + '/xframe-title"); d.body.appendChild(f);' +
+        '</script></body>');
+      return;
+    }
     if (url.pathname === '/xrealm') {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end('<!doctype html><title>realm</title><body><script>(' + childRealmProbe.toString() + ')()<\/script></body>');
@@ -7553,6 +7562,25 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     assert.ok(await openThroughLauncher(fresh, proxyOrigin, url), `the launcher did not reach ${url}`);
     return fresh;
   };
+  await t.test('a frame of another site made inside a blank child frame is routed once and is not wrapped again', async () => {
+    // The observer of a blank child frame's document saw the address the membrane had just written (a share path on a site host), took it for
+    // the page's own URL and routed it again: a new token, a host prefixed once more (s-s-...), every round a third longer, until the page died.
+    // The frame's visible address may be replaced once by its own document (a new token of the same length, a fragment added); that is not the loop.
+    const page = await openProxiedPage(`http://${targetHost}:${targetPort}/xnested`);
+    try {
+      const routed = () => page.frames().map(f => f.url()).filter(u => /^http:\/\/s-[a-z0-9-]+\.localhost:\d+\/zp\/p\//.test(u));
+      let first = [];
+      for (let i = 0; i < 100 && !first.length; i++) { first = routed(); if (!first.length) await new Promise(r => setTimeout(r, 100)); }
+      const shown = () => JSON.stringify(page.frames().map(f => f.url().slice(0, 100)));
+      assert.equal(first.length, 1, `the nested frame is routed to a site frame address; frames: ${shown()}`);
+      await new Promise(r => setTimeout(r, 2500));
+      const later = routed();
+      assert.equal(later.length, 1, `still one routed frame; frames: ${shown()}`);
+      assert.ok(!/^http:\/\/s-s-/.test(later[0]), `the host is not wrapped again: ${later[0].slice(0, 100)}`);
+      const pathLength = u => new URL(u).pathname.length; // the token; the fragment is added when the frame's document boots
+      assert.ok(pathLength(later[0]) <= pathLength(first[0]) + 8, `the route token does not grow: ${pathLength(first[0])} then ${pathLength(later[0])}`);
+    } finally { await page.close().catch(() => {}); }
+  });
   await t.test('frames made from markup load and read back as natively', async () => {
     const targetBase = `http://${targetHost}:${targetPort}`;
     const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });

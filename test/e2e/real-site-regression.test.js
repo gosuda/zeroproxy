@@ -216,6 +216,18 @@ test('E2 real-site regression — fresh profile, no stale SW', async (t) => {
 
       await page.screenshot({ path: path.join(outDir, `${target.host}.png`), fullPage: false });
 
+      // The title shows early. A page that then wedges its renderer (a runaway loop, memory growing without end) looks like a pass to the title
+      // and fails here: it must still answer a trivial evaluation some seconds after it loaded.
+      await new Promise(r => setTimeout(r, Number(process.env.ZP_SETTLE_MS || 18000)));
+      const answers = await Promise.race([
+        page.evaluate(() => document.readyState).then(() => true, () => false),
+        new Promise(r => setTimeout(() => r(false), 15000)),
+      ]);
+      if (!answers) {
+        fs.writeFileSync(path.join(outDir, `${target.host}-unresponsive.json`), JSON.stringify({ title: titleSeen, consoleErrors }, null, 2));
+        throw new Error(`${target.host}: the page stopped answering after it loaded`);
+      }
+
       const fatal = consoleErrors.filter(line => FATAL_ZP_ERRORS.some(code => line.includes(code)));
       if (fatal.length > 0) {
         fs.writeFileSync(
