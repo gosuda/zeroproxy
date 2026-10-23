@@ -723,13 +723,24 @@ fn obj_only(
     Some(((rewrite(os, oe), ()), ()))
 }
 
-/// The lexical-registry prelude and the bind calls after declarations belong to the program as a whole. Each sits at a position
-/// that can also be the first or last byte of an expression (`history.replaceState(x); var f;` has the prelude exactly where the
-/// call starts), and a nested range must not claim it: the receiver text a call rewrite rebuilds would carry a second copy of the
-/// prelude inside `__zp_call(`, a SyntaxError.
-fn is_program_level_insert(q: &Patch) -> bool {
-    q.start == q.end
-        && (q.replacement.starts_with(";{const __zp_bad=__zp_lex_decl(") || q.replacement.starts_with(";__zp_lex_bind("))
+/// The patches that lie inside `[start, end)` of the marker patch `p`, shifted to start at 0, for re-rendering that sub-range of `p`
+/// (a receiver, a key, the arguments). A zero-width insertion on an edge of `p` is not inner: the outer pass already prints it next to
+/// `p`, before it or right after it, so a sub-range that took it too would print it a second time inside the helper call
+/// (`__zp_call(;{const __zp_bad=…` for `history.replaceState(x); var f;`, whose declaration prelude starts where the call does; the
+/// same for the prefix of an unbraced `with` body), a SyntaxError.
+fn inner_patches(patches: &[Patch], p: &Patch, start: usize, end: usize) -> Vec<Patch> {
+    let offset = start as u32;
+    patches
+        .iter()
+        .filter(|q| (q.start as usize) >= start && (q.end as usize) <= end)
+        .filter(|q| !std::ptr::eq(*q, p))
+        .filter(|q| !(q.start == q.end && (q.start == p.start || q.start == p.end)))
+        .map(|q| Patch {
+            start: q.start - offset,
+            end: q.end - offset,
+            replacement: shift_marker_positions(&q.replacement, offset),
+        })
+        .collect()
 }
 
 pub fn apply_patches(source: &str, patches: &[Patch]) -> String {
@@ -830,18 +841,7 @@ pub fn apply_patches(source: &str, patches: &[Patch]) -> String {
                 return String::new();
             }
             let sub = &source[start..end];
-            let offset = start as u32;
-            let inner: Vec<Patch> = patches
-                .iter()
-                .filter(|q| (q.start as usize) >= start && (q.end as usize) <= end)
-                .filter(|q| !std::ptr::eq(*q, p))
-                .filter(|q| !is_program_level_insert(q))
-                .map(|q| Patch {
-                    start: q.start - offset,
-                    end: q.end - offset,
-                    replacement: shift_marker_positions(&q.replacement, offset),
-                })
-                .collect();
+            let inner = inner_patches(patches, p, start, end);
             if inner.is_empty() {
                 sub.to_string()
             } else {
@@ -865,18 +865,7 @@ pub fn apply_patches(source: &str, patches: &[Patch]) -> String {
                 end: oe as u32 - offset,
                 replacement: "__zp_oc".to_string(),
             }];
-            inner.extend(
-                patches
-                    .iter()
-                    .filter(|q| (q.start as usize) >= start && (q.end as usize) <= end)
-                    .filter(|q| !std::ptr::eq(*q, p))
-                    .filter(|q| !is_program_level_insert(q))
-                    .map(|q| Patch {
-                        start: q.start - offset,
-                        end: q.end - offset,
-                        replacement: shift_marker_positions(&q.replacement, offset),
-                    }),
-            );
+            inner.extend(inner_patches(patches, p, start, end));
             apply_patches(&source[start..end], &inner)
         };
 
@@ -6072,6 +6061,27 @@ mod tests {
             assert!(
                 !r.code.contains("__zp_call(;") && !r.code.contains("__zp_set(;"),
                 "a prelude landed inside a helper call for {src:?}: {}",
+                r.code
+            );
+        }
+    }
+
+    #[test]
+    fn unbraced_with_body_gets_one_helper_prefix() {
+        // The helper bindings of a `with` are a zero-width insertion where its body starts, which is where a rewritten body statement
+        // starts too; a sub-range that took them again printed `const{__zp_get,…}=(function(){return this})();` a second time inside
+        // `__zp_call(` / `__zp_set(`, a SyntaxError.
+        for src in [
+            "with (o) location.href = '/y';",
+            "with (o) history.replaceState(1, '', '/x');",
+            "with (o) foo.bar(1);",
+            "with (o) { history.replaceState(1); }",
+        ] {
+            let r = rewrite_script(src, &opts()).unwrap();
+            assert_eq!(
+                r.code.matches("(function(){return this})()").count(),
+                1,
+                "the helper bindings of the with must appear exactly once for {src:?}: {}",
                 r.code
             );
         }
