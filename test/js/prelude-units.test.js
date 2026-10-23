@@ -28,7 +28,8 @@ function load(code, exports, deps) {
     ttEnforced: () => false, ttCompliant: (_kind, _sink, v) => v, ttScript: x => x, ttHTML: x => x, ttScriptURL: x => x,
     ttFunction: (args, _evalFn, Ctor) => Reflect.construct(Ctor || Function, args), ttEvalSource: x => (typeof x === 'string' ? x : null),
     // Nor does any target policy refuse string evaluation here.
-    cspCheckEval: () => {}, cspRefusals: new WeakSet(), cspInternal: 0,
+    cspCheckEval: () => {}, cspRefusal: () => null,
+    nameLike: (fn, name) => { if (fn.name !== name) Object.defineProperty(fn, 'name', { value: name, configurable: true }); },
   }, deps);
   const names = Object.keys(deps);
   // eslint-disable-next-line no-new-func

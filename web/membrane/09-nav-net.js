@@ -297,8 +297,7 @@
       } else {
         const text = enctype === 'text/plain' ? plainFormBody(data) : urlEncodedFormBody(data);
         // A form posts the bare media type (no charset parameter); a server that matches it exactly does not recognize anything else.
-        const type = enctype === 'text/plain' ? 'text/plain' : 'application/x-www-form-urlencoded';
-        headers.push(['Content-Type', type]);
+        headers.push(['Content-Type', enctype]);
         bytes = new TextEncoder().encode(text);
       }
       return { enctype, headers, body: ZP.bytesToBase64Url(bytes) };
@@ -603,8 +602,8 @@
         return u.pathname === '/' && !u.search ? virtualURL.origin + '/' : virtualURL.href.split('#')[0];
       } catch { return ''; }
     };
-    defineAccessor(w.Document && w.Document.prototype, 'URL', function () { const a = aboutURLOf(this); return a !== null ? a : virtualURL.href; });
-    defineAccessor(w.Document && w.Document.prototype, 'documentURI', function () { const a = aboutURLOf(this); return a !== null ? a : virtualURL.href; });
+    // One getter function of its own per property, as natively.
+    for (const p of ['URL', 'documentURI']) defineAccessor(w.Document && w.Document.prototype, p, function () { const a = aboutURLOf(this); return a !== null ? a : virtualURL.href; });
     // Define `baseURI` on `Node.prototype` where the DOM IDL declares it, rather than
     // adding an own property to `Document.prototype`.
     defineAccessor(w.Node && w.Node.prototype, 'baseURI', () => baseURL);

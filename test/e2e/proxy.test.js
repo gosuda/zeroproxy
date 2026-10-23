@@ -381,6 +381,13 @@ function createTargetServer(requests, pendingResponses) {
   const xckSeen = new Map();
   // Maps request tag to request metadata recorded by /xcors-api.
   const corsLog = new Map();
+  // The captures a fixture keeps per run (`<run>|<key>` entries of a Map), as JSON by key.
+  const serveRunLog = (seen, run, res) => {
+    const out = {};
+    for (const [k, v] of seen) if (k.startsWith(run + '|')) out[k.slice(run.length + 1)] = v;
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+    res.end(JSON.stringify(out));
+  };
   const server = http.createServer((req, res) => {
     ignoreBenignSocketErrors(req);
     ignoreBenignSocketErrors(res);
@@ -3485,13 +3492,7 @@ setTimeout(function () { window.__xstack2 = out; }, 80);
         if (url.pathname === '/xref-landing') return html(`<script>window.__xreflanding = document.referrer;</script>`);
         return html(`<script>parent.postMessage({ xref: { k: ${JSON.stringify(k)}, ref: document.referrer } }, '*');</script>`);
       }
-      if (url.pathname === '/xref-log') {
-        const out = {};
-        for (const [k, v] of seen) if (k.startsWith(run + '|')) out[k.slice(run.length + 1)] = v;
-        res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
-        res.end(JSON.stringify(out));
-        return;
-      }
+      if (url.pathname === '/xref-log') return serveRunLog(seen, run, res);
       if (url.pathname === '/xref') {
         return html(collect(4) + child('cross', other) + child('same') + child('crossUnsafe', other, 'referrerpolicy="unsafe-url"')
           + child('sameNone', '', 'referrerpolicy="no-referrer"'), { 'Referrer-Policy': 'same-origin' });
@@ -3506,13 +3507,7 @@ setTimeout(function () { window.__xstack2 = out; }, 80);
       const run = url.searchParams.get('run') || '';
       const k = url.searchParams.get('k') || '';
       const page = body => { res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' }); res.end(`<!doctype html><title>sub</title><body>${body}</body>`); };
-      if (url.pathname === '/xsub-log') {
-        const out = {};
-        for (const [key, v] of seen) if (key.startsWith(run + '|')) out[key.slice(run.length + 1)] = v;
-        res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
-        res.end(JSON.stringify(out));
-        return;
-      }
+      if (url.pathname === '/xsub-log') return serveRunLog(seen, run, res);
       if (url.pathname === '/xsub-sink' || url.pathname === '/xsub-sink2') {
         let body = '';
         req.on('data', c => { body += c; });
@@ -3564,13 +3559,7 @@ setTimeout(function () { window.__xstack2 = out; }, 80);
         }
         return;
       }
-      if (url.pathname === '/xfm2-log') {
-        const out = {};
-        for (const [k, v] of seen) if (k.startsWith(run + '|')) out[k.slice(run.length + 1)] = v;
-        res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
-        res.end(JSON.stringify(out));
-        return;
-      }
+      if (url.pathname === '/xfm2-log') return serveRunLog(seen, run, res);
       const other = `http://127.0.0.1:${req.socket.localPort}`;
       const q = n => `/xfm2-r?n=${n}&run=${run}`;
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
@@ -7324,14 +7313,16 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
 
   // `page.waitForFunction` compiles its predicate from a string, which a document whose policy refuses string evaluation refuses, as the
   // engine would (an earlier suite leaves such a `<meta>` policy in this page until it navigates): poll with `evaluate`, which does not.
-  const pollPage = async (p, predicate, { timeout = 30000, polling = 100 } = {}) => {
+  const pollPage = async (p, predicate, { timeout = 30000, polling = 100, arg, what = 'pollPage timed out' } = {}) => {
     const end = Date.now() + timeout;
     for (;;) {
-      try { if (await p.evaluate(predicate)) return; } catch { /* the page is navigating */ }
-      if (Date.now() > end) throw new Error('pollPage timed out');
+      try { const v = await p.evaluate(predicate, arg); if (v) return v; } catch { /* the page is navigating */ }
+      if (Date.now() > end) throw new Error(what);
       await new Promise(r => setTimeout(r, polling));
     }
   };
+  // A run's two captures (native, proxied) differ only in the run name the fixtures put in their addresses.
+  const scrub = r => JSON.parse(JSON.stringify(r).split('run=native').join('run=X').split('run=proxied').join('run=X'));
 
   await t.test('dynamic code suite', async t => {
     await page.evaluate(u => { __zp_get(globalThis, 'location').href = u; }, `http://${targetHost}:${targetPort}/dyn-probes`);
@@ -8258,15 +8249,7 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
   const compareTrustedTypes = async (route, key) => {
     const targetBase = `http://${targetHost}:${targetPort}`;
     // puppeteer's waitForFunction compiles its predicate from a string, which a document that enforces Trusted Types refuses: poll with evaluate.
-    const read = async (page, timeout) => {
-      const end = Date.now() + timeout;
-      for (;;) {
-        const v = await page.evaluate(k => window[k], key);
-        if (v) return v;
-        assert.ok(Date.now() < end, `${key} never appeared`);
-        await new Promise(r => setTimeout(r, 100));
-      }
-    };
+    const read = (page, timeout) => pollPage(page, k => window[k], { timeout, arg: key, what: `${key} never appeared` });
     const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
     let direct;
     try {
@@ -8452,7 +8435,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     assert.equal(direct.referrer.cross, '');
     assert.equal(direct.referrer.same, `${targetBase}/xref?run=native`);
     assert.equal(direct.referrer.landing, `${targetBase}/xref-nav?run=native`);
-    const scrub = r => JSON.parse(JSON.stringify(r).split('run=native').join('run=X').split('run=proxied').join('run=X'));
     assert.deepEqual(scrub(proxied), scrub(direct));
   });
 
@@ -8482,7 +8464,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     assert.equal(direct['same|first'].referer, `${targetBase}/xsub?run=native&k=same&tok=1`);
     assert.equal(direct['same|second'].referer, direct['same|first'].referer, 'the redirect hop keeps the Referer');
     assert.equal(direct['cross|first'].referer, `${targetBase}/`);
-    const scrub = r => JSON.parse(JSON.stringify(r).split('run=native').join('run=X').split('run=proxied').join('run=X'));
     assert.deepEqual(scrub(proxied), scrub(direct));
   });
 

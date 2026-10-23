@@ -98,7 +98,7 @@
         fn = function anonymous() { 'use strict'; return nestedCall(compiled, this, arguments, new.target, sloppy); };
       }
       // The minifier renames the function expressions above, and a function's `name` is the name it was written with.
-      Object.defineProperty(fn, 'name', { value: 'anonymous', configurable: true });
+      nameLike(fn, 'anonymous');
       toStringMap.set(fn, dynamicSource(kind, params, body));
       return fn;
     }
@@ -401,17 +401,17 @@
       const methodCache = newMap();
       // An `about:` document (a blank or srcdoc frame) is at no virtual URL: it reports its own, as natively.
       const isAboutLocation = () => { try { return Reflect.get(nativeLoc, 'protocol', nativeLoc) === 'about:'; } catch { return false; } };
+      const aboutToString = function toString() { return Reflect.get(nativeLoc, 'href', nativeLoc); };
       const handler = {
         get(target, prop) {
-          if (typeof prop === 'string' && LOC_VIRT_PROPS.has(prop) && isAboutLocation()) return Reflect.get(nativeLoc, prop, nativeLoc);
-          if (prop === 'toString' && isAboutLocation()) return function toString() { return Reflect.get(nativeLoc, 'href', nativeLoc); };
           if (typeof prop === 'string' && LOC_VIRT_PROPS.has(prop)) {
-            // Fall back to the embedder's `virtualURL` for `about:blank` and `srcdoc` child frames.
+            if (isAboutLocation()) return Reflect.get(nativeLoc, prop, nativeLoc);
+            // This realm's own location answers with its virtual URL; a child frame's, with its own when it has one, else ours.
             if (local) return virtualURL[prop];
             const fv = foreignVirtualURL();
             return (fv || virtualURL)[prop];
           }
-          if (prop === 'toString') return locToString;
+          if (prop === 'toString') return isAboutLocation() ? aboutToString : locToString;
           if (prop === 'assign') return assignLocation;
           if (prop === 'replace') return replaceLocation;
           if (prop === 'reload') return reloadLocation;
@@ -2134,7 +2134,7 @@
       const text = ttIsTrusted('Script', handler) ? ttText('Script', handler) : ttCompliant('Script', sink, String(handler));
       // Evaluate as global code via indirect `dynamicEval` when the timer fires.
       // A string the target's policy refuses to evaluate is dropped when its timer fires (the violation is reported), as the engine does.
-      return function () { try { cspCheckEval(root.document); return dynamicEval.call(undefined, ttScript(text)); } catch (e) { if (cspRefusals.has(e)) return undefined; throw e; } };
+      return function () { if (cspRefusal(root.document)) return undefined; return dynamicEval.call(undefined, ttScript(text)); };
     }
     if (Native.setTimeout) define(root, 'setTimeout', function(handler, delay, ...args) { return Native.setTimeout(timerHandler(handler, 'Window setTimeout'), delay, ...args); });
     if (Native.setInterval) define(root, 'setInterval', function(handler, delay, ...args) { return Native.setInterval(timerHandler(handler, 'Window setInterval'), delay, ...args); });

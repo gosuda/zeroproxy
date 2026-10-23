@@ -203,8 +203,8 @@
         if (callee !== childDynamicEval && callee !== root.eval) return Reflect.apply(callee, undefined, list);
         const arg = list[0];
         const src = ttEvalSource(arg, 'eval', childTT);
-        if (src !== null) cspCheckEval(w.document, arg);
         if (src === null) return arg;
+        cspCheckEval(w.document, arg);
         const directive = childStrictRE.test(src);
         if (!childEval || (globalSite === 1 && !callerStrict && !directive)) return childEvalText(src);
         const runners = childRunners();

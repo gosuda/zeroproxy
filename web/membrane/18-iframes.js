@@ -173,17 +173,17 @@
       const d = Object.getOwnPropertyDescriptor(proto, prop);
       if (!d || !d.set) return;
       // A native attribute accessor rejects a receiver of the wrong type with the engine's own "Illegal invocation" and is no constructor, so it
-      // has no `prototype`: these are made as accessors of an object literal, and brand-check first, handing a wrong receiver to the native
-      // accessor, which throws it.
+      // has no `prototype`: these are made as accessors of an object literal. The getter calls the native one first, which is the brand check
+      // and the value at once; the setter probes with it and hands a wrong receiver to the native setter, so the message says "set".
       const isFrame = el => { try { Reflect.apply(d.get, el, []); return true; } catch { return false; } };
       const holder = {
         get [prop]() {
-          if (!isFrame(this)) return Reflect.apply(d.get, this, []);
-          if (prop === 'srcdoc') return srcdocMeta.has(this) ? srcdocMeta.get(this) : Reflect.apply(d.get, this, []);
+          const native = Reflect.apply(d.get, this, []);
+          if (prop === 'srcdoc') return srcdocMeta.has(this) ? srcdocMeta.get(this) : native;
           const raw = Native.getAttribute.call(this, prop);
           if (raw === null) return '';
           const known = urlMeta.get(this) || Native.getAttribute.call(this, 'data-zp-target-url');
-          return known || deproxyURL(Reflect.apply(d.get, this, []));
+          return known || deproxyURL(native);
         },
         set [prop](v) {
           if (!isFrame(this)) return Reflect.apply(d.set, this, arguments);

@@ -798,7 +798,11 @@
       const tag = node.localName;
       if (tag === 'meta') {
         const eq = String(Native.getAttribute.call(node, 'http-equiv') || '').trim().toLowerCase();
-        if (isCSPHttpEquiv(eq)) { neutralizeCSPMeta(node, eq); continue; }
+        if (isCSPHttpEquiv(eq)) {
+          if (opts && opts.cspMetas) opts.cspMetas.push(Native.getAttribute.call(node, 'content') || '');
+          neutralizeCSPMeta(node, eq);
+          continue;
+        }
         if (eq === 'refresh') {
           const next = proxiedRefreshContent(Native.getAttribute.call(node, 'content') || '');
           if (next) Native.setAttribute.call(node, 'content', next);
@@ -924,27 +928,26 @@
     }
   }
   function srcdocPrelude(extraBoot) { return '<script src="' + ZP.assetURL('zp-core.js') + '"><\/script><script src="' + ZP.assetURL('zp-page-bundle.js') + '"><\/script><script id="__zp-boot" type="application/json">' + bootJSON(extraBoot) + '<\/script><script src="' + ZP.assetURL('runtime-prelude.js') + '"><\/script>'; }
-  // The policy that refuses string evaluation for a srcdoc document: the one it inherits from this document, else one of its own `<meta>` tags.
-  // The membrane booted inside the frame cannot read the originals the transformer keeps (the natives it captured are this realm's wrappers),
-  // so it is told here, in its boot config.
-  function srcdocEvalBlock(markup) {
-    const inherited = cspEvalBlock(root.document);
-    if (inherited) return inherited;
-    for (const tag of String(markup).match(/<meta\b[^>]*>/gi) || []) {
-      if (!/http-equiv\s*=\s*["']?content-security-policy["'\s>\/]/i.test(tag)) continue;
-      const m = /\bcontent\s*=\s*(?:"([^"]*)"|'([^']*)')/i.exec(tag);
-      if (!m) continue;
-      const value = (m[1] !== undefined ? m[1] : m[2]).replace(/&#0*39;|&#x0*27;|&apos;/gi, "'").replace(/&quot;/gi, '"').replace(/&amp;/gi, '&');
-      const block = ZP.evalBlockingPolicy(value);
-      if (block) return block;
-    }
-    return '';
+  // Whether a srcdoc already carries this membrane's prelude. The test is the prelude up to the end of the boot config, not a marker: the
+  // config holds this tab's own keys, which a page cannot know, so page text cannot pass for it (a marker would let a page skip the
+  // injection and run unrewritten markup). `extraBoot` only adds keys after those, so the prefix is the same for every srcdoc.
+  function srcdocHasPrelude(raw) {
+    const full = srcdocPrelude();
+    return raw.indexOf(full.slice(0, full.indexOf('}<\/script><script src="' + ZP.assetURL('runtime-prelude.js')))) >= 0;
+  }
+  // The policy that refuses string evaluation for a srcdoc document: the one it inherits from this document, else one of its own `<meta>`
+  // tags (`metas`: their `content`, which the transformer read, entities decoded, before it neutralized them). The membrane booted inside the
+  // frame cannot read the originals the transformer keeps (the natives it captured are this realm's wrappers), so it is told here, in its
+  // boot config.
+  function srcdocEvalBlock(metas) {
+    return cspEvalBlock(root.document) || metas.map(content => ZP.evalBlockingPolicy(content)).find(Boolean) || '';
   }
   // Keep any leading doctype ahead of the injected prelude scripts so the srcdoc frame does not fall into quirks mode.
   function injectSrcdoc(s) {
-    const markup = forSrcdocMarkup(() => transformHTML(String(s), { document: true }));
+    const metas = [];
+    const markup = forSrcdocMarkup(() => transformHTML(String(s), { document: true, cspMetas: metas }));
     const doctype = /^<!DOCTYPE[^>]*>/i.exec(markup);
-    const block = srcdocEvalBlock(s);
+    const block = srcdocEvalBlock(metas);
     return (doctype ? doctype[0] : '') + srcdocPrelude(block ? { cspEvalBlock: block } : null) + (doctype ? markup.slice(doctype[0].length) : markup);
   }
   function bootJSON(extra) { return JSON.stringify(Object.assign({}, boot, { servers: activeServers, proxyOrigin }, extra)).replace(/[<>&]/g, c => c === '<' ? '\\u003c' : c === '>' ? '\\u003e' : '\\u0026'); }

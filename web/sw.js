@@ -1322,9 +1322,9 @@ async function transportFetch(targetUrl, opt) {
   }
   // A submitted form's entry is made for the address it posts to, but the request's origin is the submitting document's: that is the
   // `Origin` header a cross-origin form carries.
-  const initiatorOrigin = opt.submitReferrer ? new URL(opt.submitReferrer).origin : new URL(documentUrl).origin;
+  const initiatorUrl = opt.submitReferrer || documentUrl;
   const context = Object.freeze({
-    entryId, documentUrl, origin: opt.opaqueOrigin ? 'null' : initiatorOrigin, referrer,
+    entryId, documentUrl, origin: opt.opaqueOrigin ? 'null' : new URL(initiatorUrl).origin, referrer,
     // A site frame's first request comes from its own launcher page, whose policy says nothing about the embedder's.
     referrerPolicy: opt.document && entry && entry.siteFrame ? entry.siteFrame.referrerPolicy : (opt.referrerPolicy || (opt.request && opt.request.referrerPolicy) || (entry && entry.referrerPolicy) || ''),
   });
@@ -1962,17 +1962,16 @@ async function transformDocumentResponse(resp, opt) {
     return safeError('MALFORMED_HTML', 502, targetUrl);
   }
 
-  const preludeHTML = buildRuntimePrelude(opt.tab, opt.entry, ZP.trustedTypesPolicies(resp.headers && resp.headers.get('Content-Security-Policy')), targetEvalRefusal(resp.headers));
+  const preludeHTML = buildRuntimePrelude(opt.tab, opt.entry, ZP.trustedTypesPolicies(resp.headers && resp.headers.get('Content-Security-Policy')), resp.__zpEvalRefusal);
   const injected = injectPrelude(transformed, preludeHTML);
   const headers = new Headers(resp.headers);
   headers.delete('Content-Length');
-  headers.delete('X-ZP-Eval-CSP');
   headers.set('Content-Type', 'text/html; charset=utf-8');
   return new Response(injected, { status: resp.status, statusText: resp.statusText, headers });
 }
 // Pipe decoded HTML bytes through ZPBundle.HtmlTxn for progressive rewriting and prelude injection, failing closed on stream errors.
 function streamDocumentResponse(resp, opt, targetUrl, bodyStream) {
-  const preludeHTML = buildRuntimePrelude(opt.tab, opt.entry, ZP.trustedTypesPolicies(resp.headers && resp.headers.get('Content-Security-Policy')), targetEvalRefusal(resp.headers));
+  const preludeHTML = buildRuntimePrelude(opt.tab, opt.entry, ZP.trustedTypesPolicies(resp.headers && resp.headers.get('Content-Security-Policy')), resp.__zpEvalRefusal);
   let txn;
   try { txn = new self.ZPBundle.HtmlTxn(targetUrl, ORIGIN, preludeHTML); }
   catch { return null; }
@@ -2011,7 +2010,6 @@ function streamDocumentResponse(resp, opt, targetUrl, bodyStream) {
   headers.delete('X-ZP-Stream');
   headers.set('Content-Type', 'text/html; charset=utf-8');
   applyZPSecurityHeaders(headers, opt.request, opt.tab && opt.tab.servers, opt.tab, targetUrl);
-  headers.delete('X-ZP-Eval-CSP');
   const out = new Response((bodyStream || resp.body).pipeThrough(ts), {
     status: resp.status,
     statusText: resp.statusText,
@@ -2022,12 +2020,6 @@ function streamDocumentResponse(resp, opt, targetUrl, bodyStream) {
 function isHTMLResponse(resp) {
   const ct = resp.headers && resp.headers.get('Content-Type') || '';
   return /\btext\/html\b/i.test(ct) || /\bapplication\/xhtml\+xml\b/i.test(ct);
-}
-// The target's policy that refuses string evaluation: kept in an internal header once the response's own policy has been replaced (see
-// applyZPSecurityHeaders), else read from the policy itself.
-function targetEvalRefusal(headers) {
-  if (!headers) return '';
-  return headers.get('X-ZP-Eval-CSP') || ZP.evalBlockingPolicy(headers.get('Content-Security-Policy'));
 }
 // `ttPolicies`: the target's enforced Trusted Types policies (`ZP.trustedTypesPolicies` of its header), which the document enforces and which
 // a blob or data worker it starts inherits. `evalBlocking`: the first policy of that header that refuses string evaluation (`ZP.evalBlockingPolicy`),
@@ -3217,6 +3209,11 @@ function proxiedCSP(servers, challengeCompat, siteFrames) {
     extraConnect: runtimeConfig.wtGateway ? [runtimeConfig.wtGateway] : [],
   });
 }
+// The target's own CSP, for a document only: a worker script's own response CSP governs the worker, whose prelude does not handle Trusted
+// Types sinks or string evaluation.
+function targetDocumentCSP(h) {
+  return /\b(text\/html|application\/xhtml\+xml)\b/i.test(h.get('Content-Type') || '') ? (h.get('Content-Security-Policy') || '') : '';
+}
 // Enforces the proxy CSP on response headers, strips internal `X-ZP-Challenge-Compat` and out-of-band reporting/navigation/hop-by-hop headers, and rewrites `Refresh` headers to stay within the proxy.
 function applyZPSecurityHeaders(h, req, servers, tab, targetUrl) {
   // Attach the virtual target URL alongside `X-ZP-Encoded-Size` or `X-ZP-Stream-Id` so Navigation Timing entries on `/zp/p/<token>` documents match the page's virtual URL.
@@ -3228,12 +3225,7 @@ function applyZPSecurityHeaders(h, req, servers, tab, targetUrl) {
   // The proxy's policy replaces the target's, except that the Trusted Types directives of the target's policies are carried along
   // (each as a policy of its own, so the browser enforces them as it would have): a document that declares them binds the page's
   // string sinks and the membrane's alike, and expects its `default` policy and `createPolicy` name list to be honoured.
-  // Only for documents: a worker script's own response CSP governs the worker, whose prelude does not handle Trusted Types sinks.
-  const targetCSP = /\b(text\/html|application\/xhtml\+xml)\b/i.test(h.get('Content-Type') || '') ? (h.get('Content-Security-Policy') || '') : '';
-  // The target's policy that refuses string evaluation cannot be carried along (the proxy's own has to allow it for the membrane): the document
-  // transform, which runs after this, takes it from this internal header and the membrane enforces it for the page.
-  const evalRefusal = ZP.evalBlockingPolicy(targetCSP);
-  if (evalRefusal) h.set('X-ZP-Eval-CSP', evalRefusal); else h.delete('X-ZP-Eval-CSP');
+  const targetCSP = targetDocumentCSP(h);
   h.delete('Content-Security-Policy');
   h.delete('Content-Security-Policy-Report-Only');
   h.delete('X-Content-Security-Policy');
@@ -3328,8 +3320,14 @@ function encodedSizeKey(rawURL) {
 }
 function addCSP(resp, req, servers, tab, targetUrl) {
   const h = new Headers(resp.headers);
+  // The target's policy that refuses string evaluation cannot be carried along (the proxy's own has to allow it for the membrane), and it is
+  // read here, before applyZPSecurityHeaders replaces the policy. The document transform takes it from the response, like `__zpFetchMeta`.
+  const targetCSP = targetDocumentCSP(h);
+  const evalRefusal = targetCSP ? ZP.evalBlockingPolicy(targetCSP) : '';
   applyZPSecurityHeaders(h, req, servers, tab, targetUrl);
-  return new Response(resp.body, { status: resp.status, statusText: resp.statusText, headers: h });
+  const out = new Response(resp.body, { status: resp.status, statusText: resp.statusText, headers: h });
+  out.__zpEvalRefusal = evalRefusal;
+  return out;
 }
 function safeError(code, status = 400, targetUrl = '') {
   // Extract the leading error code token before `:` so detailed kernel errors (such as `TARGET_HTTP_FAILED: ...`) map to their specific error code instead of falling back to `POLICY_BLOCKED`.
