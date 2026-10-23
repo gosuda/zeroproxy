@@ -2003,6 +2003,12 @@ function createTargetServer(requests, pendingResponses) {
           out['innerHTML.srcdoc.attr'] = sd.getAttribute('srcdoc');
           await sleep(1500);
           out['innerHTML.srcdoc.body'] = (function () { try { return sd.contentDocument.body.innerHTML; } catch (e) { return 'threw:' + e.name; } })();
+          // setAttribute takes the same markup: srcdoc holds a document, not a URL to resolve against the page.
+          h = holder(); var sa = document.createElement('iframe'); sa.setAttribute('srcdoc', '<p id=y>from setAttribute</p>'); h.appendChild(sa);
+          out['setAttribute.srcdoc.prop'] = sa.srcdoc;
+          out['setAttribute.srcdoc.attr'] = sa.getAttribute('srcdoc');
+          await sleep(1500);
+          out['setAttribute.srcdoc.body'] = (function () { try { return sa.contentDocument.body.innerHTML; } catch (e) { return 'threw:' + e.name; } })();
           h = holder(); h.insertAdjacentHTML('beforeend', MARK);
           out['insertAdjacentHTML.beforeend'] = await settle(h.firstChild);
           h = holder(); var mid = document.createElement('i'); h.appendChild(mid); mid.insertAdjacentHTML('afterend', MARK);
@@ -7585,6 +7591,9 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     assert.equal(direct['innerHTML.srcdoc.prop'], '<p id=x>from srcdoc</p>', 'the page\'s text, not the document the proxy made of it');
     assert.equal(direct['innerHTML.srcdoc.attr'], '<p id=x>from srcdoc</p>');
     assert.equal(direct['innerHTML.srcdoc.body'], '<p id="x">from srcdoc</p>', 'and the document it shows');
+    assert.equal(direct['setAttribute.srcdoc.prop'], '<p id=y>from setAttribute</p>');
+    assert.equal(direct['setAttribute.srcdoc.attr'], '<p id=y>from setAttribute</p>');
+    assert.equal(direct['setAttribute.srcdoc.body'], '<p id="y">from setAttribute</p>', 'setAttribute gives the markup a document, not a URL string');
     assert.deepEqual(proxied, direct);
   });
 

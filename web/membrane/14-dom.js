@@ -130,6 +130,8 @@
       }
       if (ln === 'script' && (localKey === 'src' || localKey === 'href')) return setScriptSource(this, v);
       if (localKey === 'style' && v != null) { litSet(this, 'style', v); return Native.setAttribute.call(this, k, rewriteCSSText(v)); }
+      // srcdoc is on the URL surface list for the parser path, but its value is markup: resolving it as a URL would make the frame's document the proxy address.
+      if ((ln === 'iframe' || ln === 'frame') && localKey === 'srcdoc') { setInjectedSrcdoc(this, v); return undefined; }
       if (isURLBearing(this, key, localKey, ln)) {
         if (localKey === 'srcset' || localKey === 'imagesrcset') {
           litSet(this, localKey, v == null ? '' : v);
@@ -169,7 +171,6 @@
           if (Native.removeAttribute) { try { Native.removeAttribute.call(this, 'data-zp-target-url'); } catch {} }
         }
       }
-      if ((ln === 'iframe' || ln === 'frame') && localKey === 'srcdoc') { setInjectedSrcdoc(this, v); return undefined; }
       return Native.setAttribute.call(this, k, v);
     });
     if (Native.setAttributeNS) define(w.Element.prototype, 'setAttributeNS', function(ns, k, v) {
