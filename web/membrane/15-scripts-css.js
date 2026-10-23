@@ -636,11 +636,6 @@
     const t = String(Native.getAttribute.call(el, 'type') || '').trim().toLowerCase();
     return t === 'importmap' ? 'importmap' : t === 'speculationrules' ? 'speculationrules' : '';
   }
-  function blockInlineScriptElement(el) {
-    Native.setAttribute.call(el, 'type', 'application/x-zeroproxy-blocked');
-    Native.setAttribute.call(el, 'data-zp-blocked-script', '1');
-    setScriptText(el, '');
-  }
   function rewriteImportMapText(source) {
     let map;
     try { map = JSON.parse(String(source || '{}')); } catch { return '{}'; }

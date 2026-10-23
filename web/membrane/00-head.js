@@ -423,7 +423,6 @@
   const hiddenIconHref = 'data:application/x-zeroproxy-icon,1';
   const WINDOW_BOUND_METHODS = newSet(['addEventListener','removeEventListener','dispatchEvent','setTimeout','setInterval','clearTimeout','clearInterval','requestAnimationFrame','cancelAnimationFrame','requestIdleCallback','cancelIdleCallback','matchMedia','getComputedStyle','postMessage','atob','btoa','focus','blur','close','print','alert','confirm','prompt','scroll','scrollTo','scrollBy']);
   const serviceWorkerFacades = newWeakMap();
-  const storageMaps = newMap();
   // Shared hook table populated by installPhase2Membrane so sibling functions
   // (such as installNetworkContainment) can invoke the script rewriter for
   // child realms.

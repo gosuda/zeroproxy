@@ -29,8 +29,7 @@
     const NativeAsyncFunction = (async function(){}).constructor;
     const NativeGeneratorFunction = (function*(){}).constructor;
     const NativeAsyncGeneratorFunction = (async function*(){}).constructor;
-    // Declare before functions that reference them so initialization order cannot hit a TDZ.
-    const NativeSyntaxError = root.SyntaxError;
+    // Declare before functions that reference it so initialization order cannot hit a TDZ.
     const parseErrors = newWeakSet();
     function stringArgs(args) {
       const out = new Array(args.length);

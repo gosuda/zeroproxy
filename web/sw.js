@@ -15,7 +15,6 @@ const resourceContext = new Map();
 const pendingSubmissions = new Map();
 const streams = new Map();
 const SUBMISSION_TTL_MS = 5 * 60 * 1000;
-let rewriterPromise = null;
 let bundlePromise = null;
 
 // In-memory LRU cache for rewritten script bodies, keyed by
@@ -1191,23 +1190,6 @@ const TRANSPARENT_PNG_BYTES = Uint8Array.from(
   atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkAAIAAAoAAv/lxKUAAAAASUVORK5CYII='),
   c => c.charCodeAt(0)
 );
-
-const RESPONSE_CACHE_NAME = 'zp-resp-v1';
-const STATIC_ASSET_EXT_RE = /\.(?:js|css|png|jpg|jpeg|gif|svg|webp|woff2?|ttf|otf|ico|mp3|mp4|wasm)(?:\?|$)/i;
-
-async function tryRespCacheGet(url) {
-  try {
-    const c = await caches.open(RESPONSE_CACHE_NAME);
-    const r = await c.match(url);
-    return r || null;
-  } catch { return null; }
-}
-async function tryRespCachePut(url, response) {
-  try {
-    const c = await caches.open(RESPONSE_CACHE_NAME);
-    await c.put(url, response);
-  } catch {}
-}
 
 // Compute the outgoing `Referer` header value according to the active `Referrer-Policy`.
 function refererForPolicy(base, targetUrl, policy) {

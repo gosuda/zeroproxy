@@ -11,6 +11,7 @@ fn opts() -> RewriteOpts {
         kind: ScriptKind::Classic,
         target_url: "https://example.com/".into(),
         strict: true,
+        proxy_origin: String::new(),
     }
 }
 
