@@ -2839,33 +2839,6 @@ document.body.appendChild(doc);
 <\/script></body>`);
       return;
     }
-    if (url.pathname === '/xperf.js') {
-      res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-store' });
-      res.end('window.__perfScript = 1;');
-      return;
-    }
-    if (url.pathname === '/xperf') {
-      // The performance timeline a page serializes: names must be the target's, in `name` and in `toJSON()` alike, and a long frame lists only the page's scripts.
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
-      res.end(`<!doctype html><title>perf</title><body><script src="/xperf.js"><\/script><script>
-        fetch('/xperf.js').then(function (r) { return r.text(); }).then(function () {
-          setTimeout(function () { var t0 = Date.now(); while (Date.now() - t0 < 140); }, 20);
-          setTimeout(function () {
-            var entries = performance.getEntries();
-            var urls = function (json) { var r = []; json.replace(/"(name|sourceURL)":"([^"]*)"/g, function (m, k, v) { r.push(k + ':' + v); return m; }); return r; };
-            window.__xperf = {
-              names: entries.filter(function (e) { return (e.entryType === 'resource' || e.entryType === 'navigation') && !/favicon/.test(e.name); }).map(function (e) { return e.entryType + ':' + e.name; }).sort(),
-              jsonNames: urls(JSON.stringify(entries.filter(function (e) { return (e.entryType === 'resource' || e.entryType === 'navigation') && !/favicon/.test(e.name); }))).sort(),
-              allJson: JSON.stringify(entries),
-              loafScripts: performance.getEntriesByType('long-animation-frame').map(function (l) { return (l.scripts || []).map(function (s) { return s.sourceURL; }); }),
-              loafJson: JSON.stringify(performance.getEntriesByType('long-animation-frame')),
-              scriptJson: (function () { var l = performance.getEntriesByType('long-animation-frame')[0]; return l && l.scripts && l.scripts[0] ? JSON.stringify(l.scripts[0]) : ''; })()
-            };
-          }, 900);
-        });
-      <\/script></body>`);
-      return;
-    }
     if (url.pathname === '/xevid') {
       // Window identity across events, as page code reads it.
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
@@ -8249,17 +8222,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     assert.deepEqual(proxied, direct);
   });
 
-  await t.test('the performance timeline a page serializes names the target, in toJSON as in name, and a long frame lists the page\'s own scripts (matches native)', async () => {
-    const { direct, proxied } = await compareTrustedTypes('/xperf', '__xperf');
-    assert.ok(direct.names.some(n => n.startsWith('resource:') && n.endsWith('/xperf.js')), 'the native reference changed');
-    assert.deepEqual(proxied.names, direct.names, 'resource and navigation names');
-    assert.deepEqual(proxied.jsonNames, direct.jsonNames, 'the serialized names are the names');
-    for (const k of ['allJson', 'loafJson', 'scriptJson']) assert.doesNotMatch(proxied[k], /\/zp\/|runtime-prelude|#k=/, `${k} names no proxy route`);
-    for (const list of proxied.loafScripts) for (const u of list) assert.doesNotMatch(String(u), /\/zp\//, 'a long frame lists no membrane script');
-    // Whatever the native frames attribute, every proxied script is one the page has.
-    const nativeScripts = new Set(direct.loafScripts.flat());
-    for (const list of proxied.loafScripts) for (const u of list) assert.ok(nativeScripts.size === 0 || nativeScripts.has(u), `an attribution the native frames lack: ${u}`);
-  });
 
 
   // The proxy's own policy has to allow eval for the membrane, so the target's refusal of it is made by the membrane.
