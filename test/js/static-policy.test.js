@@ -686,27 +686,6 @@ test('filteredCollection iteration is O(N)', () => {
   assert.equal(lv.length, 2, 'snapshot cache did not refresh after underlying length grew');
 });
 
-test('document encoded size is not evicted by subresource bursts', () => {
-  const sw = fs.readFileSync('web/sw.js', 'utf8').split('\r\n').join('\n');
-  const start = sw.indexOf('const docEncodedByUrl = new Map();');
-  assert.ok(start >= 0, 'docEncodedByUrl not found');
-  const end = sw.indexOf('function deliverStreamEncoded(');
-  assert.ok(end > start, 'recordEncoded section not found');
-  const src = 'const streamEncodedByUrl = new Map();\n' + sw.slice(start, end);
-  const { recordEncoded, docEncodedByUrl, streamEncodedByUrl } =
-    new Function(src + '\nreturn { recordEncoded, docEncodedByUrl, streamEncodedByUrl };')();
-
-  const DOC = 'https://target.example/page';
-  recordEncoded(DOC, 14010, true);
-  for (let i = 0; i < 200; i++) recordEncoded('https://target.example/beacon/' + i, 20, false);
-
-  assert.equal(docEncodedByUrl.get(DOC), 14010,
-    '200 subresources evicted the document encoded-size entry');
-  assert.ok(streamEncodedByUrl.size <= 32, 'subresource map exceeded its size cap');
-  for (let i = 0; i < 50; i++) recordEncoded('https://target.example/doc/' + i, 1, true);
-  assert.ok(docEncodedByUrl.size <= 8, 'document map exceeded its size cap');
-});
-
 test('trap notebook INDEX stays one line per entry, with a link that resolves', () => {
   const dir = '.ai/trap-notebook/';
   const lines = fs.readFileSync(dir + 'INDEX.md', 'utf8').split(/\r?\n/);
@@ -764,32 +743,6 @@ test('transportFetch enforces a deadline on kernelFetch', () => {
     await new Promise((r) => setTimeout(r, 40));
     assert.equal(seen.length, 1, 'timer for a completed request must not fire later');
   })();
-});
-
-test('SW response path does not await clients.get', () => {
-  const sw = fs.readFileSync('web/sw.js', 'utf8').split('\r\n').join('\n');
-  const src = sw.slice(sw.indexOf('async function reportEncodedSize('), sw.indexOf('function encodedSizeKey('));
-  const make = new Function(
-    'self', 'pendingStreamReports', 'isNavigationRequest', 'recordEncoded', 'encodedSizeKey', 'Response', 'Headers',
-    src + '; return reportEncodedSize;'
-  );
-  const never = new Promise(() => {});
-  const fakeSelf = { clients: { get: () => never } };
-  const reported = [];
-  const reportEncodedSize = make(
-    fakeSelf, new Map(), () => true, (url, size) => reported.push([url, size]),
-    (u) => u, Response, Headers
-  );
-  const resp = new Response('body', { headers: { 'X-ZP-Encoded-Size': '1234', 'X-ZP-Encoded-For': 'https://t/doc' } });
-  const event = { clientId: '', resultingClientId: 'reserved-id', request: { url: 'http://proxy.localhost/zp/p/x' } };
-  return Promise.race([
-    reportEncodedSize(event, resp),
-    new Promise((_, rej) => setTimeout(() => rej(new Error('response hung waiting for clients.get')), 500)),
-  ]).then((out) => {
-    assert.equal(out.status, 200, 'response must resolve even if clients.get never settles');
-    assert.equal(out.headers.get('X-ZP-Encoded-Size'), null, 'internal X-ZP-Encoded-Size header must be stripped');
-    assert.deepEqual(reported, [['https://t/doc', 1234]], 'pull path (recordEncoded) must remain intact');
-  });
 });
 
 test('early child-window postMessage wrapper restores native postMessage on boot', () => {

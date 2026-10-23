@@ -1263,11 +1263,11 @@ test('embedding bridge API: ZP.configureBridge, ctx.setBridge, and ctx.dispose m
   const appliedCookies = [];
   const block = slice(
     '  const bridge = (() => {',
-    '  function askDocumentEncodedSize(attempt) {'
+    '  // Register this client with the service worker\'s tab context so'
   );
   const env = load(
     'let realmDisposed = false; let __zpHeartbeatTimer = 99;\n' + block,
-    ['ctx', 'encodedSizes'],
+    ['ctx'],
     {
       root,
       ctx,
@@ -1284,8 +1284,8 @@ test('embedding bridge API: ZP.configureBridge, ctx.setBridge, and ctx.dispose m
 
   assert.equal(typeof env.ctx.bridge.send, 'function');
   assert.equal(typeof inboundListener, 'function');
-  inboundListener({ type: globalThis.ZP.MSG.ENCODED_SIZE, url: 'https://example.com/a.js', size: 1234 });
-  assert.equal(env.encodedSizes.get('https://example.com/a.js'), 1234);
+  inboundListener({ type: globalThis.ZP.MSG.COOKIE_CHANGE, changes: ['c=1'] });
+  assert.deepEqual(appliedCookies, [['c=1']]);
 
   let nextInbound = null;
   let nextDisposed = 0;

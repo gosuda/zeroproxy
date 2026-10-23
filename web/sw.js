@@ -386,9 +386,7 @@ self.addEventListener('fetch', event => {
   try {
     if (new URL(u).pathname === ZP.apiPath('sync-fetch')) return;
   } catch {}
-  const responded = handleFetch(event)
-    .then(resp => reportEncodedSize(event, resp))
-    .then(completeBodyResponse);
+  const responded = handleFetch(event).then(completeBodyResponse);
   event.respondWith(responded);
   // Attach lifetime after all header/HTML wrappers: recreating a Response
   // otherwise loses its completion promise. Cancellation must reach the kernel.
@@ -1995,8 +1993,6 @@ function streamDocumentResponse(resp, opt, targetUrl, bodyStream) {
         const tail = txn.end();
         if (tail && tail.byteLength) { stats.out += tail.byteLength; controller.enqueue(tail); }
         stats.state = 'closed';
-        // Deliver the pre-decompression wire byte count recorded by the kernel pump once the stream finishes flushing.
-        deliverStreamEncoded(streamIdForReport);
       } catch (e) {
         stats.state = 'flush-error';
         stats.err = (e && (e.message || e.code)) || String(e);
@@ -2005,7 +2001,6 @@ function streamDocumentResponse(resp, opt, targetUrl, bodyStream) {
     },
   });
   const headers = new Headers(resp.headers);
-  const streamIdForReport = resp.headers.get('X-ZP-Stream-Id') || '';
   headers.delete('Content-Length');
   headers.delete('X-ZP-Stream');
   headers.set('Content-Type', 'text/html; charset=utf-8');
@@ -2093,13 +2088,6 @@ async function handleMessage(event) {
   const reply = event.ports && event.ports[0];
   // Keepalive ping from runtime-prelude to reset the SW idle timer during long fetch-quiet gaps.
   if (msg && msg.type === '__zpKeepAlive') return;
-  if (msg && msg.type === ZP.MSG.ENCODED_SIZE_QUERY) {
-    const key = String(msg.url || '');
-    const size = docEncodedByUrl.get(key) || streamEncodedByUrl.get(key) || 0;
-    if (size) { docEncodedByUrl.delete(key); streamEncodedByUrl.delete(key); }
-    if (reply) reply.postMessage({ ok: true, size });
-    return;
-  }
   // Dump the JS-array trace ring without calling initKernel() so diagnostics still work after a WASM trap.
   if (msg && msg.type === '__zpTraceDump') {
     if (reply) reply.postMessage({ ok: true, trace: (self.__zpRustTrace || []).slice(-400), streamStats: self.__zpStreamStats || null });
@@ -3216,8 +3204,6 @@ function targetDocumentCSP(h) {
 }
 // Enforces the proxy CSP on response headers, strips internal `X-ZP-Challenge-Compat` and out-of-band reporting/navigation/hop-by-hop headers, and rewrites `Refresh` headers to stay within the proxy.
 function applyZPSecurityHeaders(h, req, servers, tab, targetUrl) {
-  // Attach the virtual target URL alongside `X-ZP-Encoded-Size` or `X-ZP-Stream-Id` so Navigation Timing entries on `/zp/p/<token>` documents match the page's virtual URL.
-  try { if (targetUrl && (h.get('X-ZP-Encoded-Size') || h.get('X-ZP-Stream-Id'))) h.set('X-ZP-Encoded-For', targetUrl); } catch {}
   const rawRefresh = h.get('Refresh');
   const responseSignalled = h.get('X-ZP-Challenge-Compat') === '1';
   h.delete('X-ZP-Challenge-Compat');
@@ -3243,81 +3229,8 @@ function applyZPSecurityHeaders(h, req, servers, tab, targetUrl) {
   applyCORS(h, req);
   return h;
 }
-// Relays pre-decompression wire byte counts (`X-ZP-Encoded-Size`) to the requesting client only so Resource Timing reports accurate `encodedBodySize` without leaking target URLs across tabs.
-const pendingStreamReports = new Map();
 // One-time stash for `blob:`/`data:` worker sources passed via bootstrap URL hash and consumed by `/zp/api/worker-script?srctok=...`.
 const workerSrcStash = new Map();
-const streamEncodedByUrl = new Map();
-// Keep navigation document sizes in a separate FIFO from subresources so bursts of subresource requests cannot evict the document's entry before the page queries it.
-const docEncodedByUrl = new Map();
-const DOC_ENCODED_CAP = 8;
-function isNavigationRequest(req) {
-  try { return req.mode === "navigate" || req.destination === "document" || req.destination === "iframe"; } catch { return false; }
-}
-function recordEncoded(url, size, isDoc) {
-  const m = isDoc ? docEncodedByUrl : streamEncodedByUrl;
-  m.set(url, size);
-  const cap = isDoc ? DOC_ENCODED_CAP : 32;
-  if (m.size > cap) m.delete(m.keys().next().value);
-}
-function deliverStreamEncoded(streamId) {
-  if (!streamId) return;
-  const pending = pendingStreamReports.get(streamId);
-  pendingStreamReports.delete(streamId);
-  if (!pending) return;
-  const table = self.__zpStreamEncoded;
-  const size = table && Number(table[streamId]);
-  if (!size) return;
-  try { delete table[streamId]; } catch {}
-  // Record by URL in addition to pushing via `postMessage` because a navigation's `resultingClientId` may not resolve or have its message listener attached at stream flush time.
-  recordEncoded(pending.url, size, !!pending.isDoc);
-  self.clients.get(pending.clientId).then(client => {
-    if (client) client.postMessage({ type: ZP.MSG.ENCODED_SIZE, url: pending.url, size });
-  }).catch(() => {});
-}
-async function reportEncodedSize(event, resp) {
-  try {
-    if (!resp || !resp.headers) return resp;
-    const streamId = resp.headers.get('X-ZP-Stream-Id');
-    const encFor0 = resp.headers.get('X-ZP-Encoded-For');
-    if (streamId) {
-      const id = event.clientId || event.resultingClientId;
-      if (id && encFor0) pendingStreamReports.set(streamId, { clientId: id, url: encFor0, isDoc: isNavigationRequest(event.request) });
-      const h2 = new Headers(resp.headers);
-      h2.delete('X-ZP-Stream-Id');
-      h2.delete('X-ZP-Encoded-For');
-      return new Response(resp.body, { status: resp.status, statusText: resp.statusText, headers: h2 });
-    }
-    const enc = resp.headers.get('X-ZP-Encoded-Size');
-    if (!enc) return resp;
-    const headers = new Headers(resp.headers);
-    const encFor = resp.headers.get('X-ZP-Encoded-For');
-    headers.delete('X-ZP-Encoded-Size');
-    headers.delete('X-ZP-Encoded-For');
-    const out = new Response(resp.body, { status: resp.status, statusText: resp.statusText, headers });
-    const id = event.clientId || event.resultingClientId;
-    // Do not `await clients.get(resultingClientId)` on the response path: a navigation's resulting client only materializes after the response commits, so awaiting it deadlocks `respondWith`.
-    if (id) {
-      self.clients.get(id).then((client) => {
-        if (client) client.postMessage({ type: ZP.MSG.ENCODED_SIZE, url: encFor || encodedSizeKey(event.request.url), size: Number(enc) || 0 });
-      }).catch(() => {});
-    }
-    if (encFor) {
-      recordEncoded(encFor, Number(enc) || 0, isNavigationRequest(event.request));
-    }
-    return out;
-  } catch { return resp; }
-}
-function encodedSizeKey(rawURL) {
-  try {
-    const u = new URL(rawURL);
-    if (u.pathname === ZP.apiPath('fetch') || u.pathname === ZP.apiPath('v2/fetch')) return u.searchParams.get('url') || rawURL;
-    if (u.pathname === ZP.apiPath('script') || u.pathname === ZP.apiPath('worker-script') || u.pathname === ZP.apiPath('sourcemap')) {
-      return u.searchParams.get('u') || rawURL;
-    }
-    return rawURL;
-  } catch { return rawURL; }
-}
 function addCSP(resp, req, servers, tab, targetUrl) {
   const h = new Headers(resp.headers);
   // The target's policy that refuses string evaluation cannot be carried along (the proxy's own has to allow it for the membrane), and it is

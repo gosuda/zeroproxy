@@ -25,7 +25,7 @@
 //! macros (no socket I/O, no multi-thread runtime).
 
 use std::io;
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use bytes::Bytes;
@@ -270,31 +270,6 @@ pub(crate) async fn send_request(
     finish_response(status, reason, resp_headers, null_body, Box::pin(chunks), Box::new(|| {})).await
 }
 
-/// IDs are carried only for HTML timing; non-HTML streams need no global entry.
-static ZP_STREAM_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-
-pub(crate) fn next_stream_id() -> u64 {
-    ZP_STREAM_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-}
-
-fn record_stream_encoded(id: u64, encoded: usize) {
-    let global = js_sys::global();
-    let key = JsValue::from_str("__zpStreamEncoded");
-    let map = match js_sys::Reflect::get(&global, &key) {
-        Ok(v) if v.is_object() => v,
-        _ => {
-            let o = js_sys::Object::new();
-            let _ = js_sys::Reflect::set(&global, &key, &o);
-            o.into()
-        }
-    };
-    let _ = js_sys::Reflect::set(
-        &map,
-        &JsValue::from_str(&id.to_string()),
-        &JsValue::from_f64(encoded as f64),
-    );
-}
-
 pub(crate) async fn finish_response(
     status: u16,
     reason: String,
@@ -311,7 +286,6 @@ pub(crate) async fn finish_response(
         .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
         .map(|(_, v)| v.split(';').next().unwrap_or("").trim().to_ascii_lowercase())
         .unwrap_or_default();
-    let is_html = content_type == "text/html";
     let executable = content_type.contains("javascript") || content_type.contains("ecmascript")
         || content_type == "text/css";
     let coding = content_encoding.trim().to_ascii_lowercase();
@@ -329,12 +303,10 @@ pub(crate) async fn finish_response(
             body.extend_from_slice(&chunk);
         }
         if !null_body {
-            let encoded = body.len();
             body = super::decode::decode_body(&content_encoding, body)?;
             headers.retain(|(k, _)| !k.eq_ignore_ascii_case("content-encoding")
                 && !k.eq_ignore_ascii_case("content-length") && !k.eq_ignore_ascii_case("transfer-encoding"));
             headers.push(("Content-Length".into(), body.len().to_string()));
-            headers.push(("X-ZP-Encoded-Size".into(), encoded.to_string()));
         }
         on_complete();
         return Ok(H2Response::Buffered(HttpResponse { status, reason, headers, body, null_body }));
@@ -342,31 +314,18 @@ pub(crate) async fn finish_response(
 
     headers.retain(|(k, _)| !k.eq_ignore_ascii_case("content-encoding")
         && !k.eq_ignore_ascii_case("content-length") && !k.eq_ignore_ascii_case("transfer-encoding"));
-    let stream_id = is_html.then(next_stream_id);
-    if let Some(id) = stream_id {
-        headers.push(("X-ZP-Stream-Id".into(), id.to_string()));
-    }
-    let encoded = Rc::new(Cell::new(0usize));
-    let count = encoded.clone();
     let raw_chunks = chunks.map(move |chunk| {
         let chunk = chunk.map_err(js_error)?;
-        count.set(count.get().saturating_add(chunk.len()));
         Ok(js_sys::Uint8Array::from(&chunk[..]).into())
     });
-    let complete: Box<dyn FnOnce()> = Box::new(move || {
-        on_complete();
-        if let Some(id) = stream_id {
-            record_stream_encoded(id, encoded.get());
-        }
-    });
     let stream = if matches!(coding.as_str(), "" | "identity") {
-        readable_stream(Box::pin(raw_chunks), complete)
+        readable_stream(Box::pin(raw_chunks), on_complete)
     } else {
         // Native stream decoding validates gzip CRC/ISIZE and zlib trailers,
         // propagates cancellation, and bounds output with native backpressure.
         // br/zstd and stacked codings take the bounded Rust buffered path above.
         let raw = readable_stream(Box::pin(raw_chunks), Box::new(|| {})).map_err(stream_error)?;
-        decode_readable_stream(raw, if coding == "x-gzip" { "gzip" } else { &coding }, complete)
+        decode_readable_stream(raw, if coding == "x-gzip" { "gzip" } else { &coding }, on_complete)
     }.map_err(stream_error)?;
     Ok(H2Response::Streaming(StreamingResponse { status, reason, headers, stream }))
 }

@@ -38,13 +38,8 @@
     }, 15000);
   }
   startSWKeepAlive();
-  // Record upstream wire body sizes pushed by the service worker for
-  // ResourceTiming encodedBodySize fidelity.
-  const encodedSizes = newMap();
   const onBridgeMessage = (d) => {
-    if (d && d.type === ZP.MSG.COOKIE_CHANGE) { applyCookieChanges(d.changes); return; }
-    if (!d || d.type !== ZP.MSG.ENCODED_SIZE || !d.url) return;
-    encodedSizes.set(String(d.url), Number(d.size) || 0);
+    if (d && d.type === ZP.MSG.COOKIE_CHANGE) applyCookieChanges(d.changes);
   };
   try {
     const sw = Native.serviceWorker || (root.navigator && root.navigator.serviceWorker);
@@ -85,18 +80,6 @@
       try { ctx.bridge.dispose(); } catch {}
     }
   };
-  // Query the document's own encoded wire size after boot since navigation
-  // responses complete before resultingClientId is bound.
-  function askDocumentEncodedSize(attempt) {
-    ctx.bridge.send({ type: ZP.MSG.ENCODED_SIZE_QUERY, url: virtualURL.href })
-      .then(reply => {
-        const size = reply && Number(reply.size);
-        if (size) { encodedSizes.set(virtualURL.href, size); return; }
-        if (attempt < 6) setTimeout(() => askDocumentEncodedSize(attempt + 1), 400);
-      })
-      .catch(() => { if (attempt < 6) setTimeout(() => askDocumentEncodedSize(attempt + 1), 400); });
-  }
-  try { setTimeout(() => askDocumentEncodedSize(0), 300); } catch {}
   // Register this client with the service worker's tab context so
   // non-navigational realms (`about:srcdoc`, `blob:`, `about:blank`) can issue
   // subresource fetches.
