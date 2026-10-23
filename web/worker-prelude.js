@@ -1552,10 +1552,8 @@
       }
     }
   } catch {}
-  // Hide internal `__ZP_WORKER_*`, `__zp_*`, and `ZP` globals from key enumeration and descriptor queries.
-  const nativeGOPN = Object.getOwnPropertyNames, nativeOwnKeys = Reflect.ownKeys, nativeGOPDs = Object.getOwnPropertyDescriptors;
-  const isGlobalTarget = t => t === self || t === scope;
-  const visibleKey = k => typeof k !== 'string' || !ZP_HIDDEN_RE.test(k);
+  // Keep the prelude's names out of `for...in` and `Object.keys` of the global: they are defined non-enumerable, but the bootstrap assigns some of them.
+  const nativeGOPN = Object.getOwnPropertyNames;
   const hideZPNames = () => {
     for (const k of Reflect.apply(nativeGOPN, Object, [self])) {
       if (!ZP_HIDDEN_RE.test(k)) continue;
@@ -1563,15 +1561,6 @@
       if (d && d.enumerable && d.configurable) try { Object.defineProperty(self, k, { enumerable: false }); } catch {}
     }
   };
-  try {
-    Object.getOwnPropertyNames = ({ getOwnPropertyNames(o) { const out = Reflect.apply(nativeGOPN, Object, [o]); return isGlobalTarget(o) ? out.filter(visibleKey) : out; } }).getOwnPropertyNames;
-    Reflect.ownKeys = ({ ownKeys(o) { const out = Reflect.apply(nativeOwnKeys, Reflect, [o]); return isGlobalTarget(o) ? out.filter(visibleKey) : out; } }).ownKeys;
-    Object.getOwnPropertyDescriptors = ({ getOwnPropertyDescriptors(o) {
-      const out = Reflect.apply(nativeGOPDs, Object, [o]);
-      if (isGlobalTarget(o)) for (const k of Reflect.apply(nativeOwnKeys, Reflect, [out])) if (!visibleKey(k)) delete out[k];
-      return out;
-    } }).getOwnPropertyDescriptors;
-  } catch {}
   hideZPNames();
   // Move each hook to the object that owns the native member of the same name (`nativeGlobals`). The native stays reachable
   // from there otherwise: `WorkerGlobalScope.prototype.setTimeout.call(undefined, code)` runs `code` unrewritten on the real global.

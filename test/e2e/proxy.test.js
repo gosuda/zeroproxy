@@ -8086,7 +8086,8 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     // A worker's hooks print their own source and its navigator getters are not native-shaped: that is not pinned (a worker is not asked to look
     // like a browser's). What is pinned for workers is the placement (`protoMembers`: the hook sits where the native member lives, so no native
     // is left reachable behind it) and what a library reads to tell a worker from a page.
-    const workerShapeOnly = ['srcFetch', 'srcSetTimeout', 'srcPostMessage', 'srcImportScripts', 'srcXHROpen', 'srcFunction', 'srcEval', 'uaShape', 'platformShape', 'uaDataShape'];
+    const workerShapeOnly = ['srcFetch', 'srcSetTimeout', 'srcPostMessage', 'srcImportScripts', 'srcXHROpen', 'srcFunction', 'srcEval', 'uaShape', 'platformShape', 'uaDataShape',
+      'globalOwnCount', 'globalOwn', 'zpNames'];
     const diff = {};
     for (const realm of ['page', 'blob', 'file']) {
       for (const k of Object.keys(direct[realm] || {})) {
