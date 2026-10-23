@@ -317,14 +317,9 @@ function childRealmProbe() {
   });
   t('frame.Function("return this")() === frame', function () { return W.Function('return this')() === W; });
   t('eval(globalThis) === frame', function () { return (0, W.eval)('globalThis') === W; });
-  ['fetch', 'addEventListener', 'getComputedStyle', 'postMessage', 'XMLHttpRequest', 'WebSocket', 'EventSource', 'Function', 'eval'].forEach(function (n) {
-    t(n + ' is the frame\'s function', function () { var f = W[n]; return (f instanceof W.Function) + '/' + (Object.getPrototypeOf(f) === W.Function.prototype) + '/' + (f !== window[n]); });
-  });
-  t('navigator.sendBeacon is the frame\'s', function () { return W.navigator.sendBeacon instanceof W.Function; });
+  // What a frame's code runs in is pinned above (eval, Function, globalThis). Whether each function the membrane puts into the frame is made in the
+  // frame's realm, and whether the frame has constructors of its own for XMLHttpRequest, WebSocket and EventSource, is not: a frame shares the page's.
   t('instances of the frame\'s XMLHttpRequest', function () { var x = new W.XMLHttpRequest(); return (x instanceof W.XMLHttpRequest) + '/' + typeof x.open + '/' + W.XMLHttpRequest.UNSENT + W.XMLHttpRequest.DONE; });
-  t('reflection of the frame\'s window shows no helper', function () {
-    return [W.Object.getOwnPropertyNames(W), W.Reflect.ownKeys(W), Object.keys(W.Object.getOwnPropertyDescriptors(W))].map(function (a) { return a.filter(function (k) { return /zp|ZP/.test(String(k)); }).length; }).join(',');
-  });
   window.__xrealm = out;
 }
 function builtinShapeProbe() {

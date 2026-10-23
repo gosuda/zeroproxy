@@ -48,23 +48,6 @@
       return !!(d && d.enumerable);
     } catch { return false; }
   }
-  // Re-parent cross-realm wrapper functions to the target realm's
-  // Function.prototype (or parent interface constructor) so `instanceof Function`
-  // and prototype chain checks match native behavior.
-  let realmInstallFP = null;
-  function sameRealmAs(value, replaced, key) {
-    try {
-      if (Object.getPrototypeOf(value) !== Function.prototype) return;
-      const own = Object.getOwnPropertyDescriptor(root, key);
-      if (own && own.value === value) return;
-      let wanted = Object.getPrototypeOf(replaced);
-      // Interface constructors inherit from their parent interface constructor;
-      // fall back to realmInstallFP when replacing a constructor already wrapped.
-      if ((!wanted || wanted === Function.prototype) && realmInstallFP) wanted = realmInstallFP;
-      if (!wanted || wanted === Function.prototype) return;
-      Object.setPrototypeOf(value, wanted);
-    } catch {}
-  }
   function define(obj, key, value) {
     try {
       const prev = typeof value === 'function' ? Object.getOwnPropertyDescriptor(obj, key) : null;
@@ -72,8 +55,8 @@
       let inherited = null;
       if (typeof value === 'function' && !prev) { try { inherited = Reflect.get(obj, key); } catch {} }
       Object.defineProperty(obj, key, { value, enumerable: nativeEnumerability(obj, key), configurable: false, writable: true });
-      if (prev && typeof prev.value === 'function') { lengthLike(value, prev.value); sameRealmAs(value, prev.value, key); }
-      else if (typeof inherited === 'function' && inherited !== value) { lengthLike(value, inherited); sameRealmAs(value, inherited, key); }
+      if (prev && typeof prev.value === 'function') lengthLike(value, prev.value);
+      else if (typeof inherited === 'function' && inherited !== value) lengthLike(value, inherited);
       // Preserve the property key as `.name` in case minification renamed the wrapper function.
       if (typeof value === 'function' && value.name !== key) {
         try { Object.defineProperty(value, 'name', { value: key, configurable: true }); } catch {}
