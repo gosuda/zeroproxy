@@ -351,10 +351,16 @@
         const bootVirtualHref = virtualURL.href;
         const typeDesc = Object.getOwnPropertyDescriptor(entryProto, 'entryType');
         const isNavigationEntry = e => { try { return !!typeDesc && typeDesc.get.call(e) === 'navigation'; } catch { return false; } };
+        // The entries of a request the page made, or of a frame document, are named by their target; the proxy's own loads keep the name they have.
+        const entryName = raw => {
+          const target = deproxyURL(raw);
+          if (target !== raw || raw.lastIndexOf(proxyOrigin, 0) !== 0) return target;
+          try { return ZP.isSharePath(new Native.URL(raw).pathname) ? virtualURL.href : raw; } catch { return raw; }
+        };
         defineMasked(entryProto, 'name', {
           get() {
             if (isNavigationEntry(this)) return bootVirtualHref;
-            return deproxyURL(nativeName.call(this), { fallback: 'share' });
+            return entryName(nativeName.call(this));
           },
           configurable: true,
           enumerable: nameDesc.enumerable
@@ -364,7 +370,7 @@
         if (typeof nativeToJSON === 'function') {
           define(entryProto, 'toJSON', function toJSON() {
             const out = nativeToJSON.call(this);
-            try { if (out && typeof out === 'object' && 'name' in out) out.name = isNavigationEntry(this) ? bootVirtualHref : deproxyURL(out.name, { fallback: 'share' }); } catch {}
+            try { if (out && typeof out === 'object' && 'name' in out) out.name = this.name; } catch {}
             return out;
           });
         }
@@ -382,107 +388,6 @@
             });
           });
         }
-      }
-      // Align `PerformanceResourceTiming` attributes with the virtualized network environment
-      // (where `navigator.serviceWorker.controller === null` and HTTPS targets report TLS/H2 metadata).
-      const resProto = w.PerformanceResourceTiming && w.PerformanceResourceTiming.prototype;
-      const timingOverrides = {
-        workerStart: () => 0,
-        nextHopProtocol: (e, raw) => {
-          if (raw) return raw;
-          try { return new Native.URL(e.name).protocol === 'https:' ? 'h2' : 'http/1.1'; }
-          catch { return 'h2'; }
-        },
-        deliveryType: () => '',
-        encodedBodySize: (e, raw) => {
-          const known = encodedSizes.get(e.name);
-          return known && known < raw ? known : raw;
-        },
-        transferSize: (e, raw) => {
-          if (raw) return raw;
-          const known = encodedSizes.get(e.name);
-          if (known) return known + 300;
-          return e.encodedBodySize ? e.encodedBodySize + 300 : raw;
-        },
-        secureConnectionStart: (e, raw) => {
-          if (raw) return raw;
-          try { if (new Native.URL(e.name).protocol !== 'https:') return raw; } catch { return raw; }
-          return e.connectStart || raw;
-        },
-      };
-      if (resProto) {
-        for (const key of Object.keys(timingOverrides)) {
-          const desc = Object.getOwnPropertyDescriptor(resProto, key);
-          if (!desc || typeof desc.get !== 'function') continue;
-          const nativeGet = desc.get;
-          const fix = timingOverrides[key];
-          try {
-            defineMasked(resProto, key, {
-              get() { try { return fix(this, nativeGet.call(this)); } catch { return nativeGet.call(this); } },
-              configurable: true,
-              enumerable: desc.enumerable,
-            });
-            maskAccessorFn(Object.getOwnPropertyDescriptor(resProto, key).get, 'get', key);
-          } catch {}
-        }
-        const nativeResToJSON = resProto.toJSON;
-        if (typeof nativeResToJSON === 'function') {
-          define(resProto, 'toJSON', function toJSON() {
-            const out = nativeResToJSON.call(this);
-            try {
-              for (const key of Object.keys(timingOverrides)) {
-                if (out && typeof out === 'object' && key in out) out[key] = this[key];
-              }
-            } catch {}
-            return out;
-          });
-        }
-      }
-
-      // Filter out internal proxy infrastructure assets (`/zp/assets/*`, `/__zp/*`,
-      // worker bootstrap scripts, and `blob:` URLs) that do not map to a target URL.
-      const rawEntryName = e => (nameDesc && nameDesc.get ? Reflect.apply(nameDesc.get, e, []) : e.name);
-      const isInfraEntry = (e) => {
-        try {
-          const n = rawEntryName(e);
-          if (typeof n !== 'string') return false;
-          if (n.lastIndexOf(proxyOrigin, 0) === 0) {
-            // Keep `/zp/p/<token>` frame document entries (`initiatorType === "iframe"`).
-            try { if (ZP.isSharePath(new Native.URL(n).pathname)) return false; } catch {}
-            return deproxyURL(n).lastIndexOf(proxyOrigin, 0) === 0;
-          }
-          return n.lastIndexOf('blob:' + proxyOrigin, 0) === 0;
-        } catch { return false; }
-      };
-      const perfProtoForList = w.Performance && w.Performance.prototype;
-      if (perfProtoForList) {
-        for (const method of ['getEntries', 'getEntriesByType', 'getEntriesByName']) {
-          const native = perfProtoForList[method];
-          if (typeof native !== 'function') continue;
-          define(perfProtoForList, method, function (...args) {
-            const out = native.apply(this, args);
-            try { return Array.prototype.filter.call(out, e => !isInfraEntry(e)); } catch { return out; }
-          });
-        }
-      }
-      // Apply the same infrastructure-entry filter to `PerformanceObserver` callbacks.
-      const NativePO = w.PerformanceObserver;
-      if (typeof NativePO === 'function') {
-        const ZPPerformanceObserver = function PerformanceObserver(cb) {
-          const wrapped = typeof cb !== 'function' ? cb : function (list, obs) {
-            const filtered = {
-              getEntries: () => Array.prototype.filter.call(list.getEntries(), e => !isInfraEntry(e)),
-              getEntriesByType: (t) => Array.prototype.filter.call(list.getEntriesByType(t), e => !isInfraEntry(e)),
-              getEntriesByName: (n, t) => Array.prototype.filter.call(list.getEntriesByName(n, t), e => !isInfraEntry(e)),
-            };
-            try { Object.setPrototypeOf(filtered, Object.getPrototypeOf(list)); } catch {}
-            return cb.call(this, filtered, obs);
-          };
-          return Reflect.construct(NativePO, [wrapped], new.target || ZPPerformanceObserver);
-        };
-        try { ZPPerformanceObserver.prototype = NativePO.prototype; } catch {}
-        try { defineMasked(ZPPerformanceObserver, 'supportedEntryTypes', { get: () => NativePO.supportedEntryTypes, configurable: true }); } catch {}
-        define(w, 'PerformanceObserver', ZPPerformanceObserver);
       }
     } catch {}
     // Virtualize FeaturePolicy, Notification.permission, and Permissions.query

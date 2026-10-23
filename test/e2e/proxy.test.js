@@ -2626,7 +2626,8 @@ function createTargetServer(requests, pendingResponses) {
         P('secure', function () { return [isSecureContext, crossOriginIsolated].join(','); });
         P('prepareStackTrace', function () { return typeof Error.prepareStackTrace; });
         P('stackShape', function () { return String(new Error('x').stack).split(String.fromCharCode(10)).length > 1; });
-        P('perfNames', function () { return performance.getEntries().map(function (e) { return e.entryType + ':' + e.name.replace(/^[a-z]+:[/][/][^/]+/, ''); }).join(' | '); });
+        // The names are the page's own URLs; the proxy's own loads (/zp/ paths, blob: bootstraps) are listed too and are not compared.
+        P('perfNames', function () { return performance.getEntries().filter(function (e) { return !/[/]zp[/]|^blob:/.test(e.name); }).map(function (e) { return e.entryType + ':' + e.name.replace(/^[a-z]+:[/][/][^/]+/, ''); }).join(' | '); });
         P('srcFetch', function () { return src(fetch); });
         P('srcSetTimeout', function () { return src(setTimeout); });
         P('srcPostMessage', function () { return src(self.postMessage); });

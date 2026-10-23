@@ -1497,7 +1497,7 @@
       })().catch(e => { setTimeout(() => { throw e; }, 0); });
     }
   }
-  // Rewrite proxy resource timing entry names back to virtual target URLs and filter out internal proxy infrastructure entries.
+  // Rewrite proxy resource timing entry names back to virtual target URLs, so an entry is found under the URL the worker fetched.
   try {
     const entryProto = self.PerformanceEntry && self.PerformanceEntry.prototype;
     const nameDesc = entryProto && Object.getOwnPropertyDescriptor(entryProto, 'name');
@@ -1513,8 +1513,6 @@
         if (u.pathname === '/zp/api/script') return u.searchParams.get('u') || null;
         return null;
       };
-      const isInfra = e => { try { return targetOf(rawName(e)) === null; } catch { return false; } };
-      const shown = list => Array.prototype.filter.call(list, e => !isInfra(e));
       Object.defineProperty(entryProto, 'name', {
         get: Object.getOwnPropertyDescriptor({ get name() { const n = rawName(this); const t = targetOf(n); return t === null ? n : t; } }, 'name').get,
         enumerable: nameDesc.enumerable, configurable: true,
@@ -1525,31 +1523,11 @@
         proto.toJSON = ({ toJSON() { const out = Reflect.apply(nativeToJSON, this, []); try { if (out && 'name' in out) out.name = this.name; } catch {} return out; } }).toJSON;
       }
       const nativeGetEntries = perfProto.getEntries, nativeByType = perfProto.getEntriesByType;
-      perfProto.getEntries = ({ getEntries() { return shown(Reflect.apply(nativeGetEntries, this, [])); } }).getEntries;
-      perfProto.getEntriesByType = ({ getEntriesByType(type) { return shown(Reflect.apply(nativeByType, this, [type])); } }).getEntriesByType;
       perfProto.getEntriesByName = ({ getEntriesByName(name, type) {
         const wanted = String(name);
         const all = type === undefined ? Reflect.apply(nativeGetEntries, this, []) : Reflect.apply(nativeByType, this, [type]);
-        return Array.prototype.filter.call(shown(all), e => e.name === wanted);
+        return Array.prototype.filter.call(all, e => e.name === wanted);
       } }).getEntriesByName;
-      const NativePO = self.PerformanceObserver;
-      if (typeof NativePO === 'function') {
-        const ZPPerformanceObserver = function PerformanceObserver(cb) {
-          const wrapped = typeof cb !== 'function' ? cb : function (list, obs) {
-            const filtered = {
-              getEntries: () => shown(list.getEntries()),
-              getEntriesByType: t => shown(list.getEntriesByType(t)),
-              getEntriesByName: (n, t) => shown(list.getEntriesByName(n, t)),
-            };
-            try { Object.setPrototypeOf(filtered, Object.getPrototypeOf(list)); } catch {}
-            return cb.call(this, filtered, obs);
-          };
-          return Reflect.construct(NativePO, [wrapped], new.target || ZPPerformanceObserver);
-        };
-        ZPPerformanceObserver.prototype = NativePO.prototype;
-        try { Object.defineProperty(ZPPerformanceObserver, 'supportedEntryTypes', Object.getOwnPropertyDescriptor(NativePO, 'supportedEntryTypes')); } catch {}
-        self.PerformanceObserver = ZPPerformanceObserver;
-      }
     }
   } catch {}
   // Keep the prelude's names out of `for...in` and `Object.keys` of the global: they are defined non-enumerable, but the bootstrap assigns some of them.
