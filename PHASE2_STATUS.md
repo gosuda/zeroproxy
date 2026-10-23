@@ -8,8 +8,8 @@ The table below lists the verification commands and baseline metrics across all 
 
 | Suite | Command | Scope and Baseline |
 | :--- | :--- | :--- |
-| **JavaScript unit and policy** | `npm run test:js` | Policy rules, core helpers, Service Worker routing, and prelude contracts (179 tests) |
-| **Rust workspace** | `cargo test --workspace` | OXC rewriter matrix (3,360 combinations), HTML/CSS transforms, codecs, and shared policy (317 passing, 3 ignored) |
+| **JavaScript unit and policy** | `npm run test:js` | Policy rules, core helpers, Service Worker routing, and prelude contracts (185 tests) |
+| **Rust workspace** | `cargo test --workspace` | OXC rewriter matrix (3,360 combinations), HTML/CSS transforms, codecs, and shared policy (326 passing, 3 ignored) |
 | **Go server and host** | `go test ./...` | HTTP host handler, relay bridge, share URL parity, and TURN/WebTransport gateways (all packages pass) |
 | **WASM bundle integration** | `npm run test:wasm:ci` | Contract checks against compiled WASM artifacts in `dist/` (15 passing tests) |
 | **Browser E2E** | `npm run test:e2e` | E1 containment escape matrix and native-vs-proxy differential suite (256 passing tests with site-isolated frames on, the default; the suite also passes with `ZP_E2E_SITE_FRAMES=0`) |
