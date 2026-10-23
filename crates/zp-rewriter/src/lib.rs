@@ -723,6 +723,15 @@ fn obj_only(
     Some(((rewrite(os, oe), ()), ()))
 }
 
+/// The lexical-registry prelude and the bind calls after declarations belong to the program as a whole. Each sits at a position
+/// that can also be the first or last byte of an expression (`history.replaceState(x); var f;` has the prelude exactly where the
+/// call starts), and a nested range must not claim it: the receiver text a call rewrite rebuilds would carry a second copy of the
+/// prelude inside `__zp_call(`, a SyntaxError.
+fn is_program_level_insert(q: &Patch) -> bool {
+    q.start == q.end
+        && (q.replacement.starts_with(";{const __zp_bad=__zp_lex_decl(") || q.replacement.starts_with(";__zp_lex_bind("))
+}
+
 pub fn apply_patches(source: &str, patches: &[Patch]) -> String {
     // Deduplicate overlapping patches: when patch B is fully contained inside
     // patch A (A.start <= B.start && B.end <= A.end), prefer A (outer) and
@@ -826,6 +835,7 @@ pub fn apply_patches(source: &str, patches: &[Patch]) -> String {
                 .iter()
                 .filter(|q| (q.start as usize) >= start && (q.end as usize) <= end)
                 .filter(|q| !std::ptr::eq(*q, p))
+                .filter(|q| !is_program_level_insert(q))
                 .map(|q| Patch {
                     start: q.start - offset,
                     end: q.end - offset,
@@ -860,6 +870,7 @@ pub fn apply_patches(source: &str, patches: &[Patch]) -> String {
                     .iter()
                     .filter(|q| (q.start as usize) >= start && (q.end as usize) <= end)
                     .filter(|q| !std::ptr::eq(*q, p))
+                    .filter(|q| !is_program_level_insert(q))
                     .map(|q| Patch {
                         start: q.start - offset,
                         end: q.end - offset,
@@ -6039,6 +6050,31 @@ mod tests {
             "patch-mode should emit only changed regions, got {} patches",
             r.patches.len()
         );
+    }
+
+    #[test]
+    fn lexical_prelude_appears_once_when_the_first_statement_is_rewritten() {
+        // The prelude sits exactly where the first statement starts; a call or an assignment rewrite that rebuilds its receiver
+        // text from the sub-range used to carry a second copy of it inside `__zp_call(` / `__zp_set(`.
+        for src in [
+            "history.replaceState(null, '', '/x'); var f;",
+            "\n  history.replaceState(null, '', '/x');\n  var f = 1;",
+            "location.href = '/y'; var f;",
+            "'use strict'; history.pushState(1, '', '/z'); function g() {}",
+        ] {
+            let r = rewrite_script(src, &opts()).unwrap();
+            assert_eq!(
+                r.code.matches("__zp_lex_decl(").count(),
+                1,
+                "the registry prelude must appear exactly once for {src:?}: {}",
+                r.code
+            );
+            assert!(
+                !r.code.contains("__zp_call(;") && !r.code.contains("__zp_set(;"),
+                "a prelude landed inside a helper call for {src:?}: {}",
+                r.code
+            );
+        }
     }
 
     #[test]
