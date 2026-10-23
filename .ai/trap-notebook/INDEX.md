@@ -6,6 +6,7 @@ Keep each summary to a single line under 160 characters and point every detail l
 
 | Date | Category | Summary | Detail |
 |---|---|---|---|
+| 2026-10-24 | membrane / frames | Observer re-routed the site-frame address it had written; CNN renderer died (CPU 100%, GBs). Observer skips it; smoke asks for an answer. | rewriter.md#site-frame-route-loop-2026-10-24 |
 | 2026-10-23 | real-site / harness | Smoke harness clicked a disabled Open button (failed from the second site on); the Turnstile demo origin answers 502 natively too. | real-site-compat.md#smoke-order-and-turnstile-demo-2026-10-23 |
 | 2026-10-23 | membrane / fix | setAttribute('srcdoc') resolved markup as a URL (srcdoc is on the URL surface list); the srcdoc branch now runs first. | rewriter.md#prune-fidelity-2026-10-23 |
 | 2026-10-23 | membrane / pruning | Fidelity-only code removed one piece at a time, Glassdoor kept 6/6 each step. Stack text, iframe shape, timeline JSON, guard layer. | rewriter.md#prune-fidelity-2026-10-23 |
