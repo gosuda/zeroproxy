@@ -7566,7 +7566,10 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     // The observer of a blank child frame's document saw the address the membrane had just written (a share path on a site host), took it for
     // the page's own URL and routed it again: a new token, a host prefixed once more (s-s-...), every round a third longer, until the page died.
     // The frame's visible address may be replaced once by its own document (a new token of the same length, a fragment added); that is not the loop.
-    const page = await openProxiedPage(`http://${targetHost}:${targetPort}/xnested`);
+    // The loop is the routing of frames to site hosts, so site frames are asked for here whatever mode the suite runs in.
+    const page = await browser.newPage();
+    await observeTarget(page.target());
+    assert.ok(await openThroughLauncher(page, proxyOrigin, `http://${targetHost}:${targetPort}/xnested`, { siteFrames: true }), 'the launcher did not reach /xnested');
     try {
       const routed = () => page.frames().map(f => f.url()).filter(u => /^http:\/\/s-[a-z0-9-]+\.localhost:\d+\/zp\/p\//.test(u));
       let first = [];
