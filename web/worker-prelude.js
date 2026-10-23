@@ -245,18 +245,10 @@
   }
   expose('__zp_eval', workerDirectEval);
   try { Object.defineProperty(workerEval, 'name', { value: 'eval', configurable: true }); } catch {}
-  // Under object-literal keys: the minifier renames function names but keeps these keys, and V8 prints the function's debug name
-  // as the type of an object that inherits `constructor` from it (`Function.toString` in a stack frame, not `x.toString`).
-  const workerConstructors = {
-    Function: function () { return workerDynamicFunction(NativeFunctionCtor, Array.prototype.slice.call(arguments)); },
-    AsyncFunction: function () { return workerDynamicFunction(NativeAsyncFunctionCtor, Array.prototype.slice.call(arguments)); },
-    GeneratorFunction: function () { return workerDynamicFunction(NativeGeneratorFunctionCtor, Array.prototype.slice.call(arguments)); },
-    AsyncGeneratorFunction: function () { return workerDynamicFunction(NativeAsyncGeneratorFunctionCtor, Array.prototype.slice.call(arguments)); },
-  };
-  const workerFunction = workerConstructors.Function;
-  const workerAsyncFunction = workerConstructors.AsyncFunction;
-  const workerGeneratorFunction = workerConstructors.GeneratorFunction;
-  const workerAsyncGeneratorFunction = workerConstructors.AsyncGeneratorFunction;
+  const workerFunction = function Function() { return workerDynamicFunction(NativeFunctionCtor, Array.prototype.slice.call(arguments)); };
+  const workerAsyncFunction = function AsyncFunction() { return workerDynamicFunction(NativeAsyncFunctionCtor, Array.prototype.slice.call(arguments)); };
+  const workerGeneratorFunction = function GeneratorFunction() { return workerDynamicFunction(NativeGeneratorFunctionCtor, Array.prototype.slice.call(arguments)); };
+  const workerAsyncGeneratorFunction = function AsyncGeneratorFunction() { return workerDynamicFunction(NativeAsyncGeneratorFunctionCtor, Array.prototype.slice.call(arguments)); };
   // Point each function prototype's `.constructor` at the rewriting wrapper so `fn.constructor` cannot reach the
   // unrewritten native constructor, while keeping `.prototype` set to the real intrinsic prototype.
   for (const [ctor, wrapper] of [

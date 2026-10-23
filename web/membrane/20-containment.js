@@ -138,8 +138,7 @@
         cspCheckEval(w.document, value);
         return childEvalText(text);
       };
-      // Under an object-literal key so the minifier keeps the debug name `Function` that V8 prints in stack frames.
-      const childConstructors = { Function: function (...args) {
+      childFunctionFacade = function Function(...args) {
         cspCheckEval(w.document);
         // Validate and convert parameters via the native constructor without
         // executing the unrewritten body.
@@ -155,8 +154,7 @@
         const compiled = childExecGlobal(pageRewriteHooks.rewrite('(' + source + ')', 'classic'));
         toStringMap.set(compiled, source);
         return compiled;
-      } };
-      childFunctionFacade = childConstructors.Function;
+      };
       Object.defineProperty(childFunctionFacade, 'prototype', { value: childFunction.prototype });
       Object.defineProperty(childFunctionFacade, 'length', { value: 1 });
       maskNativeFunction(childDynamicEval, 'eval');

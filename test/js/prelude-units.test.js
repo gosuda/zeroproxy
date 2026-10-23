@@ -44,7 +44,7 @@ const normalizedError = name => { const e = new Error(name); e.name = name; retu
 
 const DYN_BLOCK = slice(
   '    function stringArgs(args) {',
-  '    // Declared under object-literal keys'
+  '    const dynamicFunction = function Function'
 );
 // The helper bindings every `with` starts with (00-head.js).
 const ZP_WITH_PROLOGUE = load(slice('  const ZP_WITH_HELPERS = [', '  const ZP_EVENT_CALL_HEAD = '), ['ZP_WITH_PROLOGUE'], {}).ZP_WITH_PROLOGUE;

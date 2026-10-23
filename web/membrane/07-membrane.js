@@ -147,18 +147,10 @@
       try { return execGlobalScript(globalCode); }
       finally { __zp_lex_env = prevLexEnv; }
     }
-    // Declared under object-literal keys: the minifier renames function names but keeps these keys, and V8 names the type of an
-    // object that inherits `constructor` from the function's debug name (stack frames read `Function.toString`, not `x.toString`).
-    const dynamicConstructors = {
-      Function: function (...args) { return compileDynamic(Native.FunctionCtor, args, 'function'); },
-      AsyncFunction: function (...args) { return compileDynamic(NativeAsyncFunction, args, 'async'); },
-      GeneratorFunction: function (...args) { return compileDynamic(NativeGeneratorFunction, args, 'generator'); },
-      AsyncGeneratorFunction: function (...args) { return compileDynamic(NativeAsyncGeneratorFunction, args, 'asyncGenerator'); },
-    };
-    const dynamicFunction = dynamicConstructors.Function;
-    const dynamicAsyncFunction = dynamicConstructors.AsyncFunction;
-    const dynamicGeneratorFunction = dynamicConstructors.GeneratorFunction;
-    const dynamicAsyncGeneratorFunction = dynamicConstructors.AsyncGeneratorFunction;
+    const dynamicFunction = function Function(...args) { return compileDynamic(Native.FunctionCtor, args, 'function'); };
+    const dynamicAsyncFunction = function AsyncFunction(...args) { return compileDynamic(NativeAsyncFunction, args, 'async'); };
+    const dynamicGeneratorFunction = function GeneratorFunction(...args) { return compileDynamic(NativeGeneratorFunction, args, 'generator'); };
+    const dynamicAsyncGeneratorFunction = function AsyncGeneratorFunction(...args) { return compileDynamic(NativeAsyncGeneratorFunction, args, 'asyncGenerator'); };
     function setDynamicConstructorIdentity(fn, name, proto) {
       try { Object.defineProperty(fn, 'name', { value: name, configurable: true }); } catch {}
       try { Object.defineProperty(fn, 'length', { value: 1, configurable: true }); } catch {}

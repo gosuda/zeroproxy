@@ -112,9 +112,7 @@
     // inline script frames, hide `Proxy.` receivers on window facade calls, and
     // preserve receiver type names on method calls.
     function scriptFrameText(f) {
-      // A builtin frame (`Function.prototype.toString`, `String`, ...) has no script and no position: V8 prints it as `(<anonymous>)`.
-      const positionless = f.getLineNumber() == null && !(f.getScriptNameOrSourceURL() || f.getFileName());
-      const loc = positionless ? '<anonymous>' : sanitizeFrameWithPositions(String(f.getScriptNameOrSourceURL() || f.getFileName() || '<anonymous>') + ':' + f.getLineNumber() + ':' + f.getColumnNumber());
+      const loc = sanitizeFrameWithPositions(String(f.getScriptNameOrSourceURL() || f.getFileName() || '<anonymous>') + ':' + f.getLineNumber() + ':' + f.getColumnNumber());
       let fn = f.getFunctionName();
       if (fn === 'eval' && isOwnEvalFrame(f)) fn = null;
       // Hide internal membrane wrapper names (`__zp_dyn__`, etc.).
