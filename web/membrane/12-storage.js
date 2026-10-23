@@ -258,9 +258,6 @@
         return g === null ? baseURL : g;
       };
       const ZPURL = function URL(input, base) {
-        // The engine words a missing `new` and a missing argument; the native constructor says it.
-        if (!new.target) return nativeApply(Native.URL, this, arguments);
-        if (arguments.length < 1) return nativeReflectConstruct(Native.URL, []);
         const g = unleakedTargetRaw(String(input));
         const inp = g === null ? baseURL : g;
         // Per WebIDL, an explicit `undefined` optional argument is treated as omitted.
@@ -285,7 +282,6 @@
               try { pageBlobURLs.delete(String(u)); } catch {}
               return orig.call(Native.URL, u);
             };
-        ZPURL[sm] = guardMethod(ZPURL, sm, ZPURL[sm], orig, () => true);
         try { Object.defineProperty(ZPURL[sm], 'name', { value: sm, configurable: true }); } catch {}
         maskNativeFunction(ZPURL[sm], sm);
       }

@@ -1110,14 +1110,13 @@ test('source-masking helpers register getters, setters, and methods as native co
   assert.ok(from > 0 && to > from, 'masking helper section not found');
   const masked = new Map();
   const api = new Function(
-    'toStringMap', 'nativeAccessorSource', 'maskNativeFunction', 'maskAccessorFn', 'nameLike', 'guardedDescriptor',
+    'toStringMap', 'nativeAccessorSource', 'maskNativeFunction', 'maskAccessorFn', 'nameLike',
     rt.slice(from, to) + '\nreturn { defineMasked, definePropertiesMasked, assignMasked };')(
     masked,
     (kind, key) => 'function ' + kind + ' ' + String(key) + '() { [native code] }',
     (fn, key) => { if (typeof fn === 'function') masked.set(fn, 'function ' + String(key) + '() { [native code] }'); },
     (fn, kind, key) => { if (typeof fn === 'function') masked.set(fn, 'function ' + kind + ' ' + String(key) + '() { [native code] }'); },
     () => {},
-    (_obj, _key, desc) => desc, // the receiver/arity guard has its own tests
   );
 
   const NATIVE = /\{\s*\[native code\]\s*\}/;

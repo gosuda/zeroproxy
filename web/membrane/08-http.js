@@ -102,15 +102,9 @@
     if (Native.fetch && Native.Request && Native.Headers) define(root, 'fetch', function fetch(input, init) { return fetchThroughRuntime(input, init); });
     if (Native.XMLHttpRequest && Native.fetch && Native.Request && Native.Headers) {
       const UNSENT = 0, OPENED = 1, HEADERS_RECEIVED = 2, LOADING = 3, DONE = 4;
-      // The instances of the replacement class: its members answer any other receiver as the native class does.
-      const xhrInstances = newWeakSet();
       const xhrRecords = newWeakMap();
-      const xhrBrand = recv => xhrInstances.has(recv);
-      let spareXhr = null;
-      const xhrSpare = () => spareXhr || (spareXhr = new Native.XMLHttpRequest());
       function ZPXMLHttpRequest() {
         if (!new.target) throw new TypeError("Failed to construct 'XMLHttpRequest': Please use the 'new' operator, this DOM object constructor cannot be called as a function.");
-        xhrInstances.add(this);
         // The state lives in a record the instance does not expose: a native request owns no properties.
         // Native defaults are null, not undefined, so the prototype accessors
         // below report `null` on an untouched request.
@@ -141,10 +135,7 @@
         const nativeAccessor = Native.XMLHttpRequest && Object.getOwnPropertyDescriptor(Native.XMLHttpRequest.prototype, _n);
         const getter = function () { return xhrState(this)[_n]; };
         const setter = nativeAccessor && !nativeAccessor.set ? undefined : function (v) { xhrState(this)[_n] = v; };
-        defineAccessor(ZPXMLHttpRequest.prototype, _n,
-          nativeAccessor && nativeAccessor.get ? guardGetter(ZPXMLHttpRequest.prototype, _n, getter, nativeAccessor.get, xhrBrand) : getter,
-          setter && nativeAccessor && nativeAccessor.set ? guardSetter(ZPXMLHttpRequest.prototype, _n, setter, nativeAccessor.set, xhrBrand, xhrSpare) : setter,
-          Native.XMLHttpRequest && Native.XMLHttpRequest.prototype);
+        defineAccessor(ZPXMLHttpRequest.prototype, _n, getter, setter, Native.XMLHttpRequest && Native.XMLHttpRequest.prototype);
       }
       // Route synchronous XHR through the same-origin `/zp/api/sync-fetch` relay.
       // The Go server parks the HTTP response while the Service Worker performs
@@ -323,7 +314,6 @@
         overrideMimeType() {}
       });
       maskMethods(ZPXMLHttpRequest.prototype, ['open','setRequestHeader','send','abort','getResponseHeader','getAllResponseHeaders','overrideMimeType']);
-      guardClassMembers(ZPXMLHttpRequest.prototype, Native.XMLHttpRequest.prototype, xhrBrand, xhrSpare);
       brandLikeNative(ZPXMLHttpRequest, ZPXMLHttpRequest.prototype, 'XMLHttpRequest');
       define(root, 'XMLHttpRequest', ZPXMLHttpRequest);
     }

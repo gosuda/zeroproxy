@@ -4,7 +4,7 @@
     const d = proto && Object.getOwnPropertyDescriptor(proto, key);
     if (!d || typeof d.value !== 'function') return;
     const orig = d.value;
-    const fn = guardMethod(proto, key, make(orig), orig);
+    const fn = make(orig);
     try { Object.defineProperty(fn, 'name', { value: orig.name, configurable: true }); } catch {}
     try { Object.defineProperty(fn, 'length', { value: orig.length, configurable: true }); } catch {}
     maskNativeFunction(fn, key);

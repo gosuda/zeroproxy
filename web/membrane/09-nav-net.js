@@ -1,5 +1,5 @@
 
-  function installBeacon() { if (!navigator.sendBeacon || !Native.fetch || !Native.Request || !Native.Headers) return; defineMethodOnProto(navigator, root.Navigator && root.Navigator.prototype, 'sendBeacon', function sendBeacon(url, data) { try { fetchThroughRuntime(url, { method: 'POST', body: data, keepalive: true, credentials: 'include', mode: 'no-cors' }).catch(()=>{}); return true; } catch { return false; } }); }
+  function installBeacon() { if (!navigator.sendBeacon || !Native.fetch || !Native.Request || !Native.Headers) return; defineMethodOnProto(navigator, root.Navigator && root.Navigator.prototype, 'sendBeacon', function sendBeacon(url, data) { if (!arguments.length) throw new TypeError("Failed to execute 'sendBeacon' on 'Navigator': 1 argument required, but only 0 present."); try { fetchThroughRuntime(url, { method: 'POST', body: data, keepalive: true, credentials: 'include', mode: 'no-cors' }).catch(()=>{}); return true; } catch { return false; } }); }
   // Validate protocol-handler registration arguments per HTML spec rules
   // (scheme safelist or `web+` prefix, `%s` placeholder, and virtual same-origin
   // check) and return without invoking the native browser prompt, which would

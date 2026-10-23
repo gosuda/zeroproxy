@@ -38,119 +38,6 @@
   function maskMethods(obj, keys) {
     for (const key of keys) maskNativeFunction(obj && obj[key], key);
   }
-  // A call a WebIDL member cannot take is answered by the engine, and the page can compare the answer: a receiver
-  // without the interface's internal slots ("Illegal invocation"), fewer arguments than the operation requires
-  // ("1 argument required, but only 0 present"). A replacement installed over such a member would run instead and
-  // return a value. So each replacement is wrapped: an invalid call goes to the member it replaced, which throws the
-  // real error before it does anything; every valid call reaches the replacement.
-  //
-  // The receiver is checked with a getter of the same interface that the membrane leaves alone. Only interfaces whose
-  // receivers are always the engine's own objects are checked: the membrane hands out stand-ins for others
-  // (a filtered NamedNodeMap or HTMLCollection, a storage facade), and those keep the argument check only.
-  const BRAND_PROBE_KEYS = { __proto__: null, Node: 'nodeType', Element: 'localName', HTMLElement: 'title', Document: 'compatMode', Navigator: 'onLine', History: 'length' };
-  const JS_BUILTIN_NAMES = newSet(['Object', 'Function', 'Array', 'String', 'Number', 'Boolean', 'Symbol', 'BigInt', 'Date', 'RegExp',
-    'Error', 'EvalError', 'RangeError', 'ReferenceError', 'SyntaxError', 'TypeError', 'URIError', 'AggregateError', 'Map', 'Set',
-    'WeakMap', 'WeakSet', 'WeakRef', 'FinalizationRegistry', 'Promise', 'ArrayBuffer', 'SharedArrayBuffer', 'DataView', 'TypedArray',
-    'Iterator', 'AsyncIterator', 'Generator', 'GeneratorFunction', 'AsyncFunction', 'AsyncGenerator', 'AsyncGeneratorFunction']);
-  const guardOriginals = newWeakMap();
-  const brandProbes = newWeakMap();
-  // What a guard hands an invalid call to: the native member under a replacement, or one a guard already wraps.
-  function originalOf(fn) { return guardOriginals.get(fn) || fn; }
-  function isNativeMember(fn) {
-    return typeof fn === 'function' && (guardOriginals.has(fn) || !toStringMap.has(fn));
-  }
-  function isInterfacePrototype(obj) {
-    if (!obj || typeof obj !== 'object') return false;
-    const c = nativeReflectGOPD(obj, 'constructor');
-    return !!(c && typeof c.value === 'function' && c.value.prototype === obj && c.value.name && !JS_BUILTIN_NAMES.has(c.value.name));
-  }
-  function brandProbeOf(proto) {
-    if (brandProbes.has(proto)) return brandProbes.get(proto);
-    let probe = null;
-    const c = nativeReflectGOPD(proto, 'constructor');
-    const key = c && c.value ? BRAND_PROBE_KEYS[c.value.name] : undefined;
-    const d = key ? nativeReflectGOPD(proto, key) : undefined;
-    if (d && typeof d.get === 'function' && !toStringMap.has(d.get) && !guardOriginals.has(d.get)) probe = d.get;
-    brandProbes.set(proto, probe);
-    return probe;
-  }
-  function brandHolds(probe, recv) {
-    if (recv === null || (typeof recv !== 'object' && typeof recv !== 'function')) return false;
-    try { nativeApply(probe, recv, []); return true; } catch { return false; }
-  }
-  // Where a replacement is guarded: the members of an interface prototype and of the window itself.
-  function guardScope(obj) {
-    if (obj === root) return { probe: null };
-    return isInterfacePrototype(obj) ? { probe: brandProbeOf(obj) } : null;
-  }
-  // `spare` returns an instance of the native class, for a replacement class whose receivers are not native: a call with
-  // too few arguments is then refused by the native member on the spare instance, which words the error.
-  function guardMethod(obj, key, impl, prevValue, brand, spare) {
-    if (typeof impl !== 'function' || guardOriginals.has(impl) || !isNativeMember(prevValue) || nativeHasOwn.call(prevValue, 'prototype')) return impl;
-    const scope = brand ? { probe: null } : guardScope(obj);
-    if (!scope) return impl;
-    const orig = originalOf(prevValue), need = orig.length, probe = brand ? null : scope.probe;
-    const name = typeof key === 'symbol' ? key : String(key);
-    const g = { [name]() {
-      if (brand ? !brand(this) : probe !== null && !brandHolds(probe, this)) return nativeApply(orig, this, arguments);
-      if (arguments.length < need) return nativeApply(orig, spare ? spare() : this, arguments);
-      return nativeApply(impl, this, arguments);
-    } }[name];
-    guardOriginals.set(g, orig);
-    return g;
-  }
-  function guardGetter(obj, key, impl, prevGet, brand) {
-    if (typeof impl !== 'function' || guardOriginals.has(impl) || !isNativeMember(prevGet)) return impl;
-    const scope = brand ? { probe: null } : guardScope(obj);
-    const probe = brand ? null : scope && scope.probe;
-    if (!brand && !probe) return impl;
-    const orig = originalOf(prevGet);
-    const g = nativeReflectGOPD({ get [key]() { return (brand ? brand(this) : brandHolds(probe, this)) ? nativeApply(impl, this, arguments) : nativeApply(orig, this, arguments); } }, key).get;
-    guardOriginals.set(g, orig);
-    return g;
-  }
-  function guardSetter(obj, key, impl, prevSet, brand, spare) {
-    if (typeof impl !== 'function' || guardOriginals.has(impl) || !isNativeMember(prevSet)) return impl;
-    const scope = brand ? { probe: null } : guardScope(obj);
-    const probe = brand ? null : scope && scope.probe;
-    if (!brand && !probe) return impl;
-    const orig = originalOf(prevSet);
-    const s = nativeReflectGOPD({ set [key](v) { if (!(brand ? brand(this) : brandHolds(probe, this))) return nativeApply(orig, this, arguments); if (arguments.length < 1) return nativeApply(orig, spare ? spare() : this, arguments); return nativeApply(impl, this, arguments); } }, key).set;
-    guardOriginals.set(s, orig);
-    return s;
-  }
-  // The members of a replacement class's prototype, guarded against the native prototype it stands in for.
-  // `brand` says whether a receiver is an instance of the replacement class.
-  function guardClassMembers(proto, nativeProto, brand, spare) {
-    if (!proto || !nativeProto) return;
-    for (const key of Reflect.ownKeys(proto)) {
-      if (key === 'constructor') continue;
-      const d = nativeReflectGOPD(proto, key), nd = nativeReflectGOPD(nativeProto, key);
-      if (!d || !nd || !d.configurable) continue;
-      const out = Object.assign({}, d);
-      if (typeof d.value === 'function' && typeof nd.value === 'function') out.value = guardMethod(proto, key, d.value, nd.value, brand, spare);
-      else if (d.get && nd.get) { out.get = guardGetter(proto, key, d.get, nd.get, brand); if (d.set && nd.set) out.set = guardSetter(proto, key, d.set, nd.set, brand, spare); }
-      else continue;
-      try { Object.defineProperty(proto, key, out); } catch { continue; }
-      if (typeof out.value === 'function' && out.value !== d.value) { maskNativeFunction(out.value, key); lengthLike(out.value, nd.value); }
-      if (out.get && out.get !== d.get) { maskAccessorFn(out.get, 'get', key); }
-      if (out.set && out.set !== d.set) { maskAccessorFn(out.set, 'set', key); }
-    }
-  }
-  // A descriptor about to replace `obj[key]`, with its functions guarded against the member it replaces.
-  function guardedDescriptor(obj, key, desc) {
-    let prev;
-    try { prev = nativeReflectGOPD(obj, key); } catch { return desc; }
-    if (!prev) return desc;
-    if (typeof desc.value === 'function' && typeof prev.value === 'function') return Object.assign({}, desc, { value: guardMethod(obj, key, desc.value, prev.value) });
-    if (desc.get || desc.set) {
-      const out = Object.assign({}, desc);
-      if (desc.get && prev.get) out.get = guardGetter(obj, key, desc.get, prev.get);
-      if (desc.set && prev.set) out.set = guardSetter(obj, key, desc.set, prev.set);
-      return out;
-    }
-    return desc;
-  }
   // Inherit enumerability from the replaced property so WebIDL members stay
   // enumerable while membrane-internal helpers stay hidden. Set configurable:
   // false so page scripts cannot delete membrane hooks to uncover native
@@ -184,7 +71,6 @@
       // Capture the existing own or inherited function to copy its length and prototype.
       let inherited = null;
       if (typeof value === 'function' && !prev) { try { inherited = Reflect.get(obj, key); } catch {} }
-      if (prev && typeof prev.value === 'function') value = guardMethod(obj, key, value, prev.value);
       Object.defineProperty(obj, key, { value, enumerable: nativeEnumerability(obj, key), configurable: false, writable: true });
       if (prev && typeof prev.value === 'function') { lengthLike(value, prev.value); sameRealmAs(value, prev.value, key); }
       else if (typeof inherited === 'function' && inherited !== value) { lengthLike(value, inherited); sameRealmAs(value, inherited, key); }
@@ -200,11 +86,6 @@
   // constructed replacement prototype.
   function defineAccessor(obj, key, get, set, enumSrc) {
     try {
-      const prev = nativeReflectGOPD(obj, key);
-      if (prev) {
-        if (prev.get && typeof get === 'function') get = guardGetter(obj, key, get, prev.get);
-        if (prev.set && typeof set === 'function') set = guardSetter(obj, key, set, prev.set);
-      }
       Object.defineProperty(obj, key, { get, set, enumerable: nativeEnumerability(enumSrc || obj, key), configurable: false });
       if (typeof get === 'function') maskAccessorFn(get, 'get', key);
       if (typeof set === 'function') maskAccessorFn(set, 'set', key);
@@ -214,7 +95,6 @@
   // Install a property descriptor while registering any function value, getter,
   // or setter in Function.prototype.toString masking.
   function defineMasked(obj, key, desc) {
-    desc = guardedDescriptor(obj, key, desc);
     try { Object.defineProperty(obj, key, desc); } catch { return false; }
     if (typeof desc.value === 'function' && typeof key === 'string') nameLike(desc.value, key);
     if (typeof desc.get === 'function') maskAccessorFn(desc.get, 'get', key);
@@ -223,9 +103,6 @@
   }
   // Multi-property variant of defineMasked.
   function definePropertiesMasked(obj, descs) {
-    const guarded = {};
-    for (const key of Object.getOwnPropertyNames(descs)) guarded[key] = descs[key] ? guardedDescriptor(obj, key, descs[key]) : descs[key];
-    descs = guarded;
     try { Object.defineProperties(obj, descs); } catch { return false; }
     for (const key of Object.getOwnPropertyNames(descs)) {
       const d = descs[key];
@@ -261,8 +138,7 @@
       try {
         const own = instance && Object.getOwnPropertyDescriptor(instance, key);
         const onProto = Object.getOwnPropertyDescriptor(proto, key);
-        // The accessor on the prototype may be a guard around `get`.
-        if (!instance || (!own && onProto && (onProto.get === get || guardOriginals.has(onProto.get)))) return true;
+        if (!instance || (!own && onProto && onProto.get === get)) return true;
       } catch {}
     }
     return defineAccessor(instance, key, get, set);
@@ -278,8 +154,7 @@
   // Define a method on the prototype first, falling back to the instance if shadowed.
   function defineMethodOnProto(instance, proto, key, value) {
     if (proto && define(proto, key, value)) {
-      // The method on the prototype may be a guard around `value`.
-      try { if (!instance || instance[key] === value || guardOriginals.has(instance[key])) return true; } catch {}
+      try { if (!instance || instance[key] === value) return true; } catch {}
     }
     return define(instance, key, value);
   }
@@ -611,11 +486,9 @@
     let base = Object.prototype;
     try { if (typeof EventTarget === 'function' && EventTarget.prototype) base = EventTarget.prototype; } catch {}
     const p = Object.create(base);
-    // The shared prototype stands in for EventTarget.prototype: a call with too few arguments is refused as natively.
-    const arityGuarded = (key, impl) => guardMethod(p, key, impl, base[key], () => true);
-    define(p, 'addEventListener', arityGuarded('addEventListener', function(type, fn) { if (!fn) return; const key = String(type); if (!this[listenersKey]) this[listenersKey] = newMap(); const list = this[listenersKey].get(key) || []; list.push(fn); this[listenersKey].set(key, list); }));
-    define(p, 'removeEventListener', arityGuarded('removeEventListener', function(type, fn) { const list = this[listenersKey] && this[listenersKey].get(String(type)); if (!list) return; const i = list.indexOf(fn); if (i >= 0) list.splice(i, 1); }));
-    define(p, 'dispatchEvent', arityGuarded('dispatchEvent', function(event) { const list = this[listenersKey] && this[listenersKey].get(event.type) || []; try { if (!event.target) Object.defineProperty(event, 'target', { value: this, configurable: true }); } catch {} const handler = this['on' + event.type]; if (typeof handler === 'function') handler.call(this, event); for (const fn of list.slice()) fn.call(this, event); return !event.defaultPrevented; }));
+    define(p, 'addEventListener', function(type, fn) { if (!fn) return; const key = String(type); if (!this[listenersKey]) this[listenersKey] = newMap(); const list = this[listenersKey].get(key) || []; list.push(fn); this[listenersKey].set(key, list); });
+    define(p, 'removeEventListener', function(type, fn) { const list = this[listenersKey] && this[listenersKey].get(String(type)); if (!list) return; const i = list.indexOf(fn); if (i >= 0) list.splice(i, 1); });
+    define(p, 'dispatchEvent', function(event) { const list = this[listenersKey] && this[listenersKey].get(event.type) || []; try { if (!event.target) Object.defineProperty(event, 'target', { value: this, configurable: true }); } catch {} const handler = this['on' + event.type]; if (typeof handler === 'function') handler.call(this, event); for (const fn of list.slice()) fn.call(this, event); return !event.defaultPrevented; });
     sharedEventTargetProto = p;
     return p;
   }
