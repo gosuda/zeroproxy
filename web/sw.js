@@ -790,7 +790,7 @@ async function submittedDocument(req, routeKey, submitId, tab, entry, clientId) 
   if (!isFrame || !tab.activeEntryId) tab.activeEntryId = entry.entryId;
   bindClientContext(clientId, tab, entry);
   scheduleStateFlush();
-  return transportFetch(pending.targetUrl, { request: req, document: true, method: pending.method, headers: pending.headers, body: pending.body, tab, entryId: entry.entryId });
+  return transportFetch(pending.targetUrl, { request: req, document: true, method: pending.method, headers: pending.headers, body: pending.body, tab, entryId: entry.entryId, submitReferrer: pending.referrer });
 }
 
 
@@ -1313,14 +1313,18 @@ async function transportFetch(targetUrl, opt) {
   const entry = opt.tab.entries && opt.tab.entries.get(entryId);
   const documentUrl = entry && entry.targetUrl || target;
   let referrer = opt.document ? (entry && entry.parentTargetUrl || referrerFromBrowserHeader(opt.request)) : documentUrl;
-  if (opt.refOverride) {
+  if (opt.submitReferrer) referrer = opt.submitReferrer;
+  else if (opt.refOverride) {
     try {
       const proposed = new URL(opt.refOverride);
       if (proposed.origin === new URL(documentUrl).origin) referrer = proposed.href;
     } catch {}
   }
+  // A submitted form's entry is made for the address it posts to, but the request's origin is the submitting document's: that is the
+  // `Origin` header a cross-origin form carries.
+  const initiatorOrigin = opt.submitReferrer ? new URL(opt.submitReferrer).origin : new URL(documentUrl).origin;
   const context = Object.freeze({
-    entryId, documentUrl, origin: opt.opaqueOrigin ? 'null' : new URL(documentUrl).origin, referrer,
+    entryId, documentUrl, origin: opt.opaqueOrigin ? 'null' : initiatorOrigin, referrer,
     // A site frame's first request comes from its own launcher page, whose policy says nothing about the embedder's.
     referrerPolicy: opt.document && entry && entry.siteFrame ? entry.siteFrame.referrerPolicy : (opt.referrerPolicy || (opt.request && opt.request.referrerPolicy) || (entry && entry.referrerPolicy) || ''),
   });
@@ -2323,13 +2327,21 @@ async function handleMessage(event) {
       const method = String(msg.method || 'POST').toUpperCase();
       if (method === 'GET' || method === 'HEAD') { fail('POLICY_BLOCKED'); return; }
       const entryId = String(msg.entryId || randomEntryId());
+      // The submitting document's address, as it stands (history.replaceState included), is the Referer of its form submission. Only an
+      // address in that document's own origin is believed, the rule a fetch's `documentURL` follows; anything else keeps the old derivation.
+      let referrer = '';
+      try {
+        const from = tab.entries.get(String(msg.fromEntryId || ''));
+        const claimed = new URL(String(msg.referrer || ''));
+        if (from && /^https?:$/.test(claimed.protocol) && claimed.origin === new URL(from.targetUrl).origin) referrer = claimed.href;
+      } catch {}
       const entry = { entryId, targetUrl, baseUrl: targetUrl, title: '', stateClone: null, scrollX: 0, scrollY: 0, createdAt: Date.now() };
       tab.entries.set(entryId, entry);
       tab.activeEntryId = entryId;
       shareRoutes.set(routeKey, { tabId: tab.tabId, entryId, targetURL: targetUrl, frameRoute: false });
       scheduleStateFlush();
       const submitId = ZP.randomId('sub');
-      pendingSubmissions.set(submitId, { submitId, routeKey, tabId: tab.tabId, entryId, targetUrl, method, headers: Array.isArray(msg.headers) ? msg.headers : [], body, expiresAt: Date.now() + SUBMISSION_TTL_MS });
+      pendingSubmissions.set(submitId, { submitId, routeKey, tabId: tab.tabId, entryId, targetUrl, method, headers: Array.isArray(msg.headers) ? msg.headers : [], body, referrer, expiresAt: Date.now() + SUBMISSION_TTL_MS });
       ok({ submitId });
       return;
     }

@@ -265,7 +265,7 @@
       const serialized = await serializeFormSubmission(form, submitter, method, target.href);
       const share = await ZP.encryptShareURL(target.href);
       const entryId = 'e' + ZP.randomId();
-      const reply = await ctx.bridge.send({ type: ZP.MSG.SUBMIT_PREPARE, tabId: boot.tabId, entryId, routeKey: share.encrypted, targetUrl: target.href, method, headers: serialized.headers, body: serialized.body, enctype: serialized.enctype, referrer: virtualURL.href });
+      const reply = await ctx.bridge.send({ type: ZP.MSG.SUBMIT_PREPARE, tabId: boot.tabId, entryId, routeKey: share.encrypted, targetUrl: target.href, method, headers: serialized.headers, body: serialized.body, enctype: serialized.enctype, referrer: virtualURL.href, fromEntryId: activeEntryId });
       if (!dest.self) {
         // Route non-self submissions to the target window or frame while keeping this document in place.
         const sent = proxyAbsoluteURL(ZP.makeSharePath(share.encrypted) + '?zp_submit=' + nativeEncodeURIComponent(reply.submitId) + shareFragmentForKey(share.key));
@@ -296,7 +296,8 @@
         bytes = new Uint8Array(await req.arrayBuffer());
       } else {
         const text = enctype === 'text/plain' ? plainFormBody(data) : urlEncodedFormBody(data);
-        const type = enctype === 'text/plain' ? 'text/plain;charset=UTF-8' : 'application/x-www-form-urlencoded;charset=UTF-8';
+        // A form posts the bare media type (no charset parameter); a server that matches it exactly does not recognize anything else.
+        const type = enctype === 'text/plain' ? 'text/plain' : 'application/x-www-form-urlencoded';
         headers.push(['Content-Type', type]);
         bytes = new TextEncoder().encode(text);
       }

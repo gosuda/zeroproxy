@@ -3499,6 +3499,45 @@ setTimeout(function () { window.__xstack2 = out; }, 80);
       if (url.pathname === '/xref-meta') return html(`<meta name="referrer" content="origin">` + collect(2) + child('metaSame') + child('metaCross', other));
       if (url.pathname === '/xref-nav') return html(`<script>location.href = '/xref-landing?run=${run}&from=nav';</script>`);
     }
+    // A form submitted after the page moved its own address with history.replaceState (a Cloudflare challenge does this and checks the
+    // Referer against it): same-origin and cross-origin sinks, each answering 308 then 302 so the redirect hops are recorded too.
+    if (url.pathname.startsWith('/xsub')) {
+      const seen = globalThis.__subSeen || (globalThis.__subSeen = new Map());
+      const run = url.searchParams.get('run') || '';
+      const k = url.searchParams.get('k') || '';
+      const page = body => { res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' }); res.end(`<!doctype html><title>sub</title><body>${body}</body>`); };
+      if (url.pathname === '/xsub-log') {
+        const out = {};
+        for (const [key, v] of seen) if (key.startsWith(run + '|')) out[key.slice(run.length + 1)] = v;
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+        res.end(JSON.stringify(out));
+        return;
+      }
+      if (url.pathname === '/xsub-sink' || url.pathname === '/xsub-sink2') {
+        let body = '';
+        req.on('data', c => { body += c; });
+        req.on('end', () => {
+          const hop = url.pathname === '/xsub-sink' ? 'first' : 'second';
+          seen.set(`${run}|${k}|${hop}`, { method: req.method, referer: req.headers.referer || '', contentType: req.headers['content-type'] || '', origin: req.headers.origin || '', site: req.headers['sec-fetch-site'] || '', body });
+          if (hop === 'first') { res.writeHead(308, { Location: `/xsub-sink2?run=${run}&k=${k}`, 'Cache-Control': 'no-store' }); res.end(); return; }
+          res.writeHead(302, { Location: `/xsub-done?run=${run}&k=${k}`, 'Cache-Control': 'no-store' });
+          res.end();
+        });
+        return;
+      }
+      if (url.pathname === '/xsub-done') return page('<script>window.__xsubDone = true;</script>');
+      if (url.pathname === '/xsub') {
+        const other = `http://127.0.0.1:${req.socket.localPort}`;
+        const base = k === 'cross' ? other : '';
+        return page(`<script>
+          history.replaceState(null, '', '/xsub?run=${run}&k=${k}&tok=1#frag');
+          var f = document.createElement('form'); f.method = 'POST'; f.action = ${JSON.stringify(base)} + '/xsub-sink?run=${run}&k=${k}';
+          var i = document.createElement('input'); i.name = 'a'; i.value = 'b c'; f.appendChild(i);
+          document.body.appendChild(f);
+          setTimeout(function () { f.submit(); }, 100);
+        </script>`);
+      }
+    }
     if (url.pathname === '/xfm2' || url.pathname === '/xfm2-r' || url.pathname === '/xfm2-log') {
       const seen = globalThis.__fmSeen || (globalThis.__fmSeen = new Map());
       const run = url.searchParams.get('run') || '';
@@ -8413,6 +8452,36 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     assert.equal(direct.referrer.cross, '');
     assert.equal(direct.referrer.same, `${targetBase}/xref?run=native`);
     assert.equal(direct.referrer.landing, `${targetBase}/xref-nav?run=native`);
+    const scrub = r => JSON.parse(JSON.stringify(r).split('run=native').join('run=X').split('run=proxied').join('run=X'));
+    assert.deepEqual(scrub(proxied), scrub(direct));
+  });
+
+  await t.test('a form submission carries the submitting document\'s current address as its Referer, redirect hops included (matches native)', async () => {
+    const targetBase = `http://${targetHost}:${targetPort}`;
+    const collect = async (open, run) => {
+      for (const k of ['same', 'cross']) {
+        const p = await open(`${targetBase}/xsub?run=${run}&k=${k}`);
+        try {
+          await p.waitForFunction(() => window.__xsubDone === true, { timeout: 120000, polling: 100 });
+        } finally {
+          await p.close();
+        }
+      }
+      return await (await fetch(`${targetBase}/xsub-log?run=${run}`)).json();
+    };
+    const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    let direct;
+    try {
+      direct = await collect(async u => { const p = await directBrowser.newPage(); await p.goto(u, { waitUntil: 'domcontentloaded' }); return p; }, 'native');
+    } finally {
+      await directBrowser.close();
+    }
+    const proxied = await collect(u => openProxiedPage(u), 'proxied');
+    fs.writeFileSync(path.join(artifacts, 'form-submit-referer.json'), JSON.stringify({ direct, proxied }, null, 2));
+    // The address the page moved to with replaceState, without its fragment; across origins the default policy cuts it to the origin.
+    assert.equal(direct['same|first'].referer, `${targetBase}/xsub?run=native&k=same&tok=1`);
+    assert.equal(direct['same|second'].referer, direct['same|first'].referer, 'the redirect hop keeps the Referer');
+    assert.equal(direct['cross|first'].referer, `${targetBase}/`);
     const scrub = r => JSON.parse(JSON.stringify(r).split('run=native').join('run=X').split('run=proxied').join('run=X'));
     assert.deepEqual(scrub(proxied), scrub(direct));
   });
