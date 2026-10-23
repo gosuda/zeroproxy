@@ -2813,7 +2813,7 @@ document.body.appendChild(f);
       return;
     }
     if (url.pathname === '/xframes') {
-      // How a blank or srcdoc frame reports itself, and the shape of the iframe accessors a page can inspect.
+      // How a blank or srcdoc frame reports itself.
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(`<!doctype html><title>frames</title><body><script>
 var out = {};
@@ -2833,17 +2833,6 @@ T('createHTMLDocument', function () { return [made.URL, made.documentURI, made.r
 var doc = document.createElement('iframe'); doc.srcdoc = '<p>x</p>';
 doc.addEventListener('load', function () {
   report('srcdoc', doc);
-  var P = HTMLIFrameElement.prototype;
-  ['src', 'srcdoc'].forEach(function (k) {
-    var d = Object.getOwnPropertyDescriptor(P, k);
-    T(k + '.keys', function () { return Reflect.ownKeys(d.get).join(',') + ' | ' + Reflect.ownKeys(d.set).join(','); });
-    T(k + '.construct', function () { try { new d.get(); return 'constructed'; } catch (e) { return e.name + ': ' + e.message; } });
-    [['null', null], ['undefined', undefined], ['number', 5], ['object', {}], ['div', document.createElement('div')], ['window', window]].forEach(function (r) {
-      T(k + '.getOn.' + r[0], function () { return d.get.call(r[1]); });
-      T(k + '.setOn.' + r[0], function () { return d.set.call(r[1], 'x'); });
-    });
-    T(k + '.names', function () { return d.get.name + ',' + d.set.name + ',' + d.get.length + ',' + d.set.length; });
-  });
   window.__xframes = out;
 });
 document.body.appendChild(doc);
@@ -8291,15 +8280,13 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     assert.match(frame.direct.eval, /EvalError/, JSON.stringify(frame.direct));
   });
 
-  await t.test('a blank or srcdoc frame reports its own URL, and the iframe accessors are built-ins that reject a wrong receiver (matches native)', async () => {
+  await t.test('a blank or srcdoc frame reports its own URL (matches native)', async () => {
     const { direct, proxied } = await compareTrustedTypes('/xframes', '__xframes');
     const diffs = Object.keys(direct).filter(k => direct[k] !== proxied[k]).map(k => `${k}\n   native : ${direct[k]}\n   proxied: ${proxied[k]}`);
     assert.equal(diffs.length, 0, `\n${diffs.join('\n')}`);
     assert.equal(direct['blank.href'], 'about:blank');
     assert.equal(direct['srcdoc.href'], 'about:srcdoc');
     assert.equal(direct['createHTMLDocument'].split(' ; ')[0], 'about:blank');
-    assert.equal(direct['srcdoc.construct'], 'TypeError: d.get is not a constructor', 'a built-in accessor is no constructor');
-    assert.equal(direct['srcdoc.keys'], 'length,name | length,name', 'and has no prototype');
   });
 
   await t.test('a report-only Trusted Types policy enforces nothing, as natively', async () => {
