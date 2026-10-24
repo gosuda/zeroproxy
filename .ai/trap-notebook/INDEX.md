@@ -6,6 +6,7 @@ Keep each summary to a single line under 160 characters and point every detail l
 
 | Date | Category | Summary | Detail |
 |---|---|---|---|
+| 2026-10-24 | rewriter / lexical | A strict inline script's var and function declarations are now exported to the global; Bing's `_d is not defined` is gone. | rewriter.md#strict-var-export-2026-10-24 |
 | 2026-10-24 | membrane / lexical | with-scope: 340 ns a lookup, tiny on 21 sites; real gaps: strict inline var/function (Bing), inline let/const unseen by external scripts. | rewriter.md#with-scope-exploration-2026-10-24 |
 | 2026-10-24 | membrane / frames | Observer re-routed the site-frame address it had written; CNN renderer died (CPU 100%, GBs). Observer skips it; smoke asks for an answer. | rewriter.md#site-frame-route-loop-2026-10-24 |
 | 2026-10-23 | real-site / harness | Smoke harness clicked a disabled Open button (failed from the second site on); the Turnstile demo origin answers 502 natively too. | real-site-compat.md#smoke-order-and-turnstile-demo-2026-10-23 |
