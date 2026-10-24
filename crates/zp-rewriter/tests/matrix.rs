@@ -447,6 +447,50 @@ fn eval_var_decl_hoists_to_caller_varenv() {
 // Classic top-level `let`/`const`/`class` register in `__zp_lex` with per-decl
 // accessor bindings to emulate the shared global lexical environment across scripts.
 
+// A strict script run through `eval` keeps its top-level `var` and function declarations to itself; the rewriter hands them to
+// `__zp_export_vars` so the global gets them, as a script of the document would give them.
+
+#[test]
+fn strict_classic_exports_toplevel_var_and_function() {
+    let src = "'use strict'; var a=1; function f(){} { var b=2; } let l=3;";
+    emits(
+        src,
+        &[
+            // vars first (block-level `var` hoists out), then functions, which replace an earlier script's of the same name
+            "__zp_export_vars([\"a\",\"b\"],[()=>a,()=>b],[__zp_v=>{a=__zp_v},__zp_v=>{b=__zp_v}],false);",
+            "__zp_export_vars([\"f\"],[()=>f],[__zp_v=>{f=__zp_v}],true);",
+        ],
+    );
+    reparses(src);
+    // Bing's shape: a comment, then the directive. The directive stays first, the conflict check precedes the export.
+    let bing = out("//<![CDATA[
+\"use strict\";
+var _d=document; function sj_pt(){}");
+    assert!(bing.contains("__zp_export_vars([\"_d\"]"), "directive after a comment is still strict: {bing}");
+    assert!(
+        bing.find("\"use strict\"").unwrap() < bing.find("__zp_lex_decl").unwrap()
+            && bing.find("__zp_lex_decl").unwrap() < bing.find("__zp_export_vars").unwrap(),
+        "order: directive, conflict check, export: {bing}"
+    );
+    // Only a strict script needs it: a sloppy eval already makes them properties of the global.
+    not_emits("var a=1; function f(){}", &["__zp_export_vars"]);
+    // Unforgeable globals never get a binding.
+    not_emits("'use strict'; var location=1; var document=2;", &["__zp_export_vars"]);
+    // No var or function, nothing to export (lexical names are the registry's).
+    not_emits("'use strict'; let x=1; const y=2; class K{}", &["__zp_export_vars"]);
+    // A parameter named like the setter's own parameter must not be captured by it.
+    emits("'use strict'; var v=1;", &["__zp_v=>{v=__zp_v}"]);
+    // Modules have their own scope and export nothing.
+    let m = rewrite_script("var a=1; function f(){}", &RewriteOpts {
+        kind: ScriptKind::Module,
+        target_url: "https://example.com/".into(),
+        strict: true,
+        proxy_origin: "http://proxy.localhost:18080".into(),
+    })
+    .expect("module rewrite");
+    assert!(!m.code.contains("__zp_export_vars"), "module must not export: {}", m.code);
+}
+
 #[test]
 fn lex_registry_for_classic_toplevel() {
     emits(

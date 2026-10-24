@@ -3000,6 +3000,27 @@ document.body.appendChild(doc);
       res.end('<!doctype html><title>domscan</title><body><div id="root"></div><script>(' + domScanProbe.toString() + ')()<\/script></body>');
       return;
     }
+    if (url.pathname === '/xstrict' || url.pathname === '/xstrict-ext.js') {
+      // A strict script's top-level var and function declarations are properties of the global, whoever reads them: later scripts, an external script,
+      // an event-handler attribute (a strict `eval` keeps them to itself unless the runtime hands them over).
+      const reads = 'function reads() { var o = {};' +
+        ['sVar', 'sUnset', 'sObj', 'sFn', 'sOther'].map(n => ' try { o.' + n + ' = typeof ' + n + " === 'undefined' ? 'undef' : (typeof " + n + " === 'function' ? " + n + '() : JSON.stringify(' + n + ')); } catch (e) { o.' + n + " = 'ERR ' + e.name; }").join('') +
+        " o.inWindow = 'sVar' in window; o.unsetInWindow = 'sUnset' in window; o.keys = Object.keys(window).indexOf('sVar') >= 0; o.windowVar = String(window.sVar); o.windowFn = typeof window.sFn; return o; }";
+      if (url.pathname === '/xstrict-ext.js') {
+        res.writeHead(200, { 'Content-Type': 'text/javascript', 'Cache-Control': 'no-store' });
+        res.end(reads + ' window.__ext = reads();');
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end('<!doctype html><title>strict</title><body>' +
+        "<script>'use strict'; var sVar = 'v'; var sUnset; var sObj = { n: 1 }; function sFn() { return 'f1'; } function getSVar() { return sVar; } function setSVar(v) { sVar = v; }</script>" +
+        "<script>'use strict'; function sFn() { return 'f2'; } var sOther = 'o';</script>" +
+        '<script>' + reads + " window.__inline = reads(); sVar = 'changed-by-inline'; window.__live = [getSVar(), sVar, window.sVar]; setSVar('changed-by-function'); window.__live2 = [sVar, window.sVar];</script>" +
+        '<script src="/xstrict-ext.js"></script>' +
+        '<button id="b" onclick="window.__handler = reads()">b</button>' +
+        '<script>window.__done = true;</script></body>');
+      return;
+    }
     if (url.pathname === '/xnested') {
       // A script in a blank child frame makes an iframe of another site (the shape of an ad container that builds its creative's frame).
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
@@ -7583,6 +7604,36 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
       const pathLength = u => new URL(u).pathname.length; // the token; the fragment is added when the frame's document boots
       assert.ok(pathLength(later[0]) <= pathLength(first[0]) + 8, `the route token does not grow: ${pathLength(first[0])} then ${pathLength(later[0])}`);
     } finally { await page.close().catch(() => {}); }
+  });
+  await t.test("a strict inline script's var and function declarations are global, as natively", async () => {
+    const targetBase = `http://${targetHost}:${targetPort}`;
+    const collect = async p => {
+      try {
+        await p.waitForFunction(() => window.__done === true, { timeout: 60000, polling: 100 });
+        await p.click('#b');
+        await p.waitForFunction(() => window.__handler, { timeout: 10000, polling: 100 });
+        return await p.evaluate(() => ({ inline: window.__inline, ext: window.__ext, handler: window.__handler, live: window.__live, live2: window.__live2 }));
+      } finally {
+        await p.close();
+      }
+    };
+    const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    let direct;
+    try {
+      const p = await directBrowser.newPage();
+      await p.goto(`${targetBase}/xstrict`, { waitUntil: 'domcontentloaded' });
+      direct = await collect(p);
+    } finally {
+      await directBrowser.close();
+    }
+    const proxied = await collect(await openProxiedPage(`${targetBase}/xstrict`));
+    fs.writeFileSync(path.join(artifacts, 'strict-globals.json'), JSON.stringify({ direct, proxied }, null, 2));
+    // the native reference: both strict scripts' names are there, the later function replaced the earlier, the variable is one shared binding
+    assert.equal(direct.inline.sVar, '"v"');
+    assert.equal(direct.inline.sFn, 'f2');
+    assert.deepEqual(direct.live, ['changed-by-inline', 'changed-by-inline', 'changed-by-inline']);
+    assert.deepEqual(direct.live2, ['changed-by-function', 'changed-by-function']);
+    assert.deepEqual(proxied, direct);
   });
   await t.test('frames made from markup load and read back as natively', async () => {
     const targetBase = `http://${targetHost}:${targetPort}`;

@@ -22,8 +22,9 @@ function loadRewriter() {
 }
 
 // The rewriter plants `__zp_lex_decl`/`__zp_lex_bind` around classic
-// top-level let/const/class. Run their real prelude source rather than a stub,
-// injecting only its free variables.
+// top-level let/const/class, and `__zp_export_vars` for a strict script's var and
+// function. Run their real prelude source rather than a stub, injecting only its
+// free variables.
 let lexHelpersSource;
 function installLexHelpers(ctx, realmGlobal) {
   if (!lexHelpersSource) {
@@ -31,15 +32,16 @@ function installLexHelpers(ctx, realmGlobal) {
     const start = src.indexOf("    define(root, '__zp_lex_decl', (lexMap, varNames) => {");
     const end = src.indexOf("    define(root, '__zp_lex_scope', zpLexScope);", start);
     assert.ok(start >= 0 && end > start, 'prelude __zp_lex_decl/__zp_lex_bind source not found');
-    // Keep the two defines only; the lex scope proxy between them and the end
+    // Keep the three defines only; the lex scope proxy after them and the end
     // marker is the prelude's executor wrapper, which the rewriter never emits.
-    const bindEnd = src.indexOf('\n    });\n', src.indexOf("define(root, '__zp_lex_bind'", start)) + '\n    });\n'.length;
-    assert.ok(bindEnd > start && bindEnd <= end, 'prelude __zp_lex_bind end not found');
+    const bindEnd = src.indexOf('\n    });\n', src.indexOf("define(root, '__zp_export_vars'", start)) + '\n    });\n'.length;
+    assert.ok(bindEnd > start && bindEnd <= end, 'prelude __zp_export_vars end not found');
     lexHelpersSource = src.slice(start, bindEnd);
   }
   const define = (_target, key, fn) => { ctx[key] = fn; return true; };
   // eslint-disable-next-line no-new-func
-  new Function('define', 'root', 'zpLex', '__zp_lex_env', lexHelpersSource)(define, realmGlobal, new Map(), null);
+  new Function('define', 'root', 'zpLex', '__zp_lex_env', 'nativeReflectGOPD', 'nativeReflectDefineProperty', 'newSet', lexHelpersSource)(
+    define, realmGlobal, new Map(), null, Reflect.getOwnPropertyDescriptor, Reflect.defineProperty, () => new Set());
 }
 
 function executionContext() {

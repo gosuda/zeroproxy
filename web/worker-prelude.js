@@ -36,7 +36,7 @@
     '__zp_eval', '__zp_has', '__zp_oget', '__zp_ocall', '__zp_ocallv', '__zp_ochain', '__zp_odelete', '__zp_okeys',
     '__zp_rget', '__zp_rset', '__zp_ownKeys', '__zp_getOwnPropertyDescriptor', '__zp_getOwnPropertyDescriptors',
     '__zp_getOwnPropertyNames', '__zp_module_url', '__zp_with_get', '__zp_with_set', '__zp_with_assign',
-    '__zp_with_update', '__zp_with_delete', '__zp_with_d', '__zp_lex_decl', '__zp_lex_bind', '__zp_fast', '__zp_fastset'];
+    '__zp_with_update', '__zp_with_delete', '__zp_with_d', '__zp_lex_decl', '__zp_lex_bind', '__zp_export_vars', '__zp_fast', '__zp_fastset'];
   const ZP_WITH_PROLOGUE = 'const{' + ZP_WITH_HELPERS.join(',') + '}=(function(){return this})();';
   const nativeGlobals = (() => {
     const global = newMap();
@@ -280,6 +280,17 @@
     const env = __zp_lex_env || zpLex;
     const e = env.get(name);
     if (e) { e.get = get; e.set = typeof set === 'function' ? set : null; }
+  });
+  // A strict script run through `eval` keeps its top-level `var` and function declarations to itself, where a classic worker script puts them on the
+  // global. The rewriter hands over their names with closures onto the script's own bindings; the global gets accessors for them. A name the global
+  // already has is left alone, and a function replaces an earlier strict script's function of the same name, as a declaration does.
+  const exportedGlobals = newSet();
+  expose('__zp_export_vars', (names, gets, sets, replace) => {
+    for (let i = 0; i < names.length; i++) {
+      const n = names[i];
+      if (Reflect.getOwnPropertyDescriptor(self, n) ? !(replace && exportedGlobals.has(n)) : zpLex.has(n)) continue;
+      if (Reflect.defineProperty(self, n, { configurable: true, enumerable: true, get: gets[i], set: sets[i] })) exportedGlobals.add(n);
+    }
   });
   const zpLexScope = new Proxy({}, {
     has(_t, prop) { return zpLexEntry(prop) !== undefined; },

@@ -95,7 +95,7 @@
     '__zp_eval', '__zp_has', '__zp_oget', '__zp_ocall', '__zp_ocallv', '__zp_ochain', '__zp_odelete', '__zp_okeys',
     '__zp_rget', '__zp_rset', '__zp_ownKeys', '__zp_getOwnPropertyDescriptor', '__zp_getOwnPropertyDescriptors',
     '__zp_getOwnPropertyNames', '__zp_module_url', '__zp_with_get', '__zp_with_set', '__zp_with_assign',
-    '__zp_with_update', '__zp_with_delete', '__zp_with_d', '__zp_lex_decl', '__zp_lex_bind', '__zp_fast', '__zp_fastset'];
+    '__zp_with_update', '__zp_with_delete', '__zp_with_d', '__zp_lex_decl', '__zp_lex_bind', '__zp_export_vars', '__zp_fast', '__zp_fastset'];
   const ZP_WITH_PROLOGUE = 'const{' + ZP_WITH_HELPERS.join(',') + '}=(function(){return this})();';
   // Prefix for inline on* event attribute bodies. Reads __ZP_EXEC_EVENT off a
   // sloppy function's default `this` (the raw window) so element, form, or

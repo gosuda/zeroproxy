@@ -241,6 +241,7 @@ pub const RUNTIME_HELPERS: &[&str] = &[
     "__zp_with_d",
     "__zp_lex_decl",
     "__zp_lex_bind",
+    "__zp_export_vars",
     "__zp_fast",
     "__zp_fastset",
 ];
@@ -2064,6 +2065,14 @@ impl RewriteVisitor {
     /// declaration so subsequent scripts read and write the live binding.
     /// `varlikes` holds top-level `var`/`function` names in the same program
     /// to catch same-script `var x; let x` collisions at declaration time.
+    ///
+    /// A strict script run through `eval` keeps its top-level `var` and function
+    /// declarations to itself (a sloppy one makes them properties of the global, as
+    /// a script of the document does), so a later script, an event-handler attribute
+    /// or a `window.f` read finds them undefined. For a strict script, hand the
+    /// names with closures onto the script's own bindings to `__zp_export_vars`,
+    /// which gives the global accessors for them; a function replaces an earlier
+    /// strict script's function of the same name, as a function declaration does.
     fn emit_lex_registry<'a>(&mut self, program: &Program<'a>, varlikes: &[String]) {
         let mut lex: Vec<(String, &'static str)> = Vec::new();
         let mut binds: Vec<(u32, String)> = Vec::new();
@@ -2123,12 +2132,39 @@ impl RewriteVisitor {
         // Throw inside the evaluated code so error event filenames match the
         // script rather than the prelude URL. `__zp_lex_decl` returns the
         // colliding identifier name when a conflict is found.
+        let mut replacement = format!(
+            ";{{const __zp_bad=__zp_lex_decl({{{lexmap}}},[{vararr}]);if(__zp_bad!==undefined)throw new SyntaxError(\"Identifier '\"+__zp_bad+\"' has already been declared\");}}"
+        );
+        if !self.cur_sloppy {
+            // After the conflict check, so a redeclaration throws before anything is exported. Dangerous globals (`window`, `location`…) never get a binding.
+            let functions: Vec<String> = program
+                .body
+                .iter()
+                .filter_map(|stmt| match stmt {
+                    Statement::FunctionDeclaration(func) => func.id.as_ref().map(|id| id.name.to_string()),
+                    _ => None,
+                })
+                .filter(|n| varlikes.contains(n) && !is_dangerous_global(n))
+                .collect();
+            let vars: Vec<String> = varlikes
+                .iter()
+                .filter(|n| !functions.contains(n) && !is_dangerous_global(n))
+                .cloned()
+                .collect();
+            for (names, replace) in [(&vars, false), (&functions, true)] {
+                if names.is_empty() {
+                    continue;
+                }
+                let list = names.iter().map(|n| format!("{n:?}")).collect::<Vec<_>>().join(",");
+                let gets = names.iter().map(|n| format!("()=>{n}")).collect::<Vec<_>>().join(",");
+                let sets = names.iter().map(|n| format!("__zp_v=>{{{n}=__zp_v}}")).collect::<Vec<_>>().join(",");
+                replacement += &format!("__zp_export_vars([{list}],[{gets}],[{sets}],{replace});");
+            }
+        }
         self.patches.push(Patch {
             start: pos,
             end: pos,
-            replacement: format!(
-                ";{{const __zp_bad=__zp_lex_decl({{{lexmap}}},[{vararr}]);if(__zp_bad!==undefined)throw new SyntaxError(\"Identifier '\"+__zp_bad+\"' has already been declared\");}}"
-            ),
+            replacement,
         });
         // A leading `;` is required: semicolon-terminated declarations include
         // `;` in their span, but ASI declarations (`const a = { x: 1 }\n`) end
