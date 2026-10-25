@@ -93,10 +93,12 @@
     if (Native.getAttribute.call(el, 'src') === finalSrc) return;
     return Native.setAttribute.call(el, 'src', finalSrc);
   }
-  // Rewrite only absolute http(s) URLs in runtime CSS; relative URLs resolve against the proxy origin and are routed by the service worker.
+  // Rewrite absolute http(s) URLs in runtime CSS; path-relative ones resolve against the proxy origin and the service worker maps them back. A protocol-relative one (`//host/a.css`)
+  // resolves to another origin (http: here), so it would leave for the network: resolve it against the target first, as the CSS rewriter does for a static stylesheet.
   function cssProxyURL(raw) {
-    const t = String(raw == null ? '' : raw).trim();
-    if (!/^https?:\/\//i.test(t)) return null;
+    const trimmed = String(raw == null ? '' : raw).trim();
+    const t = trimmed.startsWith('//') ? targetURLIfHTTP(trimmed) : trimmed;
+    if (!t || !/^https?:\/\//i.test(t)) return null;
     if (t.startsWith(proxyOrigin)) return null;
     return subresourceProxyPath(t);
   }

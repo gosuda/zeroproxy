@@ -639,15 +639,17 @@
         });
       }
       function addNavListener(type, listener, opts) {
+        // The wrapper calls the page's `listener`, so what is registered goes in its own variable: reassigning `listener` made the wrapper call itself on every event.
+        let registered = listener;
         if (listener && (typeof listener === 'function' || typeof listener.handleEvent === 'function')) {
           let w = listenerWrappers.get(listener);
           if (!w) {
             w = function (ev) { return typeof listener === 'function' ? listener.call(this, navEventFacade(ev)) : listener.handleEvent.call(listener, navEventFacade(ev)); };
             listenerWrappers.set(listener, w);
           }
-          listener = w;
+          registered = w;
         }
-        return native.addEventListener(type, listener, opts);
+        return native.addEventListener(type, registered, opts);
       }
       function removeNavListener(type, listener, opts) {
         return native.removeEventListener(type, listenerWrappers.get(listener) || listener, opts);

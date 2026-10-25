@@ -798,18 +798,19 @@
         for (const k of toDelete) native.removeItem(k);
       },
     };
-    // Keep Storage methods non-enumerable on a prototype and delegate named property access through a Proxy.
+    // Put the Storage members on a prototype and delegate named property access through a Proxy. They are enumerable, in the order a native Storage lists them, so `for (k in localStorage)`
+    // yields the stored keys and then `length`, `clear`, `getItem`, `key`, `removeItem`, `setItem`, as it does natively.
     const RESERVED = newSet(['length', 'key', 'getItem', 'setItem', 'removeItem', 'clear']);
     const storageProto = Object.create(
       (typeof Storage === 'function' && Storage.prototype) ? Storage.prototype : Object.prototype
     );
     defineMasked(storageProto, 'length', {
-      get() { return facade.length; }, enumerable: false, configurable: true,
+      get() { return facade.length; }, enumerable: true, configurable: true,
     });
-    for (const name of ['key', 'getItem', 'setItem', 'removeItem', 'clear']) {
+    for (const name of ['clear', 'getItem', 'key', 'removeItem', 'setItem']) {
       const fn = function() { return facade[name].apply(facade, arguments); };
       maskNativeFunction(fn, name);
-      Object.defineProperty(storageProto, name, { value: fn, enumerable: false, writable: true, configurable: true });
+      Object.defineProperty(storageProto, name, { value: fn, enumerable: true, writable: true, configurable: true });
     }
     const storedKeys = () => {
       const out = [];
@@ -819,9 +820,14 @@
       }
       return out;
     };
+    // A stored key is a named property only where the prototype chain has no property of that name (WebIDL's named property visibility), so `localStorage.hasOwnProperty`, `toString` and
+    // `constructor` are Object.prototype's and Storage's, whatever the page stored. The chain is tested with `in`, which is why it holds `Object.prototype` and not only the six members above.
+    const realStorageProto = (typeof Storage === 'function' && Storage.prototype) ? Storage.prototype : null;
     const namedStorage = new Proxy(Object.create(storageProto), {
+      // The members live on an intermediate prototype; the page is told its prototype is Storage.prototype, as natively.
+      getPrototypeOf(t) { return realStorageProto || Reflect.getPrototypeOf(t); },
       get(t, p, r) {
-        if (typeof p === 'symbol' || RESERVED.has(p)) return Reflect.get(t, p, r);
+        if (typeof p === 'symbol' || p in t) return Reflect.get(t, p, r);
         const v = facade.getItem(p);
         return v === null ? undefined : v;
       },
@@ -831,17 +837,17 @@
         return true;
       },
       has(t, p) {
-        if (typeof p === 'symbol' || RESERVED.has(p)) return Reflect.has(t, p);
+        if (typeof p === 'symbol' || p in t) return Reflect.has(t, p);
         return facade.getItem(p) !== null;
       },
       deleteProperty(t, p) {
-        if (typeof p === 'symbol' || RESERVED.has(p)) return Reflect.deleteProperty(t, p);
+        if (typeof p === 'symbol' || p in t) return Reflect.deleteProperty(t, p);
         facade.removeItem(p);
         return true;
       },
-      ownKeys() { return storedKeys(); },
+      ownKeys(t) { return storedKeys().filter(k => !(k in t)); },
       getOwnPropertyDescriptor(t, p) {
-        if (typeof p === 'symbol' || RESERVED.has(p)) return Reflect.getOwnPropertyDescriptor(t, p);
+        if (typeof p === 'symbol' || p in t) return Reflect.getOwnPropertyDescriptor(t, p);
         const v = facade.getItem(p);
         return v === null ? undefined : { value: v, writable: true, enumerable: true, configurable: true };
       },

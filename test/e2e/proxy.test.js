@@ -3040,6 +3040,81 @@ document.body.appendChild(doc);
         '</script></body>');
       return;
     }
+    if (url.pathname === '/xcss-import.css') {
+      res.writeHead(200, { 'Content-Type': 'text/css', 'Cache-Control': 'no-store' });
+      res.end('#xcss-import-probe{width:9px}');
+      return;
+    }
+    if (url.pathname === '/xcssurls') {
+      // A protocol-relative URL in CSS the page makes at runtime resolves against the proxy's own address unless the membrane resolves it against the target first.
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end('<!doctype html><title>css urls</title><body><script>' +
+        "const H = location.host; const forms = ['textContent-before', 'textContent-after', 'appendText-before', 'appendText-after', 'insertBefore-text', 'append-text', 'innerHTML', 'insertRule', 'replaceSync', 'elstyle-prop', 'style-attr'];" +
+        "const make = form => {" +
+        " const id = 'e_' + form; const el = document.createElement('div'); el.id = id; el.style.cssText = 'width:8px;height:8px'; const u = '//' + H + '/image-probe.png?j=prcss-' + form; const rule = '#' + id + '{background-image:url(' + u + ')}';" +
+        " if (form === 'elstyle-prop') { document.body.appendChild(el); el.style.backgroundImage = 'url(' + u + ')'; return; }" +
+        " if (form === 'style-attr') { el.setAttribute('style', 'width:8px;height:8px;background-image:url(' + u + ')'); document.body.appendChild(el); return; }" +
+        " document.body.appendChild(el);" +
+        " if (form === 'replaceSync') { const sh = new CSSStyleSheet(); sh.replaceSync(rule); document.adoptedStyleSheets = [...document.adoptedStyleSheets, sh]; return; }" +
+        " const st = document.createElement('style');" +
+        " if (form === 'textContent-before') { st.textContent = rule; document.head.appendChild(st); }" +
+        " else if (form === 'textContent-after') { document.head.appendChild(st); st.textContent = rule; }" +
+        " else if (form === 'appendText-before') { st.appendChild(document.createTextNode(rule)); document.head.appendChild(st); }" +
+        " else if (form === 'appendText-after') { document.head.appendChild(st); st.appendChild(document.createTextNode(rule)); }" +
+        " else if (form === 'insertBefore-text') { document.head.appendChild(st); st.insertBefore(document.createTextNode(rule), null); }" +
+        " else if (form === 'append-text') { st.append(document.createTextNode(rule)); document.head.appendChild(st); }" +
+        " else if (form === 'innerHTML') { st.innerHTML = rule; document.head.appendChild(st); }" +
+        " else if (form === 'insertRule') { document.head.appendChild(st); st.sheet.insertRule(rule, 0); }" +
+        "};" +
+        // A layout read after the insert brings the style recalculation, and so the image fetch, forward of any MutationObserver callback: the rewrite has to be done by then.
+        "for (const form of forms) { make(form); getComputedStyle(document.getElementById('e_' + form)).backgroundImage; }" +
+        "const probe = document.createElement('div'); probe.id = 'xcss-import-probe'; document.body.appendChild(probe);" +
+        "const q = String.fromCharCode(39); const imp = document.createElement('style'); imp.textContent = '@import url(' + q + '//' + H + '/xcss-import.css?j=prcss-import' + q + ')'; document.head.appendChild(imp);" +
+        "window.__done = true;" +
+        '</script></body>');
+      return;
+    }
+    if (url.pathname === '/xnavigate') {
+      // Listeners a page puts on the Navigation API: a function, an object with handleEvent, one removed again, and the onnavigate property.
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end('<!doctype html><title>navigate</title><body><script>' +
+        "const out = window.__nav = { fn: [], obj: [], removed: [], on: [], error: null };" +
+        "const hashOf = e => String(e.destination.url).split('#')[1] || '';" +
+        "navigation.addEventListener('navigate', e => out.fn.push([e.type, e.navigationType, hashOf(e), e.target === navigation, typeof e.intercept]));" +
+        "navigation.addEventListener('navigate', { handleEvent(e) { out.obj.push(e.type + ':' + hashOf(e)); } });" +
+        "const gone = () => out.removed.push('fired'); navigation.addEventListener('navigate', gone); navigation.removeEventListener('navigate', gone);" +
+        "navigation.onnavigate = e => out.on.push(e.navigationType + ':' + hashOf(e));" +
+        "try { location.hash = 'h1'; history.pushState({}, '', '#h2'); history.replaceState({}, '', '#h3'); } catch (e) { out.error = String(e && e.message || e); }" +
+        "window.__done = true;" +
+        '</script></body>');
+      return;
+    }
+    if (url.pathname === '/xstorage') {
+      // What localStorage and sessionStorage answer for names inherited from Object.prototype and Storage.prototype (Taboola calls localStorage.hasOwnProperty), and their enumeration.
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end('<!doctype html><title>storage</title><body><script>' +
+        "const out = window.__st = {}; const t = (k, f) => { try { out[k] = f(); } catch (e) { out[k] = 'THROW ' + e.name; } };" +
+        "for (const [label, S] of [['local', localStorage], ['session', sessionStorage]]) {" +
+        " S.clear(); S.setItem('a', '1'); S.setItem('b', '2');" +
+        " t(label + ' typeof hasOwnProperty', () => typeof S.hasOwnProperty);" +
+        " t(label + ' hasOwnProperty a/zz/getItem', () => [S.hasOwnProperty('a'), S.hasOwnProperty('zz'), S.hasOwnProperty('getItem')].join());" +
+        " t(label + ' toString', () => String(S));" +
+        " t(label + ' typeof valueOf/propertyIsEnumerable/isPrototypeOf', () => [typeof S.valueOf, typeof S.propertyIsEnumerable, typeof S.isPrototypeOf].join());" +
+        " t(label + ' constructor is Storage', () => S.constructor === Storage);" +
+        " t(label + ' proto is Storage.prototype', () => Object.getPrototypeOf(S) === Storage.prototype);" +
+        " t(label + ' in', () => ['hasOwnProperty' in S, 'getItem' in S, 'a' in S, 'zz' in S].join());" +
+        " t(label + ' keys sorted', () => Object.keys(S).sort().join());" +
+        " t(label + ' for-in members after keys', () => { const k = []; for (const x in S) if (x !== 'a' && x !== 'b') k.push(x); return k.join(); });" +
+        " t(label + ' length', () => S.length);" +
+        " t(label + ' a and zz', () => S.a + '|' + S.zz);" +
+        " t(label + ' hasOwnProperty stored as a key', () => { S.setItem('hasOwnProperty', 'x'); const v = typeof S.hasOwnProperty + ':' + S.getItem('hasOwnProperty'); S.removeItem('hasOwnProperty'); return v; });" +
+        " t(label + ' Object.prototype.hasOwnProperty.call', () => Object.prototype.hasOwnProperty.call(S, 'a'));" +
+        " S.clear();" +
+        "}" +
+        "window.__done = true;" +
+        '</script></body>');
+      return;
+    }
     if (url.pathname === '/xnested') {
       // A script in a blank child frame makes an iframe of another site (the shape of an ad container that builds its creative's frame).
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
@@ -7687,6 +7762,103 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     assert.deepEqual(proxied, direct);
     for (const j of ['a', 'b', 'c']) assert.ok(reached.some(r => r.url.includes('j=' + j)), `proxied page never fetched ${j}: ${JSON.stringify(reached)}`);
     assert.ok(reached.every(r => r.userAgent === TARGET_UA), `a request reached the target outside the proxy: ${JSON.stringify(reached)}`);
+  });
+  await t.test('a protocol-relative URL in CSS the page makes at runtime loads through the proxy, as natively', async () => {
+    const targetBase = `http://${targetHost}:${targetPort}`;
+    const forms = ['textContent-before', 'textContent-after', 'appendText-before', 'appendText-after', 'insertBefore-text', 'append-text', 'innerHTML', 'insertRule', 'replaceSync', 'elstyle-prop', 'style-attr'];
+    const open = async p => { await p.waitForFunction(() => window.__done === true, { timeout: 30000, polling: 100 }); await new Promise(r => setTimeout(r, 2500)); await p.close(); };
+    const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    const beforeDirect = requests.length;
+    try {
+      const p = await directBrowser.newPage();
+      await p.goto(`${targetBase}/xcssurls`, { waitUntil: 'domcontentloaded' });
+      await open(p);
+    } finally {
+      await directBrowser.close();
+    }
+    const beforeProxied = requests.length;
+    const wireBefore = wireRequests.length;
+    await open(await openProxiedPage(`${targetBase}/xcssurls`));
+    // No form may make the browser ask the target directly, even where only the CSP would have stopped it.
+    const direct = wireRequests.slice(wireBefore).filter(u => u.startsWith(`${targetBase}/`));
+    assert.deepEqual(direct, [], `the page asked the target directly: ${direct.join(', ')}`);
+    const keys = [...forms, 'import'].map(k => 'prcss-' + k);
+    const native = requests.slice(beforeDirect, beforeProxied), via = requests.slice(beforeProxied);
+    const table = keys.map(k => [k, native.some(r => r.url.includes('j=' + k)), via.some(r => r.url.includes('j=' + k) && r.userAgent === TARGET_UA)]);
+    fs.writeFileSync(path.join(artifacts, 'css-protocol-relative.json'), JSON.stringify(table, null, 2));
+    assert.ok(table.every(([, nat]) => nat), `native run did not load every form: ${JSON.stringify(table)}`);
+    const diverged = table.filter(([, nat, prox]) => nat !== prox).map(([k]) => k);
+    assert.deepEqual(diverged, [], `not loaded through the proxy: ${diverged.join(', ')}`);
+    assert.ok(!via.some(r => r.url.includes('prcss-') && r.userAgent !== TARGET_UA), 'a protocol-relative CSS URL reached the target outside the proxy');
+  });
+  await t.test('Navigation API listeners a page adds run and see its navigations (the wrapper no longer recurses)', async () => {
+    const targetBase = `http://${targetHost}:${targetPort}`;
+    const collect = async p => {
+      try {
+        await p.waitForFunction(() => window.__done === true, { timeout: 30000, polling: 100 });
+        await new Promise(r => setTimeout(r, 300));
+        return await p.evaluate(() => window.__nav);
+      } finally {
+        await p.close();
+      }
+    };
+    const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    let direct;
+    try {
+      const p = await directBrowser.newPage();
+      await p.goto(`${targetBase}/xnavigate`, { waitUntil: 'domcontentloaded' });
+      direct = await collect(p);
+    } finally {
+      await directBrowser.close();
+    }
+    const proxied = await collect(await openProxiedPage(`${targetBase}/xnavigate`));
+    fs.writeFileSync(path.join(artifacts, 'navigation-listeners.json'), JSON.stringify({ direct, proxied }, null, 2));
+    // The native reference: three navigations (hash change, pushState, replaceState), each seen once by the function, the object and the property handler; the removed one never.
+    assert.equal(direct.error, null);
+    assert.equal(direct.fn.length, 3);
+    assert.equal(direct.obj.length, 3);
+    assert.equal(direct.on.length, 3);
+    assert.deepEqual(direct.removed, []);
+    // Through the proxy every listener form runs (the wrapper used to call itself until the stack overflowed) and sees the same navigations in order. Two differences are known and not pinned
+    // here (ERRATA): the membrane's own address refresh adds one more navigate event (a replace to the current URL), and the first navigation reads push where a load-time hash change reads replace.
+    assert.equal(proxied.error, null);
+    assert.deepEqual(proxied.removed, []);
+    const hashes = list => list.filter((h, i) => i === 0 || h !== list[i - 1]);
+    const seen = {
+      fn: hashes(proxied.fn.map(e => e[2])),
+      obj: hashes(proxied.obj.map(e => e.split(':')[1])),
+      on: hashes(proxied.on.map(e => e.split(':')[1]))
+    };
+    for (const form of ['fn', 'obj', 'on']) assert.deepEqual(seen[form], ['h1', 'h2', 'h3'], `${form}: ${JSON.stringify(proxied[form])}`);
+    assert.ok(proxied.fn.every(e => e[0] === 'navigate' && e[3] === true && e[4] === 'function'), `event shape: ${JSON.stringify(proxied.fn)}`);
+  });
+  await t.test('localStorage and sessionStorage inherit from Object.prototype and Storage.prototype, as natively', async () => {
+    const targetBase = `http://${targetHost}:${targetPort}`;
+    const collect = async p => {
+      try {
+        await p.waitForFunction(() => window.__done === true, { timeout: 30000, polling: 100 });
+        return await p.evaluate(() => window.__st);
+      } finally {
+        await p.close();
+      }
+    };
+    const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    let direct;
+    try {
+      const p = await directBrowser.newPage();
+      await p.goto(`${targetBase}/xstorage`, { waitUntil: 'domcontentloaded' });
+      direct = await collect(p);
+    } finally {
+      await directBrowser.close();
+    }
+    const proxied = await collect(await openProxiedPage(`${targetBase}/xstorage`));
+    fs.writeFileSync(path.join(artifacts, 'storage-inheritance.json'), JSON.stringify({ direct, proxied }, null, 2));
+    // the native reference: Object.prototype's methods answer, a stored key never shadows a prototype name, the Storage members are enumerable after the stored keys
+    assert.equal(direct['local typeof hasOwnProperty'], 'function');
+    assert.equal(direct['local hasOwnProperty a/zz/getItem'], 'true,false,false');
+    assert.equal(direct['local toString'], '[object Storage]');
+    assert.equal(direct['local constructor is Storage'], true);
+    assert.deepEqual(proxied, direct);
   });
   await t.test('frames made from markup load and read back as natively', async () => {
     const targetBase = `http://${targetHost}:${targetPort}`;

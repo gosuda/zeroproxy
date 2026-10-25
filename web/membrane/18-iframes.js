@@ -51,6 +51,7 @@
       if (!proto || typeof nativeFn !== 'function') return;
       const hook = function(...args) {
         prepareActivatingNodes(args);
+        rewriteStyleTextForInsertion(this, args);
         const frames = collectIframesFromArgs(args);
         const ret = nativeFn.apply(this, args);
         // Restore frames whose src was parked while inside an inert document.

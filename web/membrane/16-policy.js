@@ -119,6 +119,31 @@
     if (mapped === raw) return;
     try { el.textContent = mapped; } catch {}
   }
+  // CSS the page puts into a <style> through the tree (`appendChild(createTextNode(css))`, `append(css)`, a style built elsewhere and then inserted) is parsed as it goes in, and its url()s are
+  // fetched at the next style recalculation, which a layout read can bring forward of the MutationObserver: rewrite the text before it goes in. It is rewritten in place, so the page's text
+  // node is still the node that is inserted (a library that later `removeChild`s it, as styled-components does, finds it) and a stylesheet built rule by rule is not re-read each time.
+  function rewriteStyleTextNode(text) {
+    const d = text.data;
+    if (!d || (d.indexOf('(') < 0 && d.indexOf('@import') < 0)) return;
+    const mapped = rewriteCSSText(d);
+    if (mapped !== d) text.data = mapped;
+  }
+  function rewriteStyleChildren(style) {
+    for (let c = style.firstChild; c; c = c.nextSibling) if (c.nodeType === 3) rewriteStyleTextNode(c);
+  }
+  function rewriteStyleTextForInsertion(self, args) {
+    try {
+      const intoStyle = !!self && (self.localName === 'style' || (self.nodeType === 3 && !!self.parentNode && self.parentNode.localName === 'style'));
+      for (let i = 0; i < args.length; i++) {
+        const a = args[i];
+        if (typeof a === 'string') { if (intoStyle) args[i] = rewriteCSSText(a); continue; }
+        if (!a || typeof a !== 'object') continue;
+        if (a.nodeType === 3) { if (intoStyle) rewriteStyleTextNode(a); }
+        else if (a.nodeType === 1 && a.localName === 'style') rewriteStyleChildren(a);
+        else if (a.nodeType === 11 && a.querySelectorAll) qsaOf(a, 'style').forEach(rewriteStyleChildren);
+      }
+    } catch {}
+  }
   function enforceSubtreePolicies(node) {
     if (!node || typeof node !== 'object') return;
     if (node.nodeType === 3 && node.parentNode) enforceStyleElementCSS(node.parentNode);

@@ -87,6 +87,9 @@ C('d4-fontface', 0, `var s=document.createElement('style');s.textContent='@font-
 C('d5-adopted', 0, `var sh=new CSSStyleSheet();sh.replaceSync('#d5{background-image:url('+U+')}');document.adoptedStyleSheets=[].concat(document.adoptedStyleSheets,[sh]);var e=document.createElement('div');e.id='d5';document.body.appendChild(e)`);
 C('d6-style-cross', 1, `var s=document.createElement('style');s.textContent='#d6{background-image:url('+U+')}';document.head.appendChild(s);var e=document.createElement('div');e.id='d6';document.body.appendChild(e)`);
 C('d7-import', 0, `var s=document.createElement('style');s.textContent='@import url('+U.replace('.png','.css')+');';document.head.appendChild(s)`);
+// A style filled through the tree, with a layout read after it: the style recalculation (and the image fetch) can run before any MutationObserver callback, so the rewrite has to be synchronous.
+C('d8-style-textnode', 0, `var e=document.createElement('div');e.id='d8';document.body.appendChild(e);var s=document.createElement('style');s.appendChild(document.createTextNode('#d8{background-image:url('+U+')}'));document.head.appendChild(s);getComputedStyle(e).backgroundImage`);
+C('d9-style-textnode-cross', 1, `var e=document.createElement('div');e.id='d9';document.body.appendChild(e);var s=document.createElement('style');document.head.appendChild(s);s.appendChild(document.createTextNode('#d9{background-image:url('+U+')}'));getComputedStyle(e).backgroundImage`);
 
 // Static `<link rel>` resource hints rewritten by htmltx (`preconnect` and `dns-prefetch` are measured via socket counts).
 C('a28-static-prefetch', 1, '');
