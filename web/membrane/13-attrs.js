@@ -6,8 +6,10 @@
   function tokenListContains(list, token) {
     return String(list || '').toLowerCase().split(/[\s,]+/).includes(token);
   }
+  // `preload` is not here: its href is rewritten like any subresource's (as the HTML transformer does for a static one), so it loads through the proxy and fires load or
+  // error. A page waits on those events (React 19 holds its first commit until the stylesheet preload it created settles; the loadCSS idiom switches rel in onload).
   function isBlockedLinkRelValue(rel) {
-    for (const token of ['modulepreload','preload','prefetch','preconnect','dns-prefetch','prerender','manifest']) {
+    for (const token of ['modulepreload','prefetch','preconnect','dns-prefetch','prerender','manifest']) {
       if (tokenListContains(rel, token)) return true;
     }
     return false;

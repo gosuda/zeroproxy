@@ -21,7 +21,7 @@ Combining both signals yields an unambiguous three-state verdict:
 
 Several HTML and Web API surfaces are intentionally blocked for security containment. For these cases, non-arrival at the fixture server (`X`) is the expected result rather than a compatibility bug:
 
-- **`b8-preload-link` (`preload`, `prefetch`, `preconnect`, `dns-prefetch`, `prerender`, `manifest`)**: Resource hints such as `preconnect` leak target hostnames directly to the OS DNS resolver and are stripped.
+- **`b8b-prefetch-link` (`prefetch`, `modulepreload`, `preconnect`, `dns-prefetch`, `prerender`, `manifest`)**: Resource hints such as `preconnect` leak target hostnames directly to the OS DNS resolver and are stripped. A dynamic `preload` (`b8-preload-link`) is not stripped: its `href` is rewritten like any subresource's and it loads through the proxy, because pages wait on its `load`/`error` (React 19 holds its first commit on it).
 - **`b9-object-data`, `b10-embed-src`, `a23-static-object-cross` (`<object>`, `<embed>`)**: Plugin surfaces are blocked by `object-src 'none'`. Note that whether loading is permitted (enforced by CSP) and whether the raw target URL may remain in the DOM (enforced by the rewriter) are separate invariants. Both `zp-htmltx` and page-realm DOM hooks (`isURLBearing`) rewrite `<object data>` and `<embed src>` attributes so the browser never attempts a direct connection that registers as `csp-only`.
 
   | Question | Policy | Enforcing Layer |

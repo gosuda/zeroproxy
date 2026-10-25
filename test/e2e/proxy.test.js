@@ -3021,6 +3021,25 @@ document.body.appendChild(doc);
         '<script>window.__done = true;</script></body>');
       return;
     }
+    if (url.pathname.startsWith('/xpreload-') && url.pathname.endsWith('.css')) {
+      res.writeHead(200, { 'Content-Type': 'text/css', 'Cache-Control': 'no-store' });
+      res.end(url.pathname === '/xpreload-b.css' ? '#probe{display:block;width:7px}' : '#unused{color:red}');
+      return;
+    }
+    if (url.pathname === '/xpreload') {
+      // A hint link a page makes at runtime: the page waits on its load or error (React 19 holds its first commit on the stylesheet preload it creates; the loadCSS idiom switches rel in onload).
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end('<!doctype html><title>preload</title><body><div id="probe">p</div><script>' +
+        "const out = window.__out = { events: [] };" +
+        "const a = document.createElement('link'); a.rel = 'preload'; a.as = 'style'; a.href = '/xpreload-a.css?j=a';" +
+        "a.addEventListener('load', () => out.events.push('a:load')); a.addEventListener('error', () => out.events.push('a:error')); document.head.appendChild(a);" +
+        "const b = document.createElement('link'); b.rel = 'preload'; b.as = 'style'; b.href = '/xpreload-b.css?j=b';" +
+        "b.onload = function () { b.onload = null; b.rel = 'stylesheet'; }; document.head.appendChild(b);" +
+        "const c = document.createElement('link'); c.setAttribute('href', '/xpreload-c.css?j=c'); c.setAttribute('as', 'style'); c.setAttribute('rel', 'preload');" +
+        "c.addEventListener('load', () => out.events.push('c:load')); c.addEventListener('error', () => out.events.push('c:error')); document.head.appendChild(c);" +
+        '</script></body>');
+      return;
+    }
     if (url.pathname === '/xnested') {
       // A script in a blank child frame makes an iframe of another site (the shape of an ad container that builds its creative's frame).
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
@@ -7634,6 +7653,40 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     assert.deepEqual(direct.live, ['changed-by-inline', 'changed-by-inline', 'changed-by-inline']);
     assert.deepEqual(direct.live2, ['changed-by-function', 'changed-by-function']);
     assert.deepEqual(proxied, direct);
+  });
+  await t.test('a preload link a page makes at runtime loads through the proxy and fires its events, as natively', async () => {
+    const targetBase = `http://${targetHost}:${targetPort}`;
+    const collect = async p => {
+      try {
+        await p.waitForFunction(() => window.__out && window.__out.events.length >= 2 && getComputedStyle(document.getElementById('probe')).width === '7px', { timeout: 30000, polling: 100 });
+        return await p.evaluate(() => ({
+          events: window.__out.events.slice().sort(),
+          width: getComputedStyle(document.getElementById('probe')).width,
+          rels: [...document.head.querySelectorAll('link')].map(l => l.getAttribute('rel') + '|' + l.getAttribute('as') + '|' + l.hasAttribute('href')).sort()
+        }));
+      } finally {
+        await p.close();
+      }
+    };
+    const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    let direct;
+    try {
+      const p = await directBrowser.newPage();
+      await p.goto(`${targetBase}/xpreload`, { waitUntil: 'domcontentloaded' });
+      direct = await collect(p);
+    } finally {
+      await directBrowser.close();
+    }
+    const before = requests.length;
+    const proxied = await collect(await openProxiedPage(`${targetBase}/xpreload`));
+    const reached = requests.slice(before).filter(r => r.url.startsWith('/xpreload-'));
+    fs.writeFileSync(path.join(artifacts, 'preload-link.json'), JSON.stringify({ direct, proxied, reached: reached.map(r => [r.url, r.userAgent === TARGET_UA]) }, null, 2));
+    // the native reference: the preload of a stylesheet and the one set with rel last both settle with load, and the idiom's second link applies its rules
+    assert.deepEqual(direct.events, ['a:load', 'c:load']);
+    assert.equal(direct.width, '7px');
+    assert.deepEqual(proxied, direct);
+    for (const j of ['a', 'b', 'c']) assert.ok(reached.some(r => r.url.includes('j=' + j)), `proxied page never fetched ${j}: ${JSON.stringify(reached)}`);
+    assert.ok(reached.every(r => r.userAgent === TARGET_UA), `a request reached the target outside the proxy: ${JSON.stringify(reached)}`);
   });
   await t.test('frames made from markup load and read back as natively', async () => {
     const targetBase = `http://${targetHost}:${targetPort}`;

@@ -28,7 +28,7 @@ const EXPECT_BLOCKED = {
   'a23-static-object-cross': "Plugin surface blocked by CSP `object-src 'none'`; the URL is rewritten for hygiene, but loading is denied by policy.",
   'b9-object-data': "Runtime-created `<object data>` surface blocked by CSP `object-src 'none'`.",
   'b10-embed-src': "Runtime-created `<embed src>` plugin surface blocked by CSP `object-src 'none'`.",
-  'b8-preload-link': 'Dynamic `<link rel=preload>` has its `rel` suppressed in the page realm so the browser cannot issue a direct request; static HTML preloads work via server-side htmltx rewriting.',
+  'b8b-prefetch-link': 'Dynamic `<link rel=prefetch>` has its `rel` suppressed in the page realm (a dynamic `preload` is routed through the proxy like a static one; `prefetch`, `modulepreload`, `preconnect`, `dns-prefetch`, `prerender` and `manifest` are not).',
   'c7-worker': 'Page-created JS Blobs are replaced with a blocking stub in `URL.createObjectURL` so unrewritten code cannot run inside a worker outside the membrane.',
   'c8-worker-cross': 'Same as c7-worker (blob worker issuing a cross-origin fetch).',
   'c11-ping-attr': '`<a ping>` tracking beacons are stripped so the browser does not issue direct POST requests.',
@@ -62,6 +62,7 @@ C('b5-srcset', 0, `var i=document.createElement('img');i.srcset=U+' 1x';document
 C('b6-picture-source', 0, `var p=document.createElement('picture');var s=document.createElement('source');s.srcset=U;var i=document.createElement('img');p.appendChild(s);p.appendChild(i);document.body.appendChild(p)`);
 C('b7-img-cross', 1, `var i=new Image();i.src=U;document.body.appendChild(i)`);
 C('b8-preload-link', 0, `var l=document.createElement('link');l.rel='preload';l.as='image';l.href=U;document.head.appendChild(l)`);
+C('b8b-prefetch-link', 0, `var l=document.createElement('link');l.rel='prefetch';l.href=U;document.head.appendChild(l)`);
 C('b9-object-data', 0, `var o=document.createElement('object');o.data=U;document.body.appendChild(o)`);
 C('b10-embed-src', 0, `var e=document.createElement('embed');e.src=U;document.body.appendChild(e)`);
 
