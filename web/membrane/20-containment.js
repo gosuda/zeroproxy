@@ -100,14 +100,8 @@
         if (e) { e.get = get; e.set = typeof set === 'function' ? set : null; }
       })) throw normalizedError('SecurityError');
       // A strict script run through `eval` keeps its top-level `var` and function declarations to itself (see the page's `__zp_export_vars`).
-      const childExported = newSet();
-      if (!define(w, '__zp_export_vars', (names, gets, sets, replace) => {
-        for (let i = 0; i < names.length; i++) {
-          const n = names[i];
-          if (Reflect.getOwnPropertyDescriptor(w, n) ? !(replace && childExported.has(n)) : childLex.has(n)) continue;
-          if (Reflect.defineProperty(w, n, { configurable: true, enumerable: true, get: gets[i], set: sets[i] })) childExported.add(n);
-        }
-      })) throw normalizedError('SecurityError');
+      const childExported = newMap();
+      if (!define(w, '__zp_export_vars', (names, gets, sets, replace) => pageRewriteHooks.exportStrictVars(w, childExported, n => childLex.has(n), names, gets, sets, replace))) throw normalizedError('SecurityError');
       if (!define(w, '__zp_lex_scope', new Proxy({}, {
         has(_t, prop) { return childLexEntry(prop) !== undefined; },
         get(_t, prop) { const e = childLexEntry(prop); return e ? childLexRead(e, prop) : undefined; },

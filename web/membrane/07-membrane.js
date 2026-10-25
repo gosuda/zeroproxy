@@ -1822,6 +1822,30 @@
       const blob = new Blob([code], { type: 'text/javascript' });
       return (Native.createObjectURL || URL.createObjectURL).call(URL, blob);
     }
+    // A static `import … from 'blob:…'` or `'data:…'` comes out of the rewriter as `'zp-import:<escaped specifier>'`: the browser would load the module as it is, and only here is its
+    // source within reach. Swap in a rewritten copy (the same one `import()` of that URL gets), or leave the marker, whose scheme cannot load. A chain of modules importing each
+    // other stops at a fixed depth.
+    let moduleImportDepth = 0;
+    function resolveModuleImportPlaceholders(code) {
+      const MARK = "'zp-import:";
+      let at = code.indexOf(MARK);
+      if (at < 0 || moduleImportDepth >= 8) return code;
+      moduleImportDepth++;
+      try {
+        let out = '', from = 0;
+        while (at >= 0) {
+          const end = code.indexOf("'", at + MARK.length);
+          if (end < 0) break;
+          out += code.slice(from, at);
+          let resolved = null;
+          try { resolved = virtualModuleURL(new URL(decodeURIComponent(code.slice(at + MARK.length, end)))); } catch {}
+          out += resolved ? "'" + resolved + "'" : code.slice(at, end + 1);
+          from = end + 1;
+          at = code.indexOf(MARK, from);
+        }
+        return out + code.slice(from);
+      } finally { moduleImportDepth--; }
+    }
     define(root, '__zp_get', get);
     // Fast-path predicates called by inline rewriter guards (`zp-rewriter` `guard_claim`).
     define(root, '__zp_fast', (base, prop) => base != null && fastDataKey(prop) && fastDataBase(base));
@@ -1933,7 +1957,8 @@
       }
       let parseFailure = null;
       try {
-        const out = root.ZPBundle.rewriteScript(source, kind, href);
+        const rewritten = root.ZPBundle.rewriteScript(source, kind, href);
+        const out = kind === 'module' && typeof rewritten === 'string' ? resolveModuleImportPlaceholders(rewritten) : rewritten;
         // Preserve empty-string rewrites (`eval('')` evaluates to `undefined`).
         if (typeof out === 'string' && (out.length > 0 || source === '')) {
           if (cacheable) {
@@ -1979,7 +2004,8 @@
     // Expose page rewriter hooks for `installNetworkContainment`.
     pageRewriteHooks = {
       rewrite: rewriteWithPageRewriter,
-      decodeEntities: decodeInlineEntities
+      decodeEntities: decodeInlineEntities,
+      exportStrictVars
     };
     // Expose window handle helpers for frame accessors, `MessageEvent.source`, and popup hooks.
     windowHandles = {
@@ -2034,16 +2060,43 @@
     });
     // A strict script run through `eval` keeps its top-level `var` and function declarations to itself, where a script of the document puts them on the
     // global. The rewriter hands over their names with closures onto the script's own bindings; the global gets accessors for them, so a later script, an
-    // event-handler attribute or a `window.f` read finds them as natively. A name the global already has (a real script's own `var`, `name`, `onload`)
-    // is left alone, and a function replaces an earlier strict script's function of the same name, as a function declaration does.
-    const exportedGlobals = newSet();
-    define(root, '__zp_export_vars', (names, gets, sets, replace) => {
+    // event-handler attribute or a `window.f` read finds them as natively. A name the global has as a native accessor or a non-configurable property
+    // (`name`, `onload`, `location`) is left alone.
+    //
+    // A name an earlier script already put on the global is the same binding natively, so the later script's own copy starts from its value: `var x;`
+    // changes nothing and `var _w = _w || {}` reads the earlier `_w` (Bing's second script, which otherwise read `undefined.performance`). Writes through
+    // the global reach every script's copy. A function declaration instead replaces the value, and the earlier scripts' copies take the new function.
+    // Not kept in step: a later assignment made by an earlier script's own code reaches only that script's copy.
+    //
+    // A script of the document that was not run through `eval` (an external one) declares its vars on the global itself, so the closures it hands over read
+    // and write the global: an accessor made from them would call itself. A write through the setter shows which kind it is, and the global stays as it is.
+    function exportStrictVars(target, exported, lexHas, names, gets, sets, replace) {
       for (let i = 0; i < names.length; i++) {
         const n = names[i];
-        if (nativeReflectGOPD(root, n) ? !(replace && exportedGlobals.has(n)) : zpLex.has(n)) continue;
-        if (nativeReflectDefineProperty(root, n, { configurable: true, enumerable: true, get: gets[i], set: sets[i] })) exportedGlobals.add(n);
+        const d = nativeReflectGOPD(target, n);
+        let prior = null;
+        if (d) {
+          let old;
+          if (d.get !== undefined && exported.get(n) === d.get) { prior = d.set; old = d.get.call(target); }
+          else if (d.configurable && 'value' in d) old = d.value;
+          else continue;
+          if (!replace) {
+            const probe = {};
+            sets[i](probe);
+            const now = nativeReflectGOPD(target, n);
+            const onGlobal = now !== undefined && (now.get ? now.get.call(target) : now.value) === probe;
+            sets[i](old);
+            if (onGlobal) continue;
+          }
+        } else if (lexHas(n)) continue;
+        const set = prior ? v => { sets[i](v); prior(v); } : sets[i];
+        if (!nativeReflectDefineProperty(target, n, { configurable: true, enumerable: true, get: gets[i], set })) continue;
+        exported.set(n, gets[i]);
+        if (replace && prior) prior(gets[i]());
       }
-    });
+    }
+    const exportedGlobals = newMap();
+    define(root, '__zp_export_vars', (names, gets, sets, replace) => exportStrictVars(root, exportedGlobals, n => zpLex.has(n), names, gets, sets, replace));
     // `with` environment for sloppy classic scripts: `has` claims only registered global
     // lexical bindings and named frame windows, passing all other names through to the global object.
     function namedFrameWindow(prop) {

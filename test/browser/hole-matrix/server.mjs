@@ -29,8 +29,6 @@ const EXPECT_BLOCKED = {
   'b9-object-data': "Runtime-created `<object data>` surface blocked by CSP `object-src 'none'`.",
   'b10-embed-src': "Runtime-created `<embed src>` plugin surface blocked by CSP `object-src 'none'`.",
   'b8b-prefetch-link': 'Dynamic `<link rel=prefetch>` has its `rel` suppressed in the page realm (a dynamic `preload` is routed through the proxy like a static one; `prefetch`, `modulepreload`, `preconnect`, `dns-prefetch`, `prerender` and `manifest` are not).',
-  'c7-worker': 'Page-created JS Blobs are replaced with a blocking stub in `URL.createObjectURL` so unrewritten code cannot run inside a worker outside the membrane.',
-  'c8-worker-cross': 'Same as c7-worker (blob worker issuing a cross-origin fetch).',
   'c11-ping-attr': '`<a ping>` tracking beacons are stripped so the browser does not issue direct POST requests.',
 };
 

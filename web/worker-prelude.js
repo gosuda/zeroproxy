@@ -282,14 +282,34 @@
     if (e) { e.get = get; e.set = typeof set === 'function' ? set : null; }
   });
   // A strict script run through `eval` keeps its top-level `var` and function declarations to itself, where a classic worker script puts them on the
-  // global. The rewriter hands over their names with closures onto the script's own bindings; the global gets accessors for them. A name the global
-  // already has is left alone, and a function replaces an earlier strict script's function of the same name, as a declaration does.
-  const exportedGlobals = newSet();
+  // global. The rewriter hands over their names with closures onto the script's own bindings; the global gets accessors for them. A native accessor or a
+  // non-configurable property is left alone. A name an earlier script already put on the global is the same binding natively, so a later script's own copy
+  // starts from its value and a write through the global reaches every copy; a function declaration replaces the value (the page's `exportStrictVars`).
+  const exportedGlobals = newMap();
   expose('__zp_export_vars', (names, gets, sets, replace) => {
     for (let i = 0; i < names.length; i++) {
       const n = names[i];
-      if (Reflect.getOwnPropertyDescriptor(self, n) ? !(replace && exportedGlobals.has(n)) : zpLex.has(n)) continue;
-      if (Reflect.defineProperty(self, n, { configurable: true, enumerable: true, get: gets[i], set: sets[i] })) exportedGlobals.add(n);
+      const d = Reflect.getOwnPropertyDescriptor(self, n);
+      let prior = null;
+      if (d) {
+        let old;
+        if (d.get !== undefined && exportedGlobals.get(n) === d.get) { prior = d.set; old = d.get.call(self); }
+        else if (d.configurable && 'value' in d) old = d.value;
+        else continue;
+        if (!replace) {
+          // An importScripts script declares its vars on the global itself; a write through the setter shows it, and its closures would call an accessor made from them.
+          const probe = {};
+          sets[i](probe);
+          const now = Reflect.getOwnPropertyDescriptor(self, n);
+          const onGlobal = now !== undefined && (now.get ? now.get.call(self) : now.value) === probe;
+          sets[i](old);
+          if (onGlobal) continue;
+        }
+      } else if (zpLex.has(n)) continue;
+      const set = prior ? v => { sets[i](v); prior(v); } : sets[i];
+      if (!Reflect.defineProperty(self, n, { configurable: true, enumerable: true, get: gets[i], set })) continue;
+      exportedGlobals.set(n, gets[i]);
+      if (replace && prior) prior(gets[i]());
     }
   });
   const zpLexScope = new Proxy({}, {

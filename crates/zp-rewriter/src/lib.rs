@@ -2267,9 +2267,18 @@ impl RewriteVisitor {
         // Skip schemes the SW cannot proxy and bare specifiers (package-manager
         // names with no URL semantics that never round-trip through fetch).
         let lower = raw.trim_start().to_ascii_lowercase();
-        if lower.starts_with("data:")
-            || lower.starts_with("blob:")
-            || lower.starts_with("javascript:")
+        // A `data:` or `blob:` module is code the browser would load as it is. Its source is only known where the blob lives, so the page's own
+        // rewriter swaps the placeholder for a rewritten copy (`resolveModuleImportPlaceholders`); anywhere else the unknown scheme fails to load.
+        if lower.starts_with("data:") || lower.starts_with("blob:") {
+            use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
+            self.patches.push(Patch {
+                start: lit.span.start,
+                end: lit.span.end,
+                replacement: format!("'zp-import:{}'", utf8_percent_encode(raw.trim_start(), NON_ALPHANUMERIC)),
+            });
+            return;
+        }
+        if lower.starts_with("javascript:")
             || lower.starts_with("about:")
             || (!raw.starts_with("./")
                 && !raw.starts_with("../")
@@ -5890,6 +5899,21 @@ mod tests {
             "data: import must NOT be proxy-routed (SW can't fetch data:): {}",
             r.code
         );
+    }
+
+    #[test]
+    fn static_data_and_blob_imports_become_placeholders_that_cannot_load() {
+        let mut o = opts();
+        o.kind = ScriptKind::Module;
+        let src = "import a from 'blob:http://h.example/3f2a-9';\nimport 'data:text/javascript,1';\nexport * from \"blob:http://h.example/x\";\nexport { b } from 'DATA:text/javascript,export const b=1';";
+        let r = rewrite_script(src, &o).unwrap();
+        assert!(!r.code.contains("'blob:") && !r.code.contains("\"blob:") && !r.code.contains("'data:") && !r.code.contains("'DATA:"),
+            "a data:/blob: specifier must not reach the browser as it is: {}", r.code);
+        assert_eq!(r.code.matches("'zp-import:").count(), 4, "every static specifier is marked: {}", r.code);
+        assert!(r.code.contains("zp-import:blob%3Ahttp%3A%2F%2Fh%2Eexample%2F3f2a%2D9"), "the original rides along percent-encoded: {}", r.code);
+        // the dynamic literal form takes the runtime path and is not marked
+        let dynamic = rewrite_script("import('blob:http://h.example/y');", &o).unwrap();
+        assert!(!dynamic.code.contains("zp-import:"), "a dynamic import is resolved by the runtime: {}", dynamic.code);
     }
 
     #[test]

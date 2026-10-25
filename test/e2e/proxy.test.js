@@ -3013,8 +3013,10 @@ document.body.appendChild(doc);
       }
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end('<!doctype html><title>strict</title><body>' +
-        "<script>'use strict'; var sVar = 'v'; var sUnset; var sObj = { n: 1 }; function sFn() { return 'f1'; } function getSVar() { return sVar; } function setSVar(v) { sVar = v; }</script>" +
+        "<script>'use strict'; var sVar = 'v'; var sUnset; var sObj = { n: 1 }; function sFn() { return 'f1'; } function getSVar() { return sVar; } function setSVar(v) { sVar = v; } function getSObj() { return sObj; }</script>" +
         "<script>'use strict'; function sFn() { return 'f2'; } var sOther = 'o';</script>" +
+        // a strict script that declares a name an earlier one made again is the same binding: it starts from the value and `var x = x || {}` keeps it
+        "<script>'use strict'; var early = sVar; var sObj = sObj || { n: 'fresh' }; var sUnset; window.__redecl = [early, sObj.n, getSObj() === sObj, typeof sUnset];</script>" +
         '<script>' + reads + " window.__inline = reads(); sVar = 'changed-by-inline'; window.__live = [getSVar(), sVar, window.sVar]; setSVar('changed-by-function'); window.__live2 = [sVar, window.sVar];</script>" +
         '<script src="/xstrict-ext.js"></script>' +
         '<button id="b" onclick="window.__handler = reads()">b</button>' +
@@ -3070,6 +3072,31 @@ document.body.appendChild(doc);
         "for (const form of forms) { make(form); getComputedStyle(document.getElementById('e_' + form)).backgroundImage; }" +
         "const probe = document.createElement('div'); probe.id = 'xcss-import-probe'; document.body.appendChild(probe);" +
         "const q = String.fromCharCode(39); const imp = document.createElement('style'); imp.textContent = '@import url(' + q + '//' + H + '/xcss-import.css?j=prcss-import' + q + ')'; document.head.appendChild(imp);" +
+        "window.__done = true;" +
+        '</script></body>');
+      return;
+    }
+    if (url.pathname === '/xblobdep.js') {
+      res.writeHead(200, { 'Content-Type': 'text/javascript', 'Cache-Control': 'no-store' });
+      res.end('export const dep = "dep-loaded";');
+      return;
+    }
+    if (url.pathname === '/xblobmodule') {
+      // Code a page builds in blobs: a module that statically imports another blob (and a data: URL), a blob module script made the way es-module-shims feature-detects, a blob classic
+      // script, and a computed import() from inside a blob module. Every one of them must run rewritten, so what they read of `location` is the page's, as natively.
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end('<!doctype html><title>blobmodule</title><body><script type="module">' +
+        "const out = window.__blobs = { errors: [] };" +
+        "const blob = src => URL.createObjectURL(new Blob([src], { type: 'text/javascript' }));" +
+        "const tryStep = async (name, fn) => { try { out[name] = await fn(); } catch (e) { out.errors.push(name + ':' + (e && e.name || e)); } };" +
+        'const inner = blob("window.__innerHref = location.href; export const v = 7; export default u => import(u);");' +
+        "const outer = blob(\"import * as m from '\" + inner + \"'; window.__outerSeen = m.v; self._esmsi = m;\");" +
+        "await tryStep('dynamic', async () => { await import(outer); return [window.__innerHref, window.__outerSeen]; });" +
+        "await tryStep('dataImport', async () => { await import(blob(\"import 'data:text/javascript,window.__dataHref%3Dlocation.href%3B';\")); return window.__dataHref; });" +
+        "const load = el => new Promise(r => { el.addEventListener('load', () => r('load')); el.addEventListener('error', () => r('error')); document.head.appendChild(el); });" +
+        "await tryStep('moduleScript', async () => { const inner2 = blob('window.__innerHref2 = location.href; export const v = 8;'); const outer2 = blob(\"import * as m from '\" + inner2 + \"'; self._esmsi = m;\"); const s = Object.assign(document.createElement('script'), { type: 'module', src: outer2 }); const ev = await load(s); return [ev, s.src === outer2, self._esmsi && self._esmsi.v, window.__innerHref2]; });" +
+        "await tryStep('classicScript', async () => { const s = document.createElement('script'); s.src = blob('window.__classicHref = location.href;'); const ev = await load(s); return [ev, s.src.startsWith('blob:'), window.__classicHref]; });" +
+        "await tryStep('computedImport', async () => { const di = (await import(inner)).default; const m = await di(new URL('/xblobdep.js', location.href).href); return m.dep; });" +
         "window.__done = true;" +
         '</script></body>');
       return;
@@ -6680,18 +6707,32 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     out.scriptBlobSrc = await new Promise(resolve => {
       try {
         window.__scriptBlobRan = false;
-        const blobURL = URL.createObjectURL(new Blob(['window.__scriptBlobRan = true;'], { type: 'text/javascript' }));
+        const blobURL = URL.createObjectURL(new Blob(['window.__scriptBlobRan = location.href;'], { type: 'text/javascript' }));
         const s = document.createElement('script');
         s.src = blobURL;
         document.head.appendChild(s);
         setTimeout(() => {
-          const ran = window.__scriptBlobRan === true;
+          // The blob reads the page's address: the target's when it ran rewritten, the proxy's (it contains /zp/) when it ran as written.
+          const seen = window.__scriptBlobRan;
           try { document.head.removeChild(s); } catch {}
           try { URL.revokeObjectURL(blobURL); } catch {}
-          resolve(ran ? 'ran' : 'blocked');
+          resolve(typeof seen !== 'string' ? 'blocked' : seen.indexOf('/zp/') >= 0 ? 'ran-as-written' : 'ran-rewritten');
         }, 200);
       } catch (err) { resolve('throw:' + (err && err.message || err)); }
     });
+
+    // A module that statically imports a blob: the browser loads the inner one itself, so it is only rewritten if the rewriter swapped the specifier.
+    out.staticBlobImport = await (async () => {
+      try {
+        window.__staticBlobSeen = null;
+        const inner = URL.createObjectURL(new Blob(['window.__staticBlobSeen = location.href;'], { type: 'text/javascript' }));
+        const outer = URL.createObjectURL(new Blob(["import '" + inner + "';"], { type: 'text/javascript' }));
+        // the probe is not rewritten page code, so the import goes through a Function body, which is
+        await new Function('u', 'return import(u)')(outer);
+        const seen = window.__staticBlobSeen;
+        return typeof seen !== 'string' ? 'blocked' : seen.indexOf('/zp/') >= 0 ? 'ran-as-written' : 'ran-rewritten';
+      } catch (err) { return 'blocked:' + (err && err.name || 'Error'); }
+    })();
 
     out.reflectGetLocation = (() => {
       try {
@@ -6941,7 +6982,8 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
   await t.test('functionEscape', () => { assert.equal(escapeMatrix.functionEscape, 'ran:' + escapeMatrix.virtualHref); });
   await t.test('constructorEscape', () => { assert.equal(escapeMatrix.constructorEscape, 'ran:' + escapeMatrix.virtualHref); });
   await t.test('asyncFunctionEscape', () => { assert.equal(escapeMatrix.asyncFunctionEscape, 'ran:' + escapeMatrix.virtualHref); });
-  await t.test('scriptBlobSrc', () => { assert.equal(escapeMatrix.scriptBlobSrc, 'blocked', `<script src=blob:...> must not execute, got: ${escapeMatrix.scriptBlobSrc}`); });
+  await t.test('staticBlobImport', () => { assert.equal(escapeMatrix.staticBlobImport, 'ran-rewritten', `a blob imported by a module must not load as written, got: ${escapeMatrix.staticBlobImport}`); });
+  await t.test('scriptBlobSrc', () => { assert.equal(escapeMatrix.scriptBlobSrc, 'ran-rewritten', `<script src=blob:...> runs only as a rewritten copy, got: ${escapeMatrix.scriptBlobSrc}`); });
   await t.test('reflectGetLocation', () => { assert.equal(escapeMatrix.reflectGetLocation, 'virtual', `Reflect.get must hit membrane, got: ${escapeMatrix.reflectGetLocation}`); });
   await t.test('topLocation', () => { assert.equal(escapeMatrix.topLocation, 'virtual', `top.location escape: ${escapeMatrix.topLocation}`); });
   await t.test('parentLocation', () => { assert.equal(escapeMatrix.parentLocation, 'virtual', `parent.location escape: ${escapeMatrix.parentLocation}`); });
@@ -7706,7 +7748,7 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
         await p.waitForFunction(() => window.__done === true, { timeout: 60000, polling: 100 });
         await p.click('#b');
         await p.waitForFunction(() => window.__handler, { timeout: 10000, polling: 100 });
-        return await p.evaluate(() => ({ inline: window.__inline, ext: window.__ext, handler: window.__handler, live: window.__live, live2: window.__live2 }));
+        return await p.evaluate(() => ({ inline: window.__inline, ext: window.__ext, handler: window.__handler, live: window.__live, live2: window.__live2, redecl: window.__redecl }));
       } finally {
         await p.close();
       }
@@ -7727,6 +7769,7 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     assert.equal(direct.inline.sFn, 'f2');
     assert.deepEqual(direct.live, ['changed-by-inline', 'changed-by-inline', 'changed-by-inline']);
     assert.deepEqual(direct.live2, ['changed-by-function', 'changed-by-function']);
+    assert.deepEqual(direct.redecl, ['v', 1, true, 'undefined']);
     assert.deepEqual(proxied, direct);
   });
   await t.test('a preload link a page makes at runtime loads through the proxy and fires its events, as natively', async () => {
@@ -7831,6 +7874,38 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     };
     for (const form of ['fn', 'obj', 'on']) assert.deepEqual(seen[form], ['h1', 'h2', 'h3'], `${form}: ${JSON.stringify(proxied[form])}`);
     assert.ok(proxied.fn.every(e => e[0] === 'navigate' && e[3] === true && e[4] === 'function'), `event shape: ${JSON.stringify(proxied.fn)}`);
+  });
+  await t.test('code a page builds in blobs runs rewritten, including what a blob module imports, as natively', async () => {
+    const targetBase = `http://${targetHost}:${targetPort}`;
+    const collect = async p => {
+      try {
+        await p.waitForFunction(() => window.__done === true, { timeout: 60000, polling: 100 });
+        return await p.evaluate(() => window.__blobs);
+      } finally {
+        await p.close();
+      }
+    };
+    const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    let direct;
+    try {
+      const p = await directBrowser.newPage();
+      await p.goto(`${targetBase}/xblobmodule`, { waitUntil: 'domcontentloaded' });
+      direct = await collect(p);
+    } finally {
+      await directBrowser.close();
+    }
+    const proxied = await collect(await openProxiedPage(`${targetBase}/xblobmodule`));
+    fs.writeFileSync(path.join(artifacts, 'blob-modules.json'), JSON.stringify({ direct, proxied }, null, 2));
+    const here = `${targetBase}/xblobmodule`;
+    // The native reference: each blob (and the data: module a blob imports) sees the page's address; es-module-shims' feature check loads and `src` reads back as the blob.
+    assert.deepEqual(direct.errors, []);
+    assert.deepEqual(direct.dynamic, [here, 7]);
+    assert.equal(direct.dataImport, here);
+    assert.deepEqual(direct.moduleScript, ['load', true, 8, here]);
+    assert.deepEqual(direct.classicScript, ['load', true, here]);
+    assert.equal(direct.computedImport, 'dep-loaded');
+    // Through the proxy: the same, which also means no blob ran as it was written (it would read the proxy's address, or be refused).
+    assert.deepEqual(proxied, direct);
   });
   await t.test('localStorage and sessionStorage inherit from Object.prototype and Storage.prototype, as natively', async () => {
     const targetBase = `http://${targetHost}:${targetPort}`;

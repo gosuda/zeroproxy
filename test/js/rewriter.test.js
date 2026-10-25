@@ -32,16 +32,16 @@ function installLexHelpers(ctx, realmGlobal) {
     const start = src.indexOf("    define(root, '__zp_lex_decl', (lexMap, varNames) => {");
     const end = src.indexOf("    define(root, '__zp_lex_scope', zpLexScope);", start);
     assert.ok(start >= 0 && end > start, 'prelude __zp_lex_decl/__zp_lex_bind source not found');
-    // Keep the three defines only; the lex scope proxy after them and the end
+    // Keep the helpers and the three defines only; the lex scope proxy after them and the end
     // marker is the prelude's executor wrapper, which the rewriter never emits.
-    const bindEnd = src.indexOf('\n    });\n', src.indexOf("define(root, '__zp_export_vars'", start)) + '\n    });\n'.length;
+    const bindEnd = src.indexOf('\n', src.indexOf("define(root, '__zp_export_vars'", start)) + 1;
     assert.ok(bindEnd > start && bindEnd <= end, 'prelude __zp_export_vars end not found');
     lexHelpersSource = src.slice(start, bindEnd);
   }
   const define = (_target, key, fn) => { ctx[key] = fn; return true; };
   // eslint-disable-next-line no-new-func
-  new Function('define', 'root', 'zpLex', '__zp_lex_env', 'nativeReflectGOPD', 'nativeReflectDefineProperty', 'newSet', lexHelpersSource)(
-    define, realmGlobal, new Map(), null, Reflect.getOwnPropertyDescriptor, Reflect.defineProperty, () => new Set());
+  new Function('define', 'root', 'zpLex', '__zp_lex_env', 'nativeReflectGOPD', 'nativeReflectDefineProperty', 'newMap', lexHelpersSource)(
+    define, realmGlobal, new Map(), null, Reflect.getOwnPropertyDescriptor, Reflect.defineProperty, () => new Map());
 }
 
 function executionContext() {
@@ -423,4 +423,34 @@ test('the prelude slices a rewritten Function body back out, guards and refusals
   const fn = vm.runInContext('(function (a, i) {\n' + body + '\n})', ctx);
   assert.equal(fn([3, 4, 5], 1), 9);
   assert.throws(() => unwrap(['__zp_get'], 'return location', 'function'), SyntaxError);
+});
+
+// A strict script is run through an indirect `eval`, which keeps its own var environment where a script of the document shares the global one.
+// Bing's second strict inline script begins with `var _w = _w || {}` after the first one's `var _w = window`, and its code ahead of that line read
+// `_w.performance` from an `undefined` copy.
+test('strict scripts that redeclare a global var share one binding with the script that made it', () => {
+  const { ctx } = executionContext();
+  const geval = vm.runInContext('(0, eval)', ctx);
+  geval(rewrite(`"use strict"; var shared = {tag: 'first'}; var counter = 1; function pick() { return 'first'; }
+    function callPick() { return pick(); } function readCounter() { return counter; }`));
+  geval(rewrite(`"use strict"; var early = shared.tag; var shared = shared || {}; var counter; function pick() { return 'second'; }
+    function readCounterToo() { return counter; } window.result = [early, shared.tag, counter];`));
+  assert.deepEqual(Array.from(ctx.window.result), ['first', 'first', 1], 'a redeclaration neither resets nor hides the earlier value');
+  assert.equal(vm.runInContext('callPick()', ctx), 'second', 'a function declaration replaces the earlier one for the earlier script too');
+  vm.runInContext('counter = 7', ctx);
+  assert.deepEqual([vm.runInContext('readCounter()', ctx), vm.runInContext('readCounterToo()', ctx)], [7, 7], 'a write through the global reaches both copies');
+  // An external script is not run through `eval`: its vars are the global's own, and a getter made from its closures would read itself.
+  vm.runInContext(rewrite('"use strict"; var counter; var realOnly = 3; window.realSeen = [counter, realOnly];'), ctx);
+  assert.deepEqual(Array.from(ctx.window.realSeen), [7, 3], 'a real script declaring an exported name reads the global');
+  assert.equal(vm.runInContext('counter = 8; counter', ctx), 8);
+  assert.equal(vm.runInContext('readCounter()', ctx), 8, 'the exported name still reaches the earlier script');
+});
+
+test('a strict script takes over a configurable data property of the global and leaves a fixed one alone', () => {
+  const { ctx } = executionContext();
+  vm.runInContext("globalThis.seeded = 5; Object.defineProperty(globalThis, 'fixed', { value: 1 });", ctx);
+  vm.runInContext('(0, eval)', ctx)(rewrite('"use strict"; var seeded; var fixed; function readSeeded() { return seeded; } window.result = [seeded, fixed];'));
+  assert.deepEqual(Array.from(ctx.window.result), [5, undefined], 'seeded keeps its value; the fixed property cannot be shadowed by an export');
+  assert.equal(vm.runInContext('fixed', ctx), 1);
+  assert.equal(vm.runInContext('seeded = 9; readSeeded()', ctx), 9);
 });

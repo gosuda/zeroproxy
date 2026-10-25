@@ -29,7 +29,6 @@ Several HTML and Web API surfaces are intentionally blocked for security contain
   | Is the plugin resource allowed to load? | **No** | CSP (`object-src 'none'`) |
   | May the raw target URL remain in the DOM? | **No** | HTML and DOM rewriters (`zp-htmltx`, `isURLBearing`) |
 
-- **`c7-worker`, `c8-worker-cross`**: Spawning a Worker directly from an unrewritten JavaScript `blob:` URL is sealed; worker creation must route through the worker bootstrap wrapper.
 - **`c11-ping-attr` (`<a ping>`)**: Native `<a ping>` dispatches direct background requests to a whitespace-separated list of URLs. ZeroProxy strips the native `ping` attribute into `data-zp-ping` and sends a proxied keepalive POST on click.
 - **FedCM (`navigator.credentials.get({ identity })`)**: The Federated Credential Management API requires the browser to contact the Identity Provider (IdP) directly outside page and Service Worker control, violating the single-egress invariant. ZeroProxy blocks FedCM calls.
 - **Uncontrolled child frame images (`e1-adframe-img`, `e4-blank-iframe-img`)**: Iframes populated via `document.write` or `about:blank` may not register as direct Service Worker clients. The parent realm intercepts their image loads, fetches the bytes through the parent's Service Worker tunnel, and supplies a `blob:` URL so all traffic still exits through a single tunnel.

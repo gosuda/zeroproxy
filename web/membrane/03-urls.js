@@ -93,12 +93,44 @@
     return strict ? hasExecutableURLScheme(raw) : hasDangerousURLScheme(raw);
   }
   // Block blob: URLs on script, frame, and plugin elements so unrewritten code
-  // cannot execute from a Blob.
+  // cannot execute from a Blob. A script is the exception for the copies this file made itself (`routeBlobScript`).
   function hasContextBlockedScheme(el, raw) {
     const s = String(raw).trim();
     if (!/^blob:/i.test(s)) return false;
     const tag = el && el.localName;
-    return tag === 'script' || tag === 'iframe' || tag === 'frame' || tag === 'embed' || tag === 'object';
+    if (tag === 'script') return !rewrittenScriptBlobs.has(s);
+    return tag === 'iframe' || tag === 'frame' || tag === 'embed' || tag === 'object';
+  }
+  // Blob URLs of rewritten copies of a page's blob scripts, and the copy each script element points at.
+  const rewrittenScriptBlobs = newSet();
+  const blobScriptCopies = newWeakMap();
+  // A script the page points at its own blob (es-module-shims feature-detects `import`, import maps and JSON modules with `<script type=module src=blob:…>`; without them it
+  // takes the browser for one that has none) cannot run as it is: the code was never rewritten. Read the blob (a same-origin synchronous request, as `import(blob:)` does),
+  // rewrite it for the element's kind and point the element at a copy of the result; `src` still reads back as the page's blob. Anything that cannot be read or rewritten stays blocked.
+  function routeBlobScript(el, raw) {
+    const kind = executableScriptKindForElement(el);
+    if (!kind || !pageRewriteHooks || !Native.createObjectURL || !Native.XMLHttpRequest) return false;
+    // Preparing the element at insertion and the observer read the attribute this function wrote: a copy is already rewritten, and the same blob and kind keep their copy.
+    if (rewrittenScriptBlobs.has(raw)) return true;
+    const made = blobScriptCopies.get(el);
+    if (made && made.raw === raw && made.kind === kind) {
+      if (Native.getAttribute.call(el, 'src') !== made.copy) Native.setAttribute.call(el, 'src', made.copy);
+      return true;
+    }
+    let copy;
+    try {
+      const req = new Native.XMLHttpRequest();
+      req.open('GET', raw, false);
+      req.send();
+      if (req.status !== 200 && req.status !== 0) return false;
+      copy = Native.createObjectURL(new Blob([pageRewriteHooks.rewrite(req.responseText, kind)], { type: 'text/javascript' }));
+    } catch { return false; }
+    rewrittenScriptBlobs.add(copy);
+    blobScriptCopies.set(el, { raw, kind, copy });
+    urlMeta.set(el, raw);
+    litSet(el, 'src', raw);
+    Native.setAttribute.call(el, 'src', copy);
+    return true;
   }
   function blockedURLValue(el, key) { const tag = el && el.localName; return key === 'src' && (tag === 'iframe' || tag === 'frame') ? 'about:blank' : key === 'src' && tag === 'script' ? ZP.errorPath('POLICY_BLOCKED') : '#'; }
   function blockExecutableURL(el, key, raw) {
@@ -106,6 +138,7 @@
     // stash the rewritten code in data-zp-jsurl for delegated execution.
     const tag = el && el.localName;
     const s = String(raw).trim();
+    if (tag === 'script' && key === 'src' && /^blob:/i.test(s) && routeBlobScript(el, s)) return;
     const colon = s.indexOf(':');
     if (/^javascript:/i.test(s) && ((key === 'href' && (tag === 'a' || tag === 'area')) || (key === 'action' && tag === 'form'))) {
       try {
