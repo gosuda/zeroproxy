@@ -101,6 +101,8 @@
     if (tag === 'script') return !rewrittenScriptBlobs.has(s);
     return tag === 'iframe' || tag === 'frame' || tag === 'embed' || tag === 'object';
   }
+  // The `javascript:` URL the page gave a link or form (see `blockExecutableURL`).
+  const javascriptURLs = newWeakMap();
   // Blob URLs of rewritten copies of a page's blob scripts, and the copy each script element points at.
   const rewrittenScriptBlobs = newSet();
   const blobScriptCopies = newWeakMap();
@@ -134,20 +136,17 @@
   }
   function blockedURLValue(el, key) { const tag = el && el.localName; return key === 'src' && (tag === 'iframe' || tag === 'frame') ? 'about:blank' : key === 'src' && tag === 'script' ? ZP.errorPath('POLICY_BLOCKED') : '#'; }
   function blockExecutableURL(el, key, raw) {
-    // Rewrite javascript: URLs on <a href>, <area href>, and <form action> and
-    // stash the rewritten code in data-zp-jsurl for delegated execution.
+    // A javascript: URL on <a href>, <area href> or <form action> is kept as the page wrote it, in `javascriptURLs`, with a no-op in its place; the click or
+    // submit handler (`installNavigationTraps`) rewrites and runs it as the default action.
     const tag = el && el.localName;
     const s = String(raw).trim();
     if (tag === 'script' && key === 'src' && /^blob:/i.test(s) && routeBlobScript(el, s)) return;
-    const colon = s.indexOf(':');
     if (/^javascript:/i.test(s) && ((key === 'href' && (tag === 'a' || tag === 'area')) || (key === 'action' && tag === 'form'))) {
-      try {
-        const code = callPageRewriter(s.slice(colon + 1), 'classic');
-        Native.setAttribute.call(el, 'data-zp-jsurl', code);
-        Native.setAttribute.call(el, 'data-zp-jsurl-kind', tag === 'form' ? 'form' : 'anchor');
-        Native.setAttribute.call(el, key, 'javascript:void(0)');
-        return;
-      } catch {}
+      javascriptURLs.set(el, s);
+      litSet(el, key, s);
+      Native.setAttribute.call(el, 'data-zp-jsurl-kind', tag === 'form' ? 'form' : 'anchor');
+      Native.setAttribute.call(el, key, 'javascript:void(0)');
+      return;
     }
     urlMeta.delete(el); Native.setAttribute.call(el, 'data-zp-target-url', ''); Native.setAttribute.call(el, 'data-zp-blocked-url', s); Native.setAttribute.call(el, key, blockedURLValue(el, key)); if (key === 'src' && (el.localName === 'iframe' || el.localName === 'frame')) instrumentIframe(el);
   }

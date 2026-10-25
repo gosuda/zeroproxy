@@ -465,6 +465,8 @@ fn attr_settings(
                                     };
                                     let _ = el.set_attribute("data-zp-jsurl", &r.code);
                                     let _ = el.set_attribute("data-zp-jsurl-kind", kind_attr);
+                                    // The author's literal, so `getAttribute` still answers with the `javascript:` URL.
+                                    let _ = el.set_attribute(&format!("data-zp-lit-{lower}"), &decoded);
                                 }
                                 Err(e) => {
                                     diags_for_attr.borrow_mut().push(format!(
@@ -2077,6 +2079,11 @@ mod tests {
         assert!(
             r.html.contains("data-zp-jsurl-kind=\"anchor\""),
             "kind missing: {}",
+            r.html
+        );
+        assert!(
+            r.html.contains("data-zp-lit-href=\"javascript:location.href='x'\""),
+            "the author's literal must stay readable: {}",
             r.html
         );
         // Body should be rewritten through zp-rewriter (location is dangerous global).

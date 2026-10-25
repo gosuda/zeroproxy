@@ -34,7 +34,7 @@
     const jsMatch = /^\s*javascript:/i.exec(String(raw));
     if (jsMatch) {
       const code = String(raw).slice(jsMatch[0].length);
-      try { execGlobalScript(callPageRewriter(code, 'classic')); } catch {}
+      try { pageRewriteHooks.runClassic(code); } catch {}
       return;
     }
     let next;

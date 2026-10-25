@@ -144,18 +144,28 @@
   }
 
   function installNavigationTraps() {
-    // Execute `javascript:` URLs transformed into `data-zp-jsurl` attributes by htmltx
-    // using the prelude-private `Native.FunctionCtor`.
-    function runJSURL(el, ev) {
-      if (!el || !el.getAttribute) return false;
-      const code = el.getAttribute('data-zp-jsurl');
-      if (!code) return false;
+    // Run the `javascript:` URL of a link or form.
+    // A link or form that carries the no-op (`javascript:void(0)`) stands for a `javascript:` URL: the one the membrane recorded (`javascriptURLs`), the author's literal the HTML
+    // transformer kept in `data-zp-lit-*`, or the no-op itself. It is rewritten at the moment it runs. The `data-zp-jsurl` code the transformer also writes is not used: any author
+    // or script can write that attribute, and code taken from it would run as written. The page's own `getAttribute` does not show the membrane's `data-zp-*` attributes, so
+    // these read them natively. An address the page wrote since is not the no-op and is no `javascript:` URL any more.
+    const jsURLBodyOf = (el, kind) => {
       try {
-        // Execute the rewritten body in global scope.
-        ttFunction(['"use strict";\n' + code]).call(globalThis);
-      } catch {}
-      if (ev) { ev.preventDefault(); ev.stopImmediatePropagation(); }
-      return true;
+        if (!el || Native.getAttribute.call(el, kind === 'anchor' ? 'href' : 'action') !== 'javascript:void(0)') return null;
+        const url = javascriptURLs.get(el) ?? Native.getAttribute.call(el, 'data-zp-lit-href') ?? Native.getAttribute.call(el, 'data-zp-lit-action') ?? Native.getAttribute.call(el, 'data-zp-lit-formaction') ?? 'javascript:void(0)';
+        const m = /^\s*javascript:/i.exec(url);
+        if (!m) return null;
+        const body = url.slice(m[0].length);
+        try { return decodeURIComponent(body); } catch { return body; }
+      } catch { return null; }
+    };
+    // A `javascript:` URL is the link's or form's default action: it runs after the event has been dispatched, in a task of its own, and not at all if a listener cancelled the event.
+    // Running it in the capture phase and stopping the event (as this once did) would also swallow the page's own handlers, which links such as `<a href="javascript:void(0)" onclick=…>` rely on.
+    function runJSURLAfter(body, ev) {
+      Native.setTimeout(() => {
+        if (ev.defaultPrevented) return;
+        try { pageRewriteHooks.runClassic(body); } catch {}
+      }, 0);
     }
     // Dispatch `<a ping>` auditing requests stored in `data-zp-blocked-ping`
     // through `fetchThroughRuntime` so the browser does not send direct POSTs.
@@ -181,9 +191,9 @@
     }
     document.addEventListener('click', ev => {
       for (let el = ev.target; el && el !== document; el = el.parentElement) {
-        if (el.hasAttribute && el.hasAttribute('data-zp-jsurl')) {
-          if (runJSURL(el, ev)) return;
-        }
+        // A form's own URL belongs to its submit event, which a click on a button inside it also raises.
+        const body = jsURLBodyOf(el, 'anchor');
+        if (body !== null) { runJSURLAfter(body, ev); return; }
       }
       const nav = clickNavigationTarget(ev);
       if (!nav) return;
@@ -207,9 +217,8 @@
     document.addEventListener('submit', ev => {
       const f = ev.target;
       if (!f) return;
-      if (f.hasAttribute && f.hasAttribute('data-zp-jsurl')) {
-        if (runJSURL(f, ev)) return;
-      }
+      const body = jsURLBodyOf(f, 'form');
+      if (body !== null) { runJSURLAfter(body, ev); return; }
       ev.preventDefault();
       submitForm(f, ev.submitter);
     }, true);
@@ -494,7 +503,7 @@
       // Evaluate `open('javascript:...')` in the current realm after rewriting.
       const jsMatch = /^\s*javascript:/i.exec(raw);
       if (jsMatch) {
-        try { execGlobalScript(callPageRewriter(raw.slice(jsMatch[0].length), 'classic')); } catch {}
+        try { pageRewriteHooks.runClassic(raw.slice(jsMatch[0].length)); } catch {}
         return null;
       }
       const noopener = /(^|[\s,])no(opener|referrer)\b/i.test(String(features || ''));

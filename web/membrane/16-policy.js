@@ -77,6 +77,8 @@
       return;
     }
     const raw = Native.getAttribute.call(el, key);
+    // The no-op a `javascript:` link was left with stands for the URL recorded beside it: processing it again would replace that URL with `void(0)`.
+    if (raw === 'javascript:void(0)') return;
     if (shouldBlockURLAttribute(el, localKey, raw, localKey, tag) || hasContextBlockedScheme(el, raw)) { blockExecutableURL(el, localKey, raw); return; }
     if (!raw) return;
     // Upgrade already-proxied subresource URLs to blob URLs when inside an SW-less frame.

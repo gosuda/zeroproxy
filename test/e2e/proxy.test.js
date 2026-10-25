@@ -3101,6 +3101,34 @@ document.body.appendChild(doc);
         '</script></body>');
       return;
     }
+    if (url.pathname === '/xjsurl') {
+      // `javascript:` links and forms, in the markup and made at runtime. The URL is the link's default action: it runs after the click has been dispatched, not when a listener
+      // cancelled it, and the page's own handlers on the same link still run (`href="javascript:void(0)"` with an onclick is the common shape).
+      const box = 'style="display:block;width:90px;height:24px"';
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end('<!doctype html><title>jsurl</title><body><script>window.__js = [];</script>' +
+        `<a id="sa" href="javascript:window.__js.push('static-a')" ${box}>sa</a>` +
+        `<form id="sf" action="javascript:window.__js.push('static-form')"><button id="sfb" type="submit" ${box}>go</button></form>` +
+        `<a id="so" href="javascript:void(0)" onclick="window.__js.push('onclick')" ${box}>so</a>` +
+        `<a id="sp" href="javascript:window.__js.push('must-not-run')" onclick="event.preventDefault(); window.__js.push('prevented')" ${box}>sp</a>` +
+        `<a id="ev" href="javascript:void(0)" data-zp-jsurl="window.__forged = location.href" data-zp-jsurl-kind="anchor" ${box}>ev</a>` +
+        '<div id="host"></div><script>' +
+        "document.addEventListener('click', function (e) { if (e.target.id) window.__js.push('doc:' + e.target.id); });" +
+        "var host = document.getElementById('host');" +
+        "window.tagRa = 'runtime-inner';" +
+        'host.innerHTML = \'<a id="ra" href="javascript:window.__js.push(window.tagRa)" style="display:block;width:90px;height:24px">ra</a>\';' +
+        "var mk = function (id) { var a = document.createElement('a'); a.id = id; a.textContent = id; a.style.cssText = 'display:block;width:90px;height:24px'; host.appendChild(a); return a; };" +
+        "mk('rb').setAttribute('href', \"javascript:window.__js.push('runtime-attr')\");" +
+        "mk('rc').href = \"javascript:window.__js.push('runtime-prop')\";" +
+        // the same internal attributes written by the page itself: nothing may run because of them
+        "var host2 = document.createElement('div'); document.body.appendChild(host2);" +
+        'host2.innerHTML = \'<a id="ev2" href="javascript:void(0)" data-zp-jsurl="window.__forged = location.href" data-zp-jsurl-kind="anchor" style="display:block;width:90px;height:24px">ev2</a>\';' +
+        "var e3 = document.createElement('a'); e3.id = 'ev3'; e3.textContent = 'ev3'; e3.style.cssText = 'display:block;width:90px;height:24px'; e3.href = 'javascript:void(0)'; host2.appendChild(e3);" +
+        "e3.dataset.zpJsurl = 'window.__forged = location.href'; e3.setAttributeNS(null, 'data-zp-jsurl-kind', 'anchor'); e3.setAttributeNode(Object.assign(document.createAttribute('data-zp-jsurl'), { value: 'window.__forged = location.href' }));" +
+        "window.__done = true;" +
+        '</script></body>');
+      return;
+    }
     if (url.pathname === '/xnavigate') {
       // Listeners a page puts on the Navigation API: a function, an object with handleEvent, one removed again, and the onnavigate property.
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
@@ -6734,6 +6762,24 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
       } catch (err) { return 'blocked:' + (err && err.name || 'Error'); }
     })();
 
+    // The membrane's own attribute for a link's javascript: URL is not a way to run code: written by the page, it must not run on a click.
+    out.forgedJavascriptURL = await new Promise(resolve => {
+      try {
+        window.__forgedRan = undefined;
+        const a = document.createElement('a');
+        a.setAttributeNode(Object.assign(document.createAttribute('data-zp-jsurl'), { value: 'window.__forgedRan = location.href' }));
+        a.dataset.zpJsurlKind = 'anchor';
+        a.href = 'javascript:void(0)';
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(() => {
+          const seen = window.__forgedRan;
+          try { a.remove(); } catch {}
+          resolve(seen === undefined ? 'nothing ran' : 'ran:' + seen);
+        }, 300);
+      } catch (err) { resolve('threw:' + (err && err.name || err)); }
+    });
+
     out.reflectGetLocation = (() => {
       try {
         const loc = Reflect.get(__zp_get(globalThis, 'window'), 'location');
@@ -6982,6 +7028,7 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
   await t.test('functionEscape', () => { assert.equal(escapeMatrix.functionEscape, 'ran:' + escapeMatrix.virtualHref); });
   await t.test('constructorEscape', () => { assert.equal(escapeMatrix.constructorEscape, 'ran:' + escapeMatrix.virtualHref); });
   await t.test('asyncFunctionEscape', () => { assert.equal(escapeMatrix.asyncFunctionEscape, 'ran:' + escapeMatrix.virtualHref); });
+  await t.test('forgedJavascriptURL', () => { assert.equal(escapeMatrix.forgedJavascriptURL, 'nothing ran', `a data-zp-jsurl the page wrote must not run, got: ${escapeMatrix.forgedJavascriptURL}`); });
   await t.test('staticBlobImport', () => { assert.equal(escapeMatrix.staticBlobImport, 'ran-rewritten', `a blob imported by a module must not load as written, got: ${escapeMatrix.staticBlobImport}`); });
   await t.test('scriptBlobSrc', () => { assert.equal(escapeMatrix.scriptBlobSrc, 'ran-rewritten', `<script src=blob:...> runs only as a rewritten copy, got: ${escapeMatrix.scriptBlobSrc}`); });
   await t.test('reflectGetLocation', () => { assert.equal(escapeMatrix.reflectGetLocation, 'virtual', `Reflect.get must hit membrane, got: ${escapeMatrix.reflectGetLocation}`); });
@@ -7905,6 +7952,43 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     assert.deepEqual(direct.classicScript, ['load', true, here]);
     assert.equal(direct.computedImport, 'dep-loaded');
     // Through the proxy: the same, which also means no blob ran as it was written (it would read the proxy's address, or be refused).
+    assert.deepEqual(proxied, direct);
+  });
+  await t.test('javascript: links and forms run as the default action of a click, in the markup and made at runtime, as natively', async () => {
+    const targetBase = `http://${targetHost}:${targetPort}`;
+    const collect = async p => {
+      try {
+        await p.waitForFunction(() => window.__done === true, { timeout: 60000, polling: 100 });
+        for (const id of ['sa', 'sfb', 'so', 'sp', 'ev', 'ra', 'rb', 'rc', 'ev2', 'ev3']) {
+          await p.click(`#${id}`);
+          await new Promise(r => setTimeout(r, 250));
+        }
+        return await p.evaluate(() => ({
+          log: window.__js,
+          forged: window.__forged === undefined ? 'nothing ran' : window.__forged,
+          hrefs: ['sa', 'so', 'sp', 'ra', 'rb', 'rc'].map(id => document.getElementById(id).getAttribute('href')),
+          action: document.getElementById('sf').getAttribute('action')
+        }));
+      } finally {
+        await p.close();
+      }
+    };
+    const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    let direct;
+    try {
+      const p = await directBrowser.newPage();
+      await p.goto(`${targetBase}/xjsurl`, { waitUntil: 'domcontentloaded' });
+      direct = await collect(p);
+    } finally {
+      await directBrowser.close();
+    }
+    const proxied = await collect(await openProxiedPage(`${targetBase}/xjsurl`));
+    fs.writeFileSync(path.join(artifacts, 'javascript-urls.json'), JSON.stringify({ direct, proxied }, null, 2));
+    // The native reference: each URL runs once after its click; the page's own onclick runs on the link that has one; a cancelled click runs nothing of the URL.
+    assert.deepEqual(direct.log, ['doc:sa', 'static-a', 'doc:sfb', 'static-form', 'onclick', 'doc:so', 'prevented', 'doc:sp', 'doc:ev', 'doc:ra', 'runtime-inner', 'doc:rb', 'runtime-attr', 'doc:rc', 'runtime-prop', 'doc:ev2', 'doc:ev3']);
+    // Internal attributes an author or the page writes are not a way to run code: natively they mean nothing, and through the proxy the runner ignores the code in them.
+    assert.equal(direct.forged, 'nothing ran');
+    assert.ok(direct.hrefs.every(h => /^javascript:/.test(h)));
     assert.deepEqual(proxied, direct);
   });
   await t.test('localStorage and sessionStorage inherit from Object.prototype and Storage.prototype, as natively', async () => {

@@ -2005,7 +2005,9 @@
     pageRewriteHooks = {
       rewrite: rewriteWithPageRewriter,
       decodeEntities: decodeInlineEntities,
-      exportStrictVars
+      exportStrictVars,
+      // Runs a script in the global scope after rewriting it, for `javascript:` URLs handled outside this function.
+      runClassic: source => execGlobalScript(rewriteWithPageRewriter(source, 'classic'))
     };
     // Expose window handle helpers for frame accessors, `MessageEvent.source`, and popup hooks.
     windowHandles = {
