@@ -12,7 +12,7 @@ The table below lists the verification commands and baseline metrics across all 
 | **Rust workspace** | `cargo test --workspace` | OXC rewriter matrix (3,360 combinations), HTML/CSS transforms, codecs, and shared policy (327 passing, 3 ignored) |
 | **Go server and host** | `go test ./...` | HTTP host handler, relay bridge, share URL parity, and TURN/WebTransport gateways (all packages pass) |
 | **WASM bundle integration** | `npm run test:wasm:ci` | Contract checks against compiled WASM artifacts in `dist/` (15 passing tests) |
-| **Browser E2E** | `npm run test:e2e` | E1 containment escape matrix and native-vs-proxy differential suite (258 passing tests with site-isolated frames on, the default; the suite also passes with `ZP_E2E_SITE_FRAMES=0`) |
+| **Browser E2E** | `npm run test:e2e` | E1 containment escape matrix and native-vs-proxy differential suite (259 passing tests with site-isolated frames on, the default; the suite also passes with `ZP_E2E_SITE_FRAMES=0`) |
 | **TLS ClientHello parity** | `npm run check:chrome-hello` | Verifies extension set and `trust_anchors` payload match installed Chrome (155.0.8059.85) |
 | **Real-site script corpus** | `node --experimental-vm-modules scripts/rewrite-corpus-check.cjs <tape>` | Rewrites 705 cached scripts from 13 live sites and validates V8 parsing (0 failures) |
 | **Real-site rendering** | `taskweaver` (`--id zp`) | Loads Wikipedia, GitHub, Guardian, BBC, MDN, CNN, NAVER, NYT, Stack Overflow, Reddit, Apple, npm, and IMDb |
@@ -131,6 +131,7 @@ These surfaces remain functional while differing in specific return values or ti
 | `<a download>` | Downloads through the proxied transport path | Prevents direct network egress while preserving filenames |
 | Cross-script `let`/`const` in strict classic scripts | Registers in `__zp_lex` but cannot be read as bare identifiers across separate strict scripts | Strict-mode evaluation forbids `with(__zp_lex_scope)` wrapping |
 | Top-level `var`/function in strict classic scripts | Exported to the realm's global as accessors over the script's own bindings (`__zp_export_vars`), so later inline scripts, external scripts and event-handler attributes see them; `window.X`, `'X' in window` and `Object.keys(window)` match native | A name two strict scripts both `var`-declare keeps the first binding; the descriptor is a configurable accessor; names already on the global are left alone |
+| Runtime-created `<link rel=preload>` | Loads through the proxy like a static preload (`href` rewritten, `data-zp-lit-href`), fires `load`/`error`; the hole matrix measures no direct request (`b8-preload-link`) | `prefetch`, `modulepreload`, `preconnect`, `dns-prefetch`, `prerender` and `manifest` are still stripped (`b8b-prefetch-link`) |
 | Uninitialized lexical reads (TDZ) | Throws `ReferenceError` with `ErrorEvent.filename` pointing to the prelude | The throw site resides inside the membrane scope helper |
 | Asynchronous `while(true)` without `break` | Terminates at the 10M iteration cap | Protects the renderer thread from unbounded loop starvation |
 | `history.go/back/forward`, `history.length`, window bar properties, XPath | Delegates to native browser implementation | Accepted shared session history metadata on the proxy origin |
