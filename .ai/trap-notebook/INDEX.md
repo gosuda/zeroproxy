@@ -6,6 +6,7 @@ Keep each summary to a single line under 160 characters and point every detail l
 
 | Date | Category | Summary | Detail |
 |---|---|---|---|
+| 2026-10-25 | membrane / real-site | Yahoo second pass: the native baseline was a bot; fixed Navigation listener recursion, Storage inheritance, `//` CSS URLs, late style text. | rewriter.md#yahoo-second-pass-2026-10-25 |
 | 2026-10-24 | membrane / link policy | Yahoo never hydrated: React waited on events of a stripped runtime stylesheet preload; `preload` links now route through the proxy. | rewriter.md#yahoo-preload-hint-2026-10-24 |
 | 2026-10-24 | rewriter / lexical | A strict inline script's var and function declarations are now exported to the global; Bing's `_d is not defined` is gone. | rewriter.md#strict-var-export-2026-10-24 |
 | 2026-10-24 | membrane / lexical | with-scope: 340 ns a lookup, tiny on 21 sites; real gaps: strict inline var/function (Bing), inline let/const unseen by external scripts. | rewriter.md#with-scope-exploration-2026-10-24 |
