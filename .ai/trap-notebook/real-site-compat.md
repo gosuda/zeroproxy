@@ -160,3 +160,10 @@ Follow-up correction: In the [non-HTTP scheme investigation](rewriter.md#non-htt
 - **Survey of the same day (native with the UA minus `Headless`, proxied, 15 to 20 s):** Amazon 2 044 against 2 043 (one cold first load rendered 11 elements, not reproduced), Reddit and GitHub identical, Stack Overflow more elements proxied (ads), NYTimes a bot wall in both (9 elements). YouTube was the one real gap.
 - **Causes and fixes:** a rewriter table that printed a marker into the main bundle, a window receiver, an accessor that could not be redefined: [youtube-home-2026-10-26](rewriter.md#youtube-home-2026-10-26).
 - **After:** 2 019 against 2 017, no page error.
+
+## 2026-10-26: second survey (native with the UA minus `Headless`, 15 s) {#second-survey-2026-10-26}
+
+- Naver 1 187 against 1 187; Pinterest 985 against 985; LinkedIn 772 against 760; Netflix 1 107 against 1 086; Twitch 1 612 against 1 688 (not investigated: 4 percent, no page error on either side).
+- Medium: fixed, [inline-module-origin-2026-10-26](rewriter.md#inline-module-origin-2026-10-26).
+- eBay: the native run was served an error page, the proxied one the real page; its one page error is an Akamai sensor script (not pursued).
+- IMDb: the native headless run was served a human-verification page, the proxied one the real page (4 987 elements).
