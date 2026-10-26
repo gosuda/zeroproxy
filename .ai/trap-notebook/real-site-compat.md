@@ -154,3 +154,9 @@ Follow-up correction: In the [non-HTTP scheme investigation](rewriter.md#non-htt
 - **Before:** 429 elements, one page error; the consent and terms dialogs missing.
 - **Cause and fix:** the page redefines `window.setInterval` with `Object.defineProperty` and every membrane hook was non-configurable: [hook-configurable-2026-10-26](rewriter.md#hook-configurable-2026-10-26).
 - **After:** 547 against 552, no page error; the elements still missing are per-load random ids.
+
+## 2026-10-26: YouTube home: 421 elements against 2 017 {#youtube-home-2026-10-26}
+
+- **Survey of the same day (native with the UA minus `Headless`, proxied, 15 to 20 s):** Amazon 2 044 against 2 043 (one cold first load rendered 11 elements, not reproduced), Reddit and GitHub identical, Stack Overflow more elements proxied (ads), NYTimes a bot wall in both (9 elements). YouTube was the one real gap.
+- **Causes and fixes:** a rewriter table that printed a marker into the main bundle, a window receiver, an accessor that could not be redefined: [youtube-home-2026-10-26](rewriter.md#youtube-home-2026-10-26).
+- **After:** 2 019 against 2 017, no page error.

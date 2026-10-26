@@ -6,6 +6,7 @@ Keep each summary to a single line under 160 characters and point every detail l
 
 | Date | Category | Summary | Detail |
 |---|---|---|---|
+| 2026-10-26 | rewriter / membrane | YouTube: a wrong rebase table printed a marker into an 11 MB bundle (parse error); window receivers for EventTarget methods; innerText redefinable. | rewriter.md#youtube-home-2026-10-26 |
 | 2026-10-26 | membrane / descriptors | Google: every membrane hook was non-configurable, so defineProperty(window, "setInterval") threw; data hooks now keep the native bit, accessors stay locked. | rewriter.md#hook-configurable-2026-10-26 |
 | 2026-10-25 | membrane / navigation | javascript: links and forms never ran (dead handlers, out-of-scope rewriter call); the first fix ran forged data-zp-jsurl code as written. | rewriter.md#javascript-urls-2026-10-25 |
 | 2026-10-25 | rewriter / containment | Bing: redeclared strict vars share one binding; a static import of a blob ran unrewritten (closed); blob module scripts now run rewritten. | rewriter.md#bing-strict-redeclare-and-blob-modules-2026-10-25 |
