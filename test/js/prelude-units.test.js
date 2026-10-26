@@ -201,6 +201,7 @@ test('callPageRewriter: a parse failure is a SyntaxError built in virtual-URL-ta
   const mk = rewriteScript => load(block, ['callPageRewriter'], {
     Native: { globalEval: (0, eval) },
     virtualURL: { href: 'https://target.example/page' },
+    proxyOrigin: 'http://proxy.example',
     root: { ZPBundle: { ready: true, rewriteScript } },
     normalizedError,
     parseErrors,

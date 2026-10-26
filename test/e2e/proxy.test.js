@@ -3192,6 +3192,22 @@ document.body.appendChild(doc);
         '</script></body>');
       return;
     }
+    if (url.pathname === '/xinlinemod-a.js' || url.pathname === '/xinlinemod-b.js') {
+      res.writeHead(200, { 'Content-Type': 'text/javascript', 'Cache-Control': 'no-store' });
+      res.end(url.pathname === '/xinlinemod-a.js' ? 'export const v = "static-ok";' : 'export const w = "dynamic-ok";');
+      return;
+    }
+    if (url.pathname === '/xinlinemod') {
+      // An inline module that imports modules of its own site by absolute address, as a Remix / React Router page does (Medium): the proxied page runs it as a blob, which has no base
+      // to resolve a root-relative proxy address against.
+      const site = `http://${req.headers.host}`;
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end('<!doctype html><title>inlinemod</title><body><script type="module">' +
+        `import { v } from '${site}/xinlinemod-a.js'; window.__inline = { v };` +
+        `import('${site}/xinlinemod-b.js').then(function (m) { window.__inline.w = m.w; window.__done = true; }, function (e) { window.__inline.error = String(e && e.message || e).slice(0, 120); window.__done = true; });` +
+        '</script></body>');
+      return;
+    }
     if (url.pathname === '/xnavigate') {
       // Listeners a page puts on the Navigation API: a function, an object with handleEvent, one removed again, and the onnavigate property.
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
@@ -8121,6 +8137,30 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     assert.ok(Object.values(direct.shapes).every(v => v === 'ok'), JSON.stringify(direct.shapes));
     assert.ok(!direct.heard.includes('removeCall') && !direct.heard.includes('removeCopy'));
     assert.ok(direct.heard.includes('callWindow') && direct.heard.includes('protoCopyOnProto') && direct.heard.includes('dispatchCall'));
+    assert.deepEqual(proxied, direct);
+  });
+  await t.test('an inline module that imports its own site by absolute address runs, as natively', async () => {
+    const targetBase = `http://${targetHost}:${targetPort}`;
+    const collect = async p => {
+      try {
+        await p.waitForFunction(() => window.__done === true, { timeout: 60000, polling: 100 });
+        return await p.evaluate(() => window.__inline);
+      } finally {
+        await p.close();
+      }
+    };
+    const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    let direct;
+    try {
+      const p = await directBrowser.newPage();
+      await p.goto(`${targetBase}/xinlinemod`, { waitUntil: 'domcontentloaded' });
+      direct = await collect(p);
+    } finally {
+      await directBrowser.close();
+    }
+    const proxied = await collect(await openProxiedPage(`${targetBase}/xinlinemod`));
+    fs.writeFileSync(path.join(artifacts, 'inline-module.json'), JSON.stringify({ direct, proxied }, null, 2));
+    assert.deepEqual(direct, { v: 'static-ok', w: 'dynamic-ok' });
     assert.deepEqual(proxied, direct);
   });
   await t.test('localStorage and sessionStorage inherit from Object.prototype and Storage.prototype, as natively', async () => {

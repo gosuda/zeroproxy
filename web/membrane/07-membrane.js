@@ -1957,7 +1957,9 @@
       }
       let parseFailure = null;
       try {
-        const rewritten = root.ZPBundle.rewriteScript(source, kind, href);
+        // The proxy origin makes the module URLs the rewriter writes absolute: a root-relative one cannot be resolved by a module that was itself loaded from a blob: URL
+        // (an inline module runs that way), which has no hierarchical base.
+        const rewritten = root.ZPBundle.rewriteScript(source, kind, href, proxyOrigin);
         const out = kind === 'module' && typeof rewritten === 'string' ? resolveModuleImportPlaceholders(rewritten) : rewritten;
         // Preserve empty-string rewrites (`eval('')` evaluates to `undefined`).
         if (typeof out === 'string' && (out.length > 0 || source === '')) {
