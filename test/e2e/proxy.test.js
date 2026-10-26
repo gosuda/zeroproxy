@@ -3129,6 +3129,43 @@ document.body.appendChild(doc);
         '</script></body>');
       return;
     }
+    if (url.pathname === '/xhookping') {
+      res.writeHead(200, { 'Content-Type': 'text/plain', 'Cache-Control': 'no-store' });
+      res.end('pong');
+      return;
+    }
+    if (url.pathname === '/xhookdefine') {
+      // Members the page wraps with Object.defineProperty (Google redefines setInterval; instrumentation libraries do the same to fetch, setTimeout, innerHTML): the descriptor flags
+      // read as they do natively, the redefinition succeeds, and the wrapper sits in the call path.
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end('<!doctype html><title>hookdefine</title><body><script>' +
+        "var out = window.__hooks = { calls: [], errors: [] };" +
+        "var flags = function (o, k) { var d = Object.getOwnPropertyDescriptor(o, k); return d ? [('value' in d) ? 'data' : 'accessor', d.configurable, d.enumerable, d.writable].join(',') : 'none'; };" +
+        "out.flags = {};" +
+        "[['window', window, ['setTimeout', 'setInterval', 'fetch', 'XMLHttpRequest', 'eval']], ['Element', Element.prototype, ['innerHTML', 'setAttribute', 'getAttribute', 'append']], ['Node', Node.prototype, ['appendChild', 'textContent']]," +
+        " ['EventTarget', EventTarget.prototype, ['addEventListener']], ['History', History.prototype, ['pushState']], ['Document', Document.prototype, ['createElement', 'cookie']]].forEach(function (g) {" +
+        "  out.flags[g[0]] = {}; g[2].forEach(function (k) { out.flags[g[0]][k] = flags(g[1], k); });" +
+        "});" +
+        "var wrap = function (o, k) { var d = Object.getOwnPropertyDescriptor(o, k); try { var orig = d.value; Object.defineProperty(o, k, { value: function () { out.calls.push(k); return orig.apply(this, arguments); }, configurable: true, enumerable: d.enumerable, writable: true }); } catch (e) { out.errors.push(k + ':' + e.name); } };" +
+        "['setTimeout', 'setInterval', 'fetch'].forEach(function (k) { wrap(window, k); });" +
+        "wrap(Element.prototype, 'setAttribute'); wrap(EventTarget.prototype, 'addEventListener');" +
+        "var div = document.createElement('div'); div.innerHTML = '<b id=\"x\">x</b>'; div.setAttribute('data-a', '1'); out.html = div.innerHTML; out.attr = div.getAttribute('data-a');" +
+        "document.addEventListener('zpping', function () { out.event = 'heard'; }); document.dispatchEvent(new Event('zpping'));" +
+        "var tid = setInterval(function () { clearInterval(tid); out.interval = 'ran'; }, 5);" +
+        "setTimeout(function () { out.timeout = 'ran'; }, 5);" +
+        "fetch('/xhookping').then(function (r) { return r.text(); }).then(function (t) { out.fetch = t; }).catch(function (e) { out.errors.push('fetch:' + e.name); });" +
+        // Deleting a hook must leave nothing underneath: natively each of these is deletable and the name is gone from the object (no ancestor has it), so a hook that left a
+        // native member showing through, or could not be deleted, reads differently.
+        "setTimeout(function () {" +
+        "  out.deleted = {};" +
+        "  [[Element.prototype, 'Element.setAttribute', 'setAttribute'], [Element.prototype, 'Element.querySelector', 'querySelector'], [Node.prototype, 'Node.appendChild', 'appendChild'], [Node.prototype, 'Node.insertBefore', 'insertBefore'], [Document.prototype, 'Document.write', 'write'], [Document.prototype, 'Document.createElement', 'createElement'], [EventTarget.prototype, 'EventTarget.addEventListener', 'addEventListener'], [History.prototype, 'History.pushState', 'pushState'], [History.prototype, 'History.replaceState', 'replaceState'], [CSSStyleSheet.prototype, 'CSSStyleSheet.insertRule', 'insertRule'], [Navigator.prototype, 'Navigator.sendBeacon', 'sendBeacon']].forEach(function (h) {" +
+        "    try { out.deleted[h[1]] = [delete h[0][h[2]], h[2] in h[0]]; } catch (e) { out.deleted[h[1]] = 'threw ' + e.name; }" +
+        "  });" +
+        "  window.__done = true;" +
+        "}, 600);" +
+        '</script></body>');
+      return;
+    }
     if (url.pathname === '/xnavigate') {
       // Listeners a page puts on the Navigation API: a function, an object with handleEvent, one removed again, and the onnavigate property.
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
@@ -7989,6 +8026,46 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     // Internal attributes an author or the page writes are not a way to run code: natively they mean nothing, and through the proxy the runner ignores the code in them.
     assert.equal(direct.forged, 'nothing ran');
     assert.ok(direct.hrefs.every(h => /^javascript:/.test(h)));
+    assert.deepEqual(proxied, direct);
+  });
+  await t.test('members the page wraps with Object.defineProperty read, redefine and call as natively', async () => {
+    const targetBase = `http://${targetHost}:${targetPort}`;
+    const collect = async p => {
+      try {
+        await p.waitForFunction(() => window.__done === true, { timeout: 60000, polling: 100 });
+        return await p.evaluate(() => window.__hooks);
+      } finally {
+        await p.close();
+      }
+    };
+    const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    let direct;
+    try {
+      const p = await directBrowser.newPage();
+      await p.goto(`${targetBase}/xhookdefine`, { waitUntil: 'domcontentloaded' });
+      direct = await collect(p);
+    } finally {
+      await directBrowser.close();
+    }
+    const proxied = await collect(await openProxiedPage(`${targetBase}/xhookdefine`));
+    fs.writeFileSync(path.join(artifacts, 'hook-define.json'), JSON.stringify({ direct, proxied }, null, 2));
+    // The native reference: every member is configurable, the wrappers install, and each sits in the path of the call the page makes next.
+    assert.deepEqual(direct.errors, []);
+    assert.equal(direct.flags.window.setInterval, 'data,true,true,true');
+    assert.equal(direct.flags.Element.innerHTML, 'accessor,true,true,');
+    assert.equal(direct.flags.Element.setAttribute, 'data,true,true,true');
+    assert.equal(direct.timeout, 'ran');
+    assert.equal(direct.interval, 'ran');
+    assert.equal(direct.fetch, 'pong');
+    assert.deepEqual(Object.values(direct.deleted).filter(v => v[0] !== true || v[1] !== false), [], 'natively each is deletable and gone from the object');
+    assert.equal(direct.html, '<b id="x">x</b>');
+    // Through the proxy: the same flags and the same calls (the page's wrappers are called, and call the membrane's hooks underneath).
+    // Accessor hooks stay non-configurable on purpose (the membrane reads some of them through the page-facing property); everything else reads as natively.
+    assert.equal(proxied.flags.Element.innerHTML, 'accessor,false,true,');
+    assert.equal(proxied.flags.Node.textContent, 'accessor,false,true,');
+    assert.equal(proxied.flags.Document.cookie, 'accessor,false,true,');
+    for (const side of [direct, proxied]) for (const key of ['innerHTML']) delete side.flags.Element[key];
+    for (const side of [direct, proxied]) { delete side.flags.Node.textContent; delete side.flags.Document.cookie; }
     assert.deepEqual(proxied, direct);
   });
   await t.test('localStorage and sessionStorage inherit from Object.prototype and Storage.prototype, as natively', async () => {

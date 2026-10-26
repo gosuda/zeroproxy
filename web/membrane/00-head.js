@@ -402,10 +402,16 @@
   // Declare opaqueDocument helpers before realm bootstrap.
   // `installBaseObserver` runs during early frame containment before later
   // declarations execute; check descriptor configurability directly.
+  // Hooks of ours that kept the native's configurable bit, by object (see `registerHook` in 02-masking.js).
+  const installedHooks = newWeakMap();
   function propertyLocked(obj, prop) {
     try {
       const d = Object.getOwnPropertyDescriptor(obj, prop);
-      return !!d && !d.configurable;
+      if (!d) return false;
+      if (!d.configurable) return true;
+      // A hook of ours that kept the native's configurable bit (see `registerHook`).
+      const keys = installedHooks.get(obj);
+      return !!keys && keys.has(prop);
     } catch { return true; }
   }
   const crossWindowProxyCache = newWeakMap();

@@ -39,9 +39,35 @@
     for (const key of keys) maskNativeFunction(obj && obj[key], key);
   }
   // Inherit enumerability from the replaced property so WebIDL members stay
-  // enumerable while membrane-internal helpers stay hidden. Set configurable:
-  // false so page scripts cannot delete membrane hooks to uncover native
-  // accessors, and so propertyLocked() can reliably detect installed hooks.
+  // enumerable while membrane-internal helpers stay hidden.
+  //
+  // A method hook that replaces a native method in place keeps the native's `configurable` bit, so a page that wraps or redefines the method with `Object.defineProperty`
+  // (Google redefines `setInterval`, and `Object.defineProperty(window, 'fetch', …)` is a common instrumentation) behaves as it does natively. The page could already replace
+  // such a method by assignment (it is writable), so redefining or deleting it gives it nothing more; deleting exposes nothing, the native function is gone from the slot. A
+  // hook stays non-configurable where something remains underneath it, because deleting it would uncover that: a new own property (the prototype's member shows through) and a
+  // name an ancestor in the prototype chain also has. Accessor hooks (`innerHTML`, `cookie`, `contentWindow`, `src`, …) stay non-configurable: the membrane reads some of
+  // them through the page-facing property, and a getter the page installs in their place would answer for them. `propertyLocked` knows hooks by this registry as well, since
+  // their descriptors no longer tell them apart.
+  function registerHook(obj, key) {
+    let keys = installedHooks.get(obj);
+    if (!keys) { keys = newSet(); installedHooks.set(obj, keys); }
+    keys.add(key);
+  }
+  function ancestorHasKey(obj, key) {
+    try {
+      for (let p = Reflect.getPrototypeOf(obj); p; p = Reflect.getPrototypeOf(p)) if (Reflect.getOwnPropertyDescriptor(p, key)) return true;
+    } catch { return true; }
+    return false;
+  }
+  function hookConfigurable(prev, obj, key) {
+    return !!prev && prev.configurable === true && 'value' in prev && !ancestorHasKey(obj, key);
+  }
+  // A data descriptor that asks for `configurable: false` over a native method that was configurable gets the native's bit back (and the hook is registered), on the same terms.
+  function nativeConfigurable(obj, key, desc) {
+    if (!desc || desc.configurable !== false || !('value' in desc) || !hookConfigurable(Object.getOwnPropertyDescriptor(obj, key), obj, key)) return desc;
+    registerHook(obj, key);
+    return Object.assign({}, desc, { configurable: true });
+  }
   function nativeEnumerability(obj, key) {
     try {
       const d = Object.getOwnPropertyDescriptor(obj, key);
@@ -50,11 +76,14 @@
   }
   function define(obj, key, value) {
     try {
-      const prev = typeof value === 'function' ? Object.getOwnPropertyDescriptor(obj, key) : null;
+      const own = Object.getOwnPropertyDescriptor(obj, key);
+      const prev = typeof value === 'function' ? own : null;
       // Capture the existing own or inherited function to copy its length and prototype.
       let inherited = null;
       if (typeof value === 'function' && !prev) { try { inherited = Reflect.get(obj, key); } catch {} }
-      Object.defineProperty(obj, key, { value, enumerable: nativeEnumerability(obj, key), configurable: false, writable: true });
+      const configurable = hookConfigurable(own, obj, key);
+      Object.defineProperty(obj, key, { value, enumerable: nativeEnumerability(obj, key), configurable, writable: true });
+      if (configurable) registerHook(obj, key);
       if (prev && typeof prev.value === 'function') lengthLike(value, prev.value);
       else if (typeof inherited === 'function' && inherited !== value) lengthLike(value, inherited);
       // `maskNativeFunction` names the wrapper after its key, which the minifier would otherwise have renamed.
@@ -75,7 +104,7 @@
   // Install a property descriptor while registering any function value, getter,
   // or setter in Function.prototype.toString masking.
   function defineMasked(obj, key, desc) {
-    try { Object.defineProperty(obj, key, desc); } catch { return false; }
+    try { Object.defineProperty(obj, key, nativeConfigurable(obj, key, desc)); } catch { return false; }
     if (typeof desc.value === 'function' && typeof key === 'string') nameLike(desc.value, key);
     if (typeof desc.get === 'function') maskAccessorFn(desc.get, 'get', key);
     if (typeof desc.set === 'function') maskAccessorFn(desc.set, 'set', key);
@@ -83,7 +112,11 @@
   }
   // Multi-property variant of defineMasked.
   function definePropertiesMasked(obj, descs) {
-    try { Object.defineProperties(obj, descs); } catch { return false; }
+    try {
+      const adjusted = {};
+      for (const key of Reflect.ownKeys(descs)) adjusted[key] = descs[key] ? nativeConfigurable(obj, key, descs[key]) : descs[key];
+      Object.defineProperties(obj, adjusted);
+    } catch { return false; }
     for (const key of Object.getOwnPropertyNames(descs)) {
       const d = descs[key];
       if (!d) continue;
