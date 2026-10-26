@@ -3192,6 +3192,71 @@ document.body.appendChild(doc);
         '</script></body>');
       return;
     }
+    if (url.pathname === '/xsel.js' || url.pathname === '/xsel.css') {
+      res.writeHead(200, { 'Content-Type': url.pathname.endsWith('.js') ? 'text/javascript' : 'text/css', 'Cache-Control': 'no-store' });
+      res.end(url.pathname.endsWith('.js') ? 'window.__selLoads = (window.__selLoads || 0) + 1;' : 'body { margin: 0 }');
+      return;
+    }
+    if (url.pathname === '/xurlselect') {
+      // Attribute selectors on URL-bearing attributes (`script[src="…"]`, `a[href^="http"]`): loaders look their own element up this way to avoid loading a script or a
+      // stylesheet twice. Elements come from the server HTML and from every runtime path, and the selectors use every operator, a flag, negation, grouping and nesting.
+      const site = `http://${req.headers.host}`;
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end('<!doctype html><title>urlselect</title><body>' +
+        '<link id="l1" rel="stylesheet" href="/xsel.css"><link id="l2" rel="icon" href="/xsel-icon.png"><script id="s1" src="/xsel.js"></script>' +
+        '<div id="box"><a id="a1" href="/xsel-page">a1</a><a id="a2" href="' + site + '/xsel-abs">a2</a><a id="a3" href="#top">a3</a><a id="a4" href="mailto:x@y.example">a4</a>' +
+        '<a id="a6" href="/xsel-old">a6</a><a id="a7" href="/xsel-gone">a7</a><img id="i1" src="/xsel.png"><img id="i2" srcset="/xsel-1x.png 1x, /xsel-2x.png 2x"><form id="f1" action="/xsel-post"></form><b id="b1" title="abc" data-x="1">b</b></div>' +
+        '<script>' +
+        'var out = window.__sel = {};' +
+        'var site = location.origin;' +
+        'var head = document.head, box = document.getElementById("box");' +
+        'var mk = function (tag, id) { var e = document.createElement(tag); e.id = id; return e; };' +
+        // runtime paths: setAttribute (absolute, relative), property, innerHTML, cloneNode, icon links
+        'var r1 = mk("script", "r1"); r1.setAttribute("src", site + "/xsel.js"); head.appendChild(r1);' +
+        'var r2 = mk("script", "r2"); r2.src = site + "/xsel.js?r2"; head.appendChild(r2);' +
+        'var r3 = mk("link", "r3"); r3.rel = "stylesheet"; r3.href = site + "/xsel.css?r3"; head.appendChild(r3);' +
+        'var r4 = mk("link", "r4"); r4.setAttribute("rel", "stylesheet"); r4.setAttribute("href", "/xsel.css?r4"); head.appendChild(r4);' +
+        'var r5 = mk("link", "r5"); r5.rel = "icon"; r5.href = site + "/xsel-icon5.png"; head.appendChild(r5);' +
+        'var r6 = mk("link", "r6"); r6.setAttribute("rel", "icon"); r6.setAttribute("href", "/xsel-icon6.png"); head.appendChild(r6);' +
+        'var host = mk("div", "host"); host.innerHTML = \'<a id="r7" href="/xsel-inner">r7</a>\'; box.appendChild(host);' +
+        'var r8 = mk("a", "r8"); r8.href = "/xsel-prop"; box.appendChild(r8);' +
+        'var r9 = mk("img", "r9"); r9.src = "/xsel-img-prop.png"; box.appendChild(r9);' +
+        'var r11 = r8.cloneNode(true); r11.id = "r11"; box.appendChild(r11);' +
+        'var r12 = mk("a", "r12"); r12.setAttributeNS(null, "href", "http://other.example/path?q=1"); box.appendChild(r12);' +
+        // an attribute rewritten and then set to something that is not: the old value must be gone
+        'document.getElementById("a6").setAttribute("href", "#changed");' +
+        'document.getElementById("a7").removeAttribute("href");' +
+        'var queries = [' +
+        '  "script[src=\\"/xsel.js\\"]", "script[src=\\"" + site + "/xsel.js\\"]", "[src$=\\"/xsel.js\\"]", "[src^=\\"/xsel\\"]", "[src*=\\"xsel\\"]", "script[src|=\\"/xsel.js\\"]", "[src~=\\"x\\"]",' +
+        '  "link[href=\\"/xsel.css\\"]", "link[href$=\\".css\\"]", "link[rel=\\"stylesheet\\"][href*=\\"xsel\\"]", "link[href=\\"" + site + "/xsel.css?r3\\"]", "link[rel~=icon][href$=\\"png\\"]", "link[href=\\"/xsel-icon6.png\\"]", "link[href=\\"/xsel-icon.png\\"]",' +
+        '  "a[href^=\\"http\\"]", "a[href^=\\"/\\"]", "a[href=\\"#top\\"]", "a[href^=\\"mailto:\\"]", "a:not([href^=\\"/\\"])", "a[href$=\\"-prop\\"]", "a[HREF = \'/xsel-page\' i]", "a[href=\\"/xsel-old\\"]", "a[href=\\"#changed\\"]", "a[href=\\"/xsel-gone\\"]",' +
+        '  "img[src^=\\"/xsel\\"]", "img[srcset*=\\"2x\\"]", "form[action=\\"/xsel-post\\"]", "form[action$=post]",' +
+        '  "[href=\\"/xsel-inner\\"], [src=\\"/xsel.js\\"]", "#box > a[href^=\\"/\\"]", ":is(a,link)[href$=\\"page\\"]", ":not(:is(a,link,img))[title^=a]", "#box :is(a):not([href^=\\"http\\"])", "a[href]",' +
+        '  "[title^=\\"a\\"]", "[data-x=\\"1\\"]", "[id=\\"r8\\"]", "a[href=\\"/x]y\\"]", "a[href=\\"a\\\\\\"b\\"]", "a[href=xsel-page]", "a[href^=\\"/xsel-p\\"][href$=\\"age\\"]"' +
+        '];' +
+        'var ids = function (list) { return Array.prototype.map.call(list, function (e) { return e.id || e.tagName; }); };' +
+        'var snapshot = function () {' +
+        '  var snap = { all: {}, first: {}, within: {}, matches: {}, closest: {}, errors: {} };' +
+        '  queries.forEach(function (q) {' +
+        '    snap.all[q] = ids(document.querySelectorAll(q));' +
+        '    var f = document.querySelector(q); snap.first[q] = f ? f.id || f.tagName : null;' +
+        '    snap.within[q] = ids(box.querySelectorAll(q));' +
+        '    snap.matches[q] = ["a2", "a3", "r8", "r7", "i1", "l1", "r12"].filter(function (id) { return document.getElementById(id).matches(q); });' +
+        '    var c = document.getElementById("r7").closest(q); snap.closest[q] = c ? c.id || c.tagName : null;' +
+        '  });' +
+        '  ["a[href=\\"x\\"", "a[href=]", "a[href=\\"x\\"]]", "a[href=\\"x\\" j]"].forEach(function (q) {' +
+        '    snap.errors[q] = [];' +
+        '    [function () { document.querySelector(q); }, function () { document.querySelectorAll(q); }, function () { box.matches(q); }, function () { box.closest(q); }].forEach(function (call) { try { call(); snap.errors[q].push("no error"); } catch (e) { snap.errors[q].push(e.name + ": " + e.message); } });' +
+        '  });' +
+        '  snap.values = {};' +
+        '  ["a1", "a2", "a3", "a6", "a7", "l2", "r1", "r2", "r3", "r4", "r5", "r6", "r7", "r8", "r9", "r11", "r12", "l1", "s1", "i1"].forEach(function (id) { var e = document.getElementById(id); snap.values[id] = [e.getAttribute("href"), e.getAttribute("src")]; });' +
+        '  return snap;' +
+        '};' +
+        'out.sync = snapshot();' +
+        'setTimeout(function () { out.later = snapshot(); out.selLoads = window.__selLoads || 0; window.__done = true; }, 800);' +
+        '</script></body>');
+      return;
+    }
     if (url.pathname === '/xinlinemod-a.js' || url.pathname === '/xinlinemod-b.js') {
       res.writeHead(200, { 'Content-Type': 'text/javascript', 'Cache-Control': 'no-store' });
       res.end(url.pathname === '/xinlinemod-a.js' ? 'export const v = "static-ok";' : 'export const w = "dynamic-ok";');
@@ -8162,6 +8227,43 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     fs.writeFileSync(path.join(artifacts, 'inline-module.json'), JSON.stringify({ direct, proxied }, null, 2));
     assert.deepEqual(direct, { v: 'static-ok', w: 'dynamic-ok' });
     assert.deepEqual(proxied, direct);
+  });
+  await t.test('attribute selectors on URL-bearing attributes find the elements they name, as natively', async () => {
+    const targetBase = `http://${targetHost}:${targetPort}`;
+    const collect = async p => {
+      try {
+        await p.waitForFunction(() => window.__done === true, { timeout: 60000, polling: 100 });
+        return await p.evaluate(() => window.__sel);
+      } finally {
+        await p.close();
+      }
+    };
+    const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    let direct;
+    try {
+      const p = await directBrowser.newPage();
+      await p.goto(`${targetBase}/xurlselect`, { waitUntil: 'domcontentloaded' });
+      direct = await collect(p);
+    } finally {
+      await directBrowser.close();
+    }
+    const proxied = await collect(await openProxiedPage(`${targetBase}/xurlselect`));
+    fs.writeFileSync(path.join(artifacts, 'url-attribute-selectors.json'), JSON.stringify({ direct, proxied }, null, 2));
+    // The native reference: a selector reads the value the page wrote, so each of these finds its element.
+    const site = targetBase;
+    assert.deepEqual(direct.later.all['script[src="/xsel.js"]'], ['s1']);
+    assert.deepEqual(direct.later.all[`script[src="${site}/xsel.js"]`], ['r1']);
+    assert.deepEqual(direct.later.all['link[href="/xsel.css"]'], ['l1']);
+    assert.deepEqual(direct.later.all['a[href="#changed"]'], ['a6']);
+    assert.deepEqual(direct.later.all['a[href="/xsel-old"]'], [], 'an attribute set to something else no longer matches its old value');
+    assert.ok(direct.later.all['a[href^="http"]'].includes('r12'));
+    // Through the proxy: the same elements for every selector, at the moment the element is made and after the membrane has settled it, the same errors for malformed selectors,
+    // the same values from getAttribute, and no script requested twice.
+    assert.deepEqual(proxied.sync.all, direct.sync.all);
+    assert.deepEqual(proxied.later.all, direct.later.all);
+    assert.deepEqual(proxied.later, direct.later);
+    assert.deepEqual(proxied.sync, direct.sync);
+    assert.equal(proxied.selLoads, direct.selLoads);
   });
   await t.test('localStorage and sessionStorage inherit from Object.prototype and Storage.prototype, as natively', async () => {
     const targetBase = `http://${targetHost}:${targetPort}`;

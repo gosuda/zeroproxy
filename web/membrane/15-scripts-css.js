@@ -491,7 +491,7 @@
         get() { return urlMeta.get(this) || Native.getAttribute.call(this, 'data-zp-target-url') || hrefDescriptor.get.call(this); },
         set(v) {
           if (isBlockedLink(this) || hasSuppressedBlockedLinkRel(this)) return blockLinkURL(this, v);
-          if (isIconLink(this)) return suppressIconLinkHref(this, v);
+          if (isIconLink(this)) { litSet(this, 'href', String(v)); return suppressIconLinkHref(this, v); }
           const value = String(v);
           if (shouldBlockURLAttribute(this, 'href', value)) return blockExecutableURL(this, 'href', value);
           const t = targetURLForElement(this, value);

@@ -313,9 +313,22 @@
   // via `data-zp-lit-*` attributes from htmltx.
   const urlLitMeta = newWeakMap();
   function litAttrName(key) { return 'data-zp-lit-' + String(key).toLowerCase(); }
-  function litSet(el, key, value) { let m = urlLitMeta.get(el); if (!m) { m = newMap(); urlLitMeta.set(el, m); } m.set(String(key).toLowerCase(), String(value)); }
+  // A selector reads the real attribute, which holds the proxy path, while the page means the literal `getAttribute` answers with (see `pageSelector`). So for the attributes a
+  // selector can name, the literal a runtime write keeps in `urlLitMeta` also lives in the DOM, in the `data-zp-lit-*` attribute the HTML transformer writes for a static element.
+  const LIT_SELECTOR_ATTRS = newSet(['href', 'src', 'action', 'formaction', 'poster', 'background', 'srcset', 'imagesrcset', 'data']);
+  function litSet(el, key, value) {
+    const k = String(key).toLowerCase();
+    let m = urlLitMeta.get(el); if (!m) { m = newMap(); urlLitMeta.set(el, m); }
+    m.set(k, String(value));
+    if (LIT_SELECTOR_ATTRS.has(k)) { try { Native.setAttribute.call(el, litAttrName(k), String(value)); } catch {} }
+  }
   function litGet(el, key) { const m = urlLitMeta.get(el); const k = String(key).toLowerCase(); if (m && m.has(k)) return m.get(k); return undefined; }
-  function litDel(el, key) { const m = urlLitMeta.get(el); if (m) m.delete(String(key).toLowerCase()); }
+  // Dropping the literal drops the stash in the DOM too: `getAttribute` falls back to it, and an attribute set to something that is not rewritten (`#top`) must not read back as the old value.
+  function litDel(el, key) {
+    const k = String(key).toLowerCase();
+    const m = urlLitMeta.get(el); if (m) m.delete(k);
+    if (LIT_SELECTOR_ATTRS.has(k)) { try { Native.removeAttribute.call(el, litAttrName(k)); } catch {} }
+  }
   // Store original srcset strings separately from urlMeta so elements with both
   // `src` and `srcset` (such as <img>) do not overwrite each other.
   const srcsetMeta = newWeakMap();

@@ -1550,3 +1550,61 @@ test('trusted types: a default policy that changes a compilation is refused, and
   assert.equal(same.env.ttCompliant('Script', 'eval', '1 + 2'), '1 + 2', 'a policy that returns the text unchanged lets the compilation through');
   assert.equal(same.env.ttCompliant('Script', 'Function', '(function anonymous(\n) {\n\n})'), '(function anonymous(\n) {\n\n})');
 });
+
+// Attribute selectors on URL-bearing attributes (14-dom.js `translateAttributeSelectors`, `pageSelectorArgs`): the translation is lexical, so it is pinned by its output.
+const SELECTOR_BLOCK = slice('  const litSelectorCache = newMap();', '  function filterSelectorOne(');
+const LIT_ATTRS = load(slice('  const LIT_SELECTOR_ATTRS = ', '  function litSet('), ['LIT_SELECTOR_ATTRS'], {}).LIT_SELECTOR_ATTRS;
+function selectorEnv() {
+  return load(SELECTOR_BLOCK, ['translateAttributeSelectors', 'pageSelectorArgs'], { LIT_SELECTOR_ATTRS: LIT_ATTRS, litAttrName: k => 'data-zp-lit-' + String(k).toLowerCase() });
+}
+const lit = (name, rest) => `:is([data-zp-lit-${name}${rest}],[${name}${rest}]:where(:not([data-zp-lit-${name}])))`;
+
+test('url attribute selectors: every operator, flag and quote style is carried over to the stash and the attribute', () => {
+  const { translateAttributeSelectors: t } = selectorEnv();
+  assert.equal(t('a[href="/x"]'), 'a' + lit('href', '="/x"'));
+  for (const op of ['=', '~=', '|=', '^=', '$=', '*=']) assert.equal(t(`script[src${op}"/a.js"]`), 'script' + lit('src', `${op}"/a.js"`), op);
+  assert.equal(t("a[ HREF  *= 'x'  i ]"), 'a' + lit('href', "*= 'x'  i "), 'case, spaces, single quotes and the flag are kept as written');
+  assert.equal(t('form[action$=post]'), 'form' + lit('action', '$=post'), 'an unquoted value');
+  for (const name of ['href', 'src', 'action', 'formaction', 'poster', 'background', 'srcset', 'imagesrcset', 'data']) assert.equal(t(`[${name}^="x"]`), lit(name, '^="x"'), name);
+});
+
+test('url attribute selectors: what needs no translation is returned as it came', () => {
+  const { translateAttributeSelectors: t } = selectorEnv();
+  for (const sel of ['div.a > p', 'a[href]', '[title^="a"]', '[data-src="x"]', '[data-href$="y"]', '[xlink|href="x"]', '[*|href="x"]', '[|href="x"]', 'a:not([target])', '[id="r8"]', String.raw`.a\[href\=x\]`, 'a:is(:hover, :focus)']) {
+    assert.strictEqual(t(sel), sel, sel);
+  }
+  assert.equal(t(':contains("[href=x]")'), ':contains("[href=x]")', 'a bracket inside a string outside any attribute selector is text');
+});
+
+test('url attribute selectors: nesting, grouping and the characters that end a naive scan', () => {
+  const { translateAttributeSelectors: t } = selectorEnv();
+  assert.equal(t('a:not([href^="http"])'), 'a:not(' + lit('href', '^="http"') + ')');
+  assert.equal(t(':is(a,link)[href$=".css"]'), ':is(a,link)' + lit('href', '$=".css"'));
+  assert.equal(t('link[rel="stylesheet"][href*="a"], script[src$=".js"]'), 'link[rel="stylesheet"]' + lit('href', '*="a"') + ', script' + lit('src', '$=".js"'));
+  assert.equal(t('a[href="/x]y"]'), 'a' + lit('href', '="/x]y"'), 'a ] inside the value does not end the attribute selector');
+  assert.equal(t('a[href="a\\"b"]'), 'a' + lit('href', '="a\\"b"'), 'an escaped quote does not end the value');
+  assert.equal(t(String.raw`a[href='it\'s']`), 'a' + lit('href', String.raw`='it\'s'`));
+  assert.equal(t('a[title="[href=x]"]'), 'a[title="[href=x]"]', 'a URL attribute named inside another attribute\'s value is text');
+  assert.equal(t('a[href="x"'), 'a[href="x"', 'an unterminated attribute selector is left for the engine to refuse');
+  assert.equal(t('a[href="x"][href'), 'a' + lit('href', '="x"') + '[href');
+});
+
+test('url attribute selectors: the translation is kept per selector, and one the engine refuses is not translated', () => {
+  const { pageSelectorArgs } = selectorEnv();
+  let checks = 0;
+  const ok = () => { checks++; };
+  const args = ['a[href="/x"]'];
+  const out = pageSelectorArgs(args, ok);
+  assert.deepEqual(out, ['a' + lit('href', '="/x"')]);
+  pageSelectorArgs(['a[href="/x"]'], ok);
+  assert.equal(checks, 1, 'the check runs once per selector');
+  const same = ['div > a'];
+  assert.strictEqual(pageSelectorArgs(same, ok), same, 'a selector without brackets passes through as the same arguments');
+  const noArgs = [];
+  assert.strictEqual(pageSelectorArgs(noArgs, ok), noArgs, 'no argument is left for the engine to refuse');
+  const obj = [{ toString() { return 'a[href="x"]'; } }];
+  assert.strictEqual(pageSelectorArgs(obj, ok), obj, 'a non-string selector is left as it is');
+  const bad = ['a[href=]'];
+  assert.strictEqual(pageSelectorArgs(bad, () => { throw new SyntaxError('invalid'); }), bad, 'a selector the engine refuses stays as written, so the page gets the engine\'s own error');
+  assert.strictEqual(pageSelectorArgs(['a[href=]'], ok)[0], 'a[href=]', 'and that decision is remembered');
+});

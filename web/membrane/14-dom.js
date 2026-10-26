@@ -18,8 +18,14 @@
     const docQSA = w.Document.prototype.querySelectorAll;
     const elemQS = w.Element.prototype.querySelector;
     const elemQSA = w.Element.prototype.querySelectorAll;
-    if (typeof docQS === 'function') define(w.Document.prototype, 'querySelector', function(sel) { return selectorTargetsZP(sel) ? null : filterSelectorOne(docQS.apply(this, arguments)); });
-    if (typeof elemQS === 'function') define(w.Element.prototype, 'querySelector', function(sel) { return selectorTargetsZP(sel) ? null : filterSelectorOne(elemQS.apply(this, arguments)); });
+    const matches = w.Element.prototype.matches;
+    const closest = w.Element.prototype.closest;
+    // Validates a selector with the native engine (see `pageSelectorArgs`): a native call on a scratch element, so an invalid selector throws here and the page's own call reports it.
+    let scratch = null;
+    const checkSelector = sel => { if (!scratch) scratch = Reflect.apply(Native.documentCreateElement, w.document, ['i']); matches.call(scratch, sel); };
+    const queryArgs = args => pageSelectorArgs(args, checkSelector);
+    if (typeof docQS === 'function') define(w.Document.prototype, 'querySelector', function(sel) { return selectorTargetsZP(sel) ? null : filterSelectorOne(docQS.apply(this, queryArgs(arguments))); });
+    if (typeof elemQS === 'function') define(w.Element.prototype, 'querySelector', function(sel) { return selectorTargetsZP(sel) ? null : filterSelectorOne(elemQS.apply(this, queryArgs(arguments))); });
     // Wrap a real NodeList from a detached element so empty querySelectorAll results still expose NodeList methods.
     let emptyList = null;
     const emptyNodeList = () => {
@@ -29,12 +35,10 @@
       }
       return emptyList;
     };
-    if (typeof docQSA === 'function') define(w.Document.prototype, 'querySelectorAll', function(sel) { return selectorTargetsZP(sel) ? filteredCollection(emptyNodeList(), () => false) : filteredCollection(docQSA.apply(this, arguments), node => !isZPAssetNode(node)); });
-    if (typeof elemQSA === 'function') define(w.Element.prototype, 'querySelectorAll', function(sel) { return selectorTargetsZP(sel) ? filteredCollection(emptyNodeList(), () => false) : filteredCollection(elemQSA.apply(this, arguments), node => !isZPAssetNode(node)); });
-    const matches = w.Element.prototype.matches;
-    const closest = w.Element.prototype.closest;
-    if (typeof matches === 'function') define(w.Element.prototype, 'matches', function(sel) { return selectorTargetsZP(sel) ? false : matches.apply(this, arguments); });
-    if (typeof closest === 'function') define(w.Element.prototype, 'closest', function(sel) { return selectorTargetsZP(sel) ? null : filterSelectorOne(closest.apply(this, arguments)); });
+    if (typeof docQSA === 'function') define(w.Document.prototype, 'querySelectorAll', function(sel) { return selectorTargetsZP(sel) ? filteredCollection(emptyNodeList(), () => false) : filteredCollection(docQSA.apply(this, queryArgs(arguments)), node => !isZPAssetNode(node)); });
+    if (typeof elemQSA === 'function') define(w.Element.prototype, 'querySelectorAll', function(sel) { return selectorTargetsZP(sel) ? filteredCollection(emptyNodeList(), () => false) : filteredCollection(elemQSA.apply(this, queryArgs(arguments)), node => !isZPAssetNode(node)); });
+    if (typeof matches === 'function') define(w.Element.prototype, 'matches', function(sel) { return selectorTargetsZP(sel) ? false : matches.apply(this, queryArgs(arguments)); });
+    if (typeof closest === 'function') define(w.Element.prototype, 'closest', function(sel) { return selectorTargetsZP(sel) ? null : filterSelectorOne(closest.apply(this, queryArgs(arguments))); });
     const nodeIterator = w.Document.prototype.createNodeIterator;
     if (typeof nodeIterator === 'function') define(w.Document.prototype, 'createNodeIterator', function() { return filteredTraversal(nodeIterator.apply(this, arguments)); });
     const treeWalker = w.Document.prototype.createTreeWalker;
@@ -47,6 +51,72 @@
   function selectorTargetsZP(selector) {
     const s = String(selector || '').toLowerCase();
     return s.includes('data-zp-') || s.includes('#__zp-boot') || s.includes('/zp/assets/') || s.includes('x-zeroproxy-icon');
+  }
+  // An attribute selector on a URL-bearing attribute (`script[src="…"]`, `a[href^="http"]`, `link[href$=".css"]`) is evaluated against the real attribute, which holds the proxy
+  // path, while the page means the value `getAttribute` answers with: loaders look their own element up this way to avoid loading a script or stylesheet twice, and without the
+  // translation they found none (BBC loaded eleven scripts twice, Medium's reCAPTCHA twice, Yahoo's React duplicated its stylesheets). The membrane keeps that value in
+  // `data-zp-lit-<name>` (`LIT_SELECTOR_ATTRS`). `[href^="http"]` becomes
+  //   :is([data-zp-lit-href^="http"],[href^="http"]:where(:not([data-zp-lit-href])))
+  // the stash answers for an attribute the membrane rewrote, the attribute itself for one it did not (`#top`, `mailto:`), and `:where` keeps the specificity of the selector the
+  // page wrote. The operator, value and flag are copied as written, so every operator works. Presence selectors (`[href]`) need no translation.
+  const litSelectorCache = newMap();
+  function attributeSelectorEnd(s, from) {
+    for (let j = from + 1; j < s.length; j++) {
+      const c = s.charCodeAt(j);
+      if (c === 92 /* \ */) j++;
+      else if (c === 34 || c === 39) { j = quotedEnd(s, j) - 1; }
+      else if (c === 93 /* ] */) return j + 1;
+    }
+    return -1;
+  }
+  function quotedEnd(s, from) {
+    const q = s.charCodeAt(from);
+    for (let j = from + 1; j < s.length; j++) {
+      const c = s.charCodeAt(j);
+      if (c === 92) j++;
+      else if (c === q) return j + 1;
+    }
+    return s.length;
+  }
+  // The translation of the text between `[` and `]`, or null when it needs none: a presence test, an attribute that is not URL-bearing, a namespaced name.
+  function translateAttributeSelector(body) {
+    const m = /^(\s*)([^\s=~|^$*\\\]]+)(\s*)([~|^$*]?=)/.exec(body);
+    if (!m) return null;
+    const name = m[2].toLowerCase();
+    if (!LIT_SELECTOR_ATTRS.has(name)) return null;
+    const rest = body.slice(m[1].length + m[2].length + m[3].length);
+    return ':is([' + litAttrName(name) + rest + '],[' + name + rest + ']:where(:not([' + litAttrName(name) + '])))';
+  }
+  function translateAttributeSelectors(s) {
+    let out = '';
+    let at = 0;
+    let changed = false;
+    for (let i = 0; i < s.length; i++) {
+      const c = s.charCodeAt(i);
+      if (c === 92) { i++; continue; }
+      if (c === 34 || c === 39) { i = quotedEnd(s, i) - 1; continue; }
+      if (c !== 91 /* [ */) continue;
+      const end = attributeSelectorEnd(s, i);
+      if (end < 0) break;
+      const translated = translateAttributeSelector(s.slice(i + 1, end - 1));
+      if (translated !== null) { out += s.slice(at, i) + translated; at = end; changed = true; }
+      i = end - 1;
+    }
+    return changed ? out + s.slice(at) : s;
+  }
+  // The arguments for a native query method: its selector, translated. `:is()` and `:where()` take a forgiving list, so a malformed selector would no longer throw; the original
+  // is checked once (`check`, a native call that throws as the page expects) before its translation is kept.
+  function pageSelectorArgs(args, check) {
+    const s = args[0];
+    if (typeof s !== 'string' || s.indexOf('[') < 0) return args;
+    let t = litSelectorCache.get(s);
+    if (t === undefined) {
+      t = translateAttributeSelectors(s);
+      if (t !== s) { try { check(s); } catch { t = s; } }
+      if (litSelectorCache.size > 500) litSelectorCache.clear();
+      litSelectorCache.set(s, t);
+    }
+    return t === s ? args : [t];
   }
   function filterSelectorOne(node) { return isZPAssetNode(node) ? null : node; }
   function filteredTraversal(raw) {
@@ -122,7 +192,7 @@
         return ret;
       }
       if (ln === 'link' && localKey === 'href' && (isBlockedLink(this) || hasSuppressedBlockedLinkRel(this))) return blockLinkURL(this, v);
-      if (ln === 'link' && localKey === 'href' && isIconLink(this)) return suppressIconLinkHref(this, v);
+      if (ln === 'link' && localKey === 'href' && isIconLink(this)) { litSet(this, 'href', v == null ? '' : v); return suppressIconLinkHref(this, v); }
       if (key.startsWith('on') && key.length > 2) return Native.setAttribute.call(this, k, rewriteEventAttribute(String(v)));
       if (ln === 'base' && localKey === 'href') {
         updateVirtualBase(v);
@@ -186,7 +256,7 @@
       if (key === 'integrity' && isIntegrityBearing(this)) return setBackedIntegrity(this, v);
       if (localKey === 'sandbox' && isFrameElement(this)) return setFrameSandboxAttribute(this, v);
       if (ln === 'script' && (localKey === 'src' || localKey === 'href')) return setScriptSource(this, v);
-      if (ln === 'link' && localKey === 'href' && isIconLink(this)) return suppressIconLinkHref(this, v);
+      if (ln === 'link' && localKey === 'href' && isIconLink(this)) { litSet(this, 'href', v == null ? '' : v); return suppressIconLinkHref(this, v); }
       if (isURLBearing(this, key, localKey, ln)) {
         if (shouldBlockURLAttribute(this, localKey, v, localKey, ln)) return blockExecutableURL(this, localKey, v);
         const t = targetURLForElement(this, v);
