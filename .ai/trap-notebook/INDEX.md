@@ -6,6 +6,7 @@ Keep each summary to a single line under 160 characters and point every detail l
 
 | Date | Category | Summary | Detail |
 |---|---|---|---|
+| 2026-10-26 | membrane / selectors | Selectors on URL attributes read the proxy path, so loaders found nothing and loaded twice (BBC, Medium, Yahoo); translated to the literal stash. | rewriter.md#url-attribute-selectors-2026-10-26 |
 | 2026-10-26 | membrane / modules | Medium: page-side rewrites wrote root-relative module URLs, which a blob-loaded inline module cannot resolve; the proxy origin is passed now. | rewriter.md#inline-module-origin-2026-10-26 |
 | 2026-10-26 | rewriter / membrane | YouTube: a wrong rebase table printed a marker into an 11 MB bundle (parse error); window receivers for EventTarget methods; innerText redefinable. | rewriter.md#youtube-home-2026-10-26 |
 | 2026-10-26 | membrane / descriptors | Google: every membrane hook was non-configurable, so defineProperty(window, "setInterval") threw; data hooks now keep the native bit, accessors stay locked. | rewriter.md#hook-configurable-2026-10-26 |

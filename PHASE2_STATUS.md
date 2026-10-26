@@ -8,11 +8,11 @@ The table below lists the verification commands and baseline metrics across all 
 
 | Suite | Command | Scope and Baseline |
 | :--- | :--- | :--- |
-| **JavaScript unit and policy** | `npm run test:js` | Policy rules, core helpers, Service Worker routing, and prelude contracts (185 tests) |
+| **JavaScript unit and policy** | `npm run test:js` | Policy rules, core helpers, Service Worker routing, and prelude contracts (189 tests) |
 | **Rust workspace** | `cargo test --workspace` | OXC rewriter matrix (3,360 combinations), HTML/CSS transforms, codecs, and shared policy (329 passing, 3 ignored) |
 | **Go server and host** | `go test ./...` | HTTP host handler, relay bridge, share URL parity, and TURN/WebTransport gateways (all packages pass) |
 | **WASM bundle integration** | `npm run test:wasm:ci` | Contract checks against compiled WASM artifacts in `dist/` (18 passing tests) |
-| **Browser E2E** | `npm run test:e2e` | E1 containment escape matrix and native-vs-proxy differential suite (269 passing tests with site-isolated frames on, the default; the suite also passes with `ZP_E2E_SITE_FRAMES=0`) |
+| **Browser E2E** | `npm run test:e2e` | E1 containment escape matrix and native-vs-proxy differential suite (270 passing tests with site-isolated frames on, the default; the suite also passes with `ZP_E2E_SITE_FRAMES=0`) |
 | **TLS ClientHello parity** | `npm run check:chrome-hello` | Verifies extension set and `trust_anchors` payload match installed Chrome (155.0.8059.85) |
 | **Real-site script corpus** | `node --experimental-vm-modules scripts/rewrite-corpus-check.cjs <tape>` | Rewrites 705 cached scripts from 13 live sites and validates V8 parsing (0 failures) |
 | **Real-site rendering** | `taskweaver` (`--id zp`) | Loads Wikipedia, GitHub, Guardian, BBC, MDN, CNN, NAVER, NYT, Stack Overflow, Reddit, Apple, npm, and IMDb |
@@ -138,6 +138,7 @@ These surfaces remain functional while differing in specific return values or ti
 | Descriptor flags of the membrane's method hooks | A method hook keeps the native's `configurable` bit (wrappable and deletable as natively) unless an ancestor has the name or the hook is a new own property; deleting leaves nothing underneath (e2e: `members the page wraps with Object.defineProperty read, redefine and call as natively`) | Accessor hooks stay non-configurable (ERRATA); `installedHooks` is the registry `propertyLocked` consults |
 | Native `EventTarget` methods called on `window` | `EventTarget.prototype.addEventListener`, `removeEventListener` and `dispatchEvent` map the page-facing window to the real one (`pageRewriteHooks.unwrapScope`), so `.call(window, …)`, `.apply`, and kept copies work as natively; e2e `EventTarget methods the page keeps and calls on window register, fire and remove as natively` | A child frame's own facade is not mapped (ERRATA) |
 | Module specifiers the page-side rewriter writes | Absolute against the proxy origin (the fourth argument of `ZPBundle.rewriteScript`), so an inline module run as a `blob:` import and the blob copies resolve them; e2e `an inline module that imports its own site by absolute address runs, as natively` | The service worker's rewrites already passed the origin |
+| Attribute selectors on URL-bearing attributes | The query methods translate `[href OP v]` so it matches the value `getAttribute` answers with (the `data-zp-lit-*` stash `litSet` keeps in the DOM); a malformed selector is validated against the engine first and stays untranslated; e2e `attribute selectors on URL-bearing attributes find the elements they name, as natively` (about 600 values equal to native), unit tests `url attribute selectors` | Stylesheet selectors, fragment queries and suppressed `modulepreload` links (ERRATA) |
 | Compound writes to dangerous members inside another rewritten range | Rebased with the right field table (`shift_marker_positions`: `MEMBER_A` positions 2, 3, 6, 7); a leaked marker made the whole script unparseable; Rust test `nested_compound_member_assignment_leaves_no_marker` | None known |
 | Uninitialized lexical reads (TDZ) | Throws `ReferenceError` with `ErrorEvent.filename` pointing to the prelude | The throw site resides inside the membrane scope helper |
 | Asynchronous `while(true)` without `break` | Terminates at the 10M iteration cap | Protects the renderer thread from unbounded loop starvation |

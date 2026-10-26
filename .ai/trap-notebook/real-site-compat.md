@@ -167,3 +167,9 @@ Follow-up correction: In the [non-HTTP scheme investigation](rewriter.md#non-htt
 - Medium: fixed, [inline-module-origin-2026-10-26](rewriter.md#inline-module-origin-2026-10-26).
 - eBay: the native run was served an error page, the proxied one the real page; its one page error is an Akamai sensor script (not pursued).
 - IMDb: the native headless run was served a human-verification page, the proxied one the real page (4 987 elements).
+
+## 2026-10-26: the recorded sites measured again with the fair baseline (native with the UA minus `Headless`, 20 s) {#recorded-sites-recheck-2026-10-26}
+
+- **Same or within a native run's own spread:** Wikipedia 2 446 against 2 445 elements, BBC 2 723 against 2 734, Hacker News, MDN, gosuda.org, CNN (3 996 against 3 997, 30 frames each), GitHub, Stack Overflow, Google, YouTube (2 016 against 2 019), Bing (475 against 470, the same single `_w` page error). NAVER 938 to 1 111 natively across three runs against 935 to 1 186 proxied (ad counts differ per load). Yahoo's text length differs between native runs too (4 022 to 5 528), its Taboola widget counts are equal.
+- **Found:** a loader that checks for its own element by attribute selector found nothing through the proxy and added a second one (BBC 11 scripts twice, Medium's reCAPTCHA twice, Yahoo 24 links twice): [url-attribute-selectors-2026-10-26](rewriter.md#url-attribute-selectors-2026-10-26). Fixed.
+- **Medium's 84 extra elements (374 against 290) were that:** 76 `<link rel=modulepreload as=script>` Vite's preload helper added because its `link[href="…"]` check found nothing, plus a second reCAPTCHA badge. After the fix 97 links against 99.
