@@ -147,3 +147,10 @@ Follow-up correction: In the [non-HTTP scheme investigation](rewriter.md#non-htt
 - **Causes and fixes:** a strict inline script redeclaring a var an earlier one made (`var _w = _w || {}`) read its own `undefined`; an external script (real, not `eval`) whose own var the helper then wrapped in an accessor that called itself; `<script type=module src=blob:>` refused, so es-module-shims took the browser for one without modules; and a containment gap the blob work exposed (a static `import` of a blob ran unrewritten). All in [bing-strict-redeclare-and-blob-modules-2026-10-25](rewriter.md#bing-strict-redeclare-and-blob-modules-2026-10-25).
 - **After:** 472 elements, 134 container kinds each side, the same single page error; the container kinds still missing are a per-load random id and an "enlarge image" button label. Requests to `msn.com` hosts: 71 against 86 in one 20 s window.
 - **Left:** `/identity/idtokenv2` answers an empty body and the service worker returns 502 `MALFORMED_HTML`; the page matches native with it. Not investigated.
+
+## 2026-10-26: Google home: 429 elements against 530, `_DumpException` {#google-home-2026-10-26}
+
+- **Baseline:** headless Chrome, UA with and without `Headless`: 530 to 552 elements, no page error natively.
+- **Before:** 429 elements, one page error; the consent and terms dialogs missing.
+- **Cause and fix:** the page redefines `window.setInterval` with `Object.defineProperty` and every membrane hook was non-configurable: [hook-configurable-2026-10-26](rewriter.md#hook-configurable-2026-10-26).
+- **After:** 547 against 552, no page error; the elements still missing are per-load random ids.
