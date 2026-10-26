@@ -454,3 +454,19 @@ test('a strict script takes over a configurable data property of the global and 
   assert.equal(vm.runInContext('fixed', ctx), 1);
   assert.equal(vm.runInContext('seeded = 9; readSeeded()', ctx), 9);
 });
+
+// A compound write to a dangerous member inside another write (`a.top = b.top += n`, YouTube's bundle) is rebased with the enclosing range; it once came out with a
+// marker in it and the whole script failed to parse.
+test('a compound write to a dangerous member nested in another write keeps its value and its order', () => {
+  const { ctx } = executionContext();
+  const code = rewrite(`var a = {}, b = { top: 1 }, order = [];
+    a.top = b.top += 5;
+    var x = { href: 'p' }, y = { href: 'q' };
+    x.href = y.href += 'r';
+    var m = { loc: null };
+    m.location = (order.push('rhs'), { location: 'z' }).location += 'w';
+    window.result = [a.top, b.top, x.href + '|' + y.href, order.join(), typeof m.location];`);
+  assert.ok(!/[\u0001-\u0008]/.test(code), 'no marker may reach the output');
+  vm.runInContext(code, ctx);
+  assert.deepEqual(Array.from(ctx.window.result), [6, 6, 'qr|qr', 'rhs', 'string']);
+});

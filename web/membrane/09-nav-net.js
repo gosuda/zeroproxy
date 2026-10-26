@@ -562,14 +562,21 @@
         // Treat an undefined or null receiver on a bare `addEventListener("message", fn)`
         // call as this realm's window.
         const forThisWindow = self => self === w || self === undefined || self === null;
+        // A page that keeps these methods and calls them on `window` (Polymer's shady DOM: `window.__shady_native_addEventListener(…)`, libraries that
+        // `EventTarget.prototype.addEventListener.call(window, …)`) passes the page-facing window, which the native method rejects: map it to the real one.
+        const receiverOf = self => (pageRewriteHooks && pageRewriteHooks.unwrapScope ? pageRewriteHooks.unwrapScope(self) : self);
         define(ETProto, 'addEventListener', function(type, listener, options) {
-          if (forThisWindow(this) && String(type) === 'message') return rawAdd.call(w, String(type), wrap(listener), options);
-          return rawAdd.apply(this, arguments);
+          const self = receiverOf(this);
+          if (forThisWindow(self) && String(type) === 'message') return rawAdd.call(w, String(type), wrap(listener), options);
+          return rawAdd.apply(self, arguments);
         });
         define(ETProto, 'removeEventListener', function(type, listener, options) {
-          if (forThisWindow(this) && String(type) === 'message') return rawRemove.call(w, String(type), messageListenerWrappers.get(listener) || listener, options);
-          return rawRemove.apply(this, arguments);
+          const self = receiverOf(this);
+          if (forThisWindow(self) && String(type) === 'message') return rawRemove.call(w, String(type), messageListenerWrappers.get(listener) || listener, options);
+          return rawRemove.apply(self, arguments);
         });
+        const rawDispatch = ETProto.dispatchEvent;
+        if (typeof rawDispatch === 'function') define(ETProto, 'dispatchEvent', function(event) { return rawDispatch.apply(receiverOf(this), arguments); });
       }
     }
     // Keep the native `postMessage` on `w` rather than installing a parent-realm

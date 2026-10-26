@@ -46,8 +46,14 @@
   // such a method by assignment (it is writable), so redefining or deleting it gives it nothing more; deleting exposes nothing, the native function is gone from the slot. A
   // hook stays non-configurable where something remains underneath it, because deleting it would uncover that: a new own property (the prototype's member shows through) and a
   // name an ancestor in the prototype chain also has. Accessor hooks (`innerHTML`, `cookie`, `contentWindow`, `src`, …) stay non-configurable: the membrane reads some of
-  // them through the page-facing property, and a getter the page installs in their place would answer for them. `propertyLocked` knows hooks by this registry as well, since
-  // their descriptors no longer tell them apart.
+  // them through the page-facing property, and a getter the page installs in their place would answer for them. The exceptions are listed in `REDEFINABLE_ACCESSORS`: accessors
+  // the membrane never reads or writes through the page-facing property (it keeps the native descriptor from boot), so a page getter in their place answers for no one but the
+  // page. Add one only after checking the membrane for `.name` reads, `[name]` reads and `Reflect.get`. `propertyLocked` knows hooks by this registry as well, since their
+  // descriptors no longer tell them apart.
+  //
+  // `innerText` on `HTMLElement.prototype`: YouTube wraps it (`Object.defineProperty(HTMLElement.prototype, "innerText", { configurable: true, get: g.get, set: wrapper })`),
+  // and the `TypeError` stopped its bundle.
+  const REDEFINABLE_ACCESSORS = newSet(['innerText']);
   function registerHook(obj, key) {
     let keys = installedHooks.get(obj);
     if (!keys) { keys = newSet(); installedHooks.set(obj, keys); }
@@ -60,11 +66,12 @@
     return false;
   }
   function hookConfigurable(prev, obj, key) {
-    return !!prev && prev.configurable === true && 'value' in prev && !ancestorHasKey(obj, key);
+    return !!prev && prev.configurable === true && ('value' in prev || REDEFINABLE_ACCESSORS.has(key)) && !ancestorHasKey(obj, key);
   }
-  // A data descriptor that asks for `configurable: false` over a native method that was configurable gets the native's bit back (and the hook is registered), on the same terms.
+  // A descriptor that asks for `configurable: false` over a native method (or one of the listed accessors) that was configurable gets the native's bit back (and the hook is
+  // registered), on the same terms.
   function nativeConfigurable(obj, key, desc) {
-    if (!desc || desc.configurable !== false || !('value' in desc) || !hookConfigurable(Object.getOwnPropertyDescriptor(obj, key), obj, key)) return desc;
+    if (!desc || desc.configurable !== false || !('value' in desc || REDEFINABLE_ACCESSORS.has(key)) || !hookConfigurable(Object.getOwnPropertyDescriptor(obj, key), obj, key)) return desc;
     registerHook(obj, key);
     return Object.assign({}, desc, { configurable: true });
   }

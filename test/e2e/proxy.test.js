@@ -3142,13 +3142,16 @@ document.body.appendChild(doc);
         "var out = window.__hooks = { calls: [], errors: [] };" +
         "var flags = function (o, k) { var d = Object.getOwnPropertyDescriptor(o, k); return d ? [('value' in d) ? 'data' : 'accessor', d.configurable, d.enumerable, d.writable].join(',') : 'none'; };" +
         "out.flags = {};" +
-        "[['window', window, ['setTimeout', 'setInterval', 'fetch', 'XMLHttpRequest', 'eval']], ['Element', Element.prototype, ['innerHTML', 'setAttribute', 'getAttribute', 'append']], ['Node', Node.prototype, ['appendChild', 'textContent']]," +
+        "[['window', window, ['setTimeout', 'setInterval', 'fetch', 'XMLHttpRequest', 'eval']], ['Element', Element.prototype, ['innerHTML', 'setAttribute', 'getAttribute', 'append']], ['Node', Node.prototype, ['appendChild', 'textContent']], ['HTMLElement', HTMLElement.prototype, ['innerText']]," +
         " ['EventTarget', EventTarget.prototype, ['addEventListener']], ['History', History.prototype, ['pushState']], ['Document', Document.prototype, ['createElement', 'cookie']]].forEach(function (g) {" +
         "  out.flags[g[0]] = {}; g[2].forEach(function (k) { out.flags[g[0]][k] = flags(g[1], k); });" +
         "});" +
         "var wrap = function (o, k) { var d = Object.getOwnPropertyDescriptor(o, k); try { var orig = d.value; Object.defineProperty(o, k, { value: function () { out.calls.push(k); return orig.apply(this, arguments); }, configurable: true, enumerable: d.enumerable, writable: true }); } catch (e) { out.errors.push(k + ':' + e.name); } };" +
         "['setTimeout', 'setInterval', 'fetch'].forEach(function (k) { wrap(window, k); });" +
         "wrap(Element.prototype, 'setAttribute'); wrap(EventTarget.prototype, 'addEventListener');" +
+        // YouTube wraps innerText this way: the descriptor's own getter and setter, configurable
+        "try { var g = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'innerText'); Object.defineProperty(HTMLElement.prototype, 'innerText', { enumerable: g.enumerable, configurable: true, get: g.get, set: function (v) { out.calls.push('innerText'); g.set.call(this, v); } }); } catch (e) { out.errors.push('innerText:' + e.name); }" +
+        "var d2 = document.createElement('div'); d2.innerText = 'hello'; out.innerText = d2.innerText;" +
         "var div = document.createElement('div'); div.innerHTML = '<b id=\"x\">x</b>'; div.setAttribute('data-a', '1'); out.html = div.innerHTML; out.attr = div.getAttribute('data-a');" +
         "document.addEventListener('zpping', function () { out.event = 'heard'; }); document.dispatchEvent(new Event('zpping'));" +
         "var tid = setInterval(function () { clearInterval(tid); out.interval = 'ran'; }, 5);" +
@@ -3163,6 +3166,29 @@ document.body.appendChild(doc);
         "  });" +
         "  window.__done = true;" +
         "}, 600);" +
+        '</script></body>');
+      return;
+    }
+    if (url.pathname === '/xael') {
+      // EventTarget methods kept by the page and called on `window` (Polymer's shady DOM does `window.__shady_native_addEventListener(…)`; libraries use
+      // `EventTarget.prototype.addEventListener.call(window, …)`): each shape registers a listener that must then hear the event.
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end('<!doctype html><title>ael</title><body><script>' +
+        "var out = window.__ael = { shapes: {}, heard: [] };" +
+        "var shape = function (name, register, fire) { try { var type = 'zp-' + name; register(type, function () { out.heard.push(name); }); (fire || function (t) { window.dispatchEvent(new Event(t)); })(type); out.shapes[name] = 'ok'; } catch (e) { out.shapes[name] = e.name + ': ' + e.message; } };" +
+        "var ET = EventTarget.prototype;" +
+        "shape('protoCopyOnProto', function (t, f) { ET.__nat1 = ET.addEventListener; window.__nat1(t, f); });" +
+        "shape('protoCopyOnWindow', function (t, f) { window.__nat2 = ET.addEventListener; window.__nat2(t, f); });" +
+        "shape('windowCopy', function (t, f) { window.__nat3 = window.addEventListener; window.__nat3(t, f); });" +
+        "shape('callWindow', function (t, f) { ET.addEventListener.call(window, t, f); });" +
+        "shape('applyWindow', function (t, f) { ET.addEventListener.apply(window, [t, f, false]); });" +
+        "shape('globalThis', function (t, f) { globalThis.addEventListener(t, f); });" +
+        "shape('dispatchCall', function (t, f) { window.addEventListener(t, f); }, function (t) { ET.dispatchEvent.call(window, new Event(t)); });" +
+        "shape('dispatchCopy', function (t, f) { window.addEventListener(t, f); }, function (t) { ET.__nat4 = ET.dispatchEvent; window.__nat4(new Event(t)); });" +
+        "shape('removeCall', function (t, f) { window.addEventListener(t, f); ET.removeEventListener.call(window, t, f); });" +
+        "shape('removeCopy', function (t, f) { window.addEventListener(t, f); ET.__nat5 = ET.removeEventListener; window.__nat5(t, f); });" +
+        "shape('onDocument', function (t, f) { ET.addEventListener.call(document, t, f); }, function (t) { document.dispatchEvent(new Event(t)); });" +
+        "window.__done = true;" +
         '</script></body>');
       return;
     }
@@ -8059,6 +8085,8 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     assert.equal(direct.fetch, 'pong');
     assert.deepEqual(Object.values(direct.deleted).filter(v => v[0] !== true || v[1] !== false), [], 'natively each is deletable and gone from the object');
     assert.equal(direct.html, '<b id="x">x</b>');
+    assert.equal(direct.innerText, 'hello');
+    assert.ok(direct.calls.includes('innerText'));
     // Through the proxy: the same flags and the same calls (the page's wrappers are called, and call the membrane's hooks underneath).
     // Accessor hooks stay non-configurable on purpose (the membrane reads some of them through the page-facing property); everything else reads as natively.
     assert.equal(proxied.flags.Element.innerHTML, 'accessor,false,true,');
@@ -8066,6 +8094,33 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     assert.equal(proxied.flags.Document.cookie, 'accessor,false,true,');
     for (const side of [direct, proxied]) for (const key of ['innerHTML']) delete side.flags.Element[key];
     for (const side of [direct, proxied]) { delete side.flags.Node.textContent; delete side.flags.Document.cookie; }
+    assert.deepEqual(proxied, direct);
+  });
+  await t.test('EventTarget methods the page keeps and calls on window register, fire and remove as natively', async () => {
+    const targetBase = `http://${targetHost}:${targetPort}`;
+    const collect = async p => {
+      try {
+        await p.waitForFunction(() => window.__done === true, { timeout: 60000, polling: 100 });
+        return await p.evaluate(() => window.__ael);
+      } finally {
+        await p.close();
+      }
+    };
+    const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    let direct;
+    try {
+      const p = await directBrowser.newPage();
+      await p.goto(`${targetBase}/xael`, { waitUntil: 'domcontentloaded' });
+      direct = await collect(p);
+    } finally {
+      await directBrowser.close();
+    }
+    const proxied = await collect(await openProxiedPage(`${targetBase}/xael`));
+    fs.writeFileSync(path.join(artifacts, 'event-target-receiver.json'), JSON.stringify({ direct, proxied }, null, 2));
+    // The native reference: every shape works; a listener that was removed again does not hear its event.
+    assert.ok(Object.values(direct.shapes).every(v => v === 'ok'), JSON.stringify(direct.shapes));
+    assert.ok(!direct.heard.includes('removeCall') && !direct.heard.includes('removeCopy'));
+    assert.ok(direct.heard.includes('callWindow') && direct.heard.includes('protoCopyOnProto') && direct.heard.includes('dispatchCall'));
     assert.deepEqual(proxied, direct);
   });
   await t.test('localStorage and sessionStorage inherit from Object.prototype and Storage.prototype, as natively', async () => {

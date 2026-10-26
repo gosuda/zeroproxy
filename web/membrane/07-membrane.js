@@ -2006,6 +2006,8 @@
       rewrite: rewriteWithPageRewriter,
       decodeEntities: decodeInlineEntities,
       exportStrictVars,
+      // The real window for the page-facing one: a native method called on the facade (`EventTarget.prototype.addEventListener.call(window, …)`) is an illegal invocation.
+      unwrapScope: value => (isScopeProxy(value) ? root : value),
       // Runs a script in the global scope after rewriting it, for `javascript:` URLs handled outside this function.
       runClassic: source => execGlobalScript(rewriteWithPageRewriter(source, 'classic'))
     };

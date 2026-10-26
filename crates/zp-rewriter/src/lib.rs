@@ -532,6 +532,7 @@ pub fn rewrite_script(source: &str, opts: &RewriteOpts) -> Result<RewriteResult,
 /// `-offset` so they make sense in a sub-source view. Markers we know:
 /// - MEMBER_GET: obj_start, obj_end (positions 2, 3)
 /// - MEMBER_SET: obj_start, obj_end, val_start, val_end (positions 2, 3, 5, 6)
+/// - MEMBER_A: obj_start, obj_end, val_start, val_end (positions 2, 3, 6, 7; the operator is at 5)
 /// - METHOD_CALL: obj_start, obj_end, args_start, args_end (positions 2, 3, 5, 6)
 /// - MODULE_URL: src_start, src_end (positions 2, 3)
 fn shift_marker_positions(replacement: &str, offset: u32) -> String {
@@ -570,8 +571,9 @@ fn shift_marker_positions(replacement: &str, offset: u32) -> String {
         ("\u{1}MEMBER_REF\u{1}", &[2, 3]),
         ("\u{1}MEMBER_REF_STMT\u{1}", &[2, 3]),
         ("\u{1}MEMBER_SET\u{1}", &[2, 3, 5, 6]),
-        ("\u{1}MEMBER_A\u{1}", &[2, 3, 5, 6]),
-        ("\u{1}MEMBER_A_STMT\u{1}", &[2, 3, 5, 6]),
+        // The operator sits between the property and the value spans, so the value span is at 6 and 7 (MEMBER_SET has no operator field).
+        ("\u{1}MEMBER_A\u{1}", &[2, 3, 6, 7]),
+        ("\u{1}MEMBER_A_STMT\u{1}", &[2, 3, 6, 7]),
         ("\u{1}METHOD_CALL\u{1}", &[2, 3, 5, 6]),
         ("\u{1}MODULE_URL\u{1}", &[2, 3]),
         ("\u{1}VAR_SET\u{1}", &[4, 5]),
@@ -5959,6 +5961,30 @@ mod tests {
             "top not rewritten: {}",
             r.code
         );
+    }
+
+    #[test]
+    fn nested_compound_member_assignment_leaves_no_marker() {
+        // A compound write to a dangerous member (`top`, `location`, `href`, …) inside another rewritten range is rebased with the range, and
+        // its value span sits one field later than a plain write's: the table of rebased fields once missed that, and the marker reached the
+        // output (a control character: the whole script failed to parse; YouTube's 11 MB bundle holds `v[0].top=v[1].top+=U.height`).
+        for src in [
+            "v[0].top=v[1].top+=U.height;",
+            "a.top = (b.top += 1);",
+            "x.location = y.location += z;",
+            "location.assign(a.href += 'x');",
+            "if (1) a.top = b.top -= 1;",
+            "a.top = { k: b.top += 1 };",
+            "[a.top = b.top += 1];",
+            "a.top = b.top += c.top += 1;",
+        ] {
+            let r = rewrite_script(src, &opts()).unwrap();
+            assert!(
+                !r.code.chars().any(|c| ('\u{1}'..='\u{8}').contains(&c)),
+                "marker left in the output of `{src}`: {}",
+                r.code.escape_debug()
+            );
+        }
     }
 
     #[test]
