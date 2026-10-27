@@ -3192,6 +3192,40 @@ document.body.appendChild(doc);
         '</script></body>');
       return;
     }
+    if (url.pathname === '/xifrnative') {
+      // The "untainted native" idiom (rrweb and Sentry Replay, Datadog, zone.js escapes): a method of a fresh iframe's window, called with this page's window as the receiver.
+      // Sentry Replay takes setTimeout this way (`e6("setTimeout")` = `iframe.contentWindow.setTimeout.bind(window)`), and Tistory's React app broke on its first input.
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end('<!doctype html><title>ifrnative</title><body><script>' +
+        'var out = window.__ifr = {}; var hits = 0; var tick = function () { hits++; };' +
+        'var t = function (name, fn) { try { out[name] = fn(); } catch (e) { out[name] = "threw " + e.name + ": " + String(e.message).slice(0, 60); } };' +
+        'var f = document.createElement("iframe"); document.head.appendChild(f); var cw = f.contentWindow;' +
+        't("setTimeout.bind(window)", function () { cw.setTimeout.bind(window)(tick, 0); return "ok"; });' +
+        't("setTimeout.call(window)", function () { cw.setTimeout.call(window, tick, 0); return "ok"; });' +
+        't("setTimeout.apply(window)", function () { cw.setTimeout.apply(window, [tick, 0]); return "ok"; });' +
+        't("setTimeout.call(cw)", function () { cw.setTimeout.call(cw, tick, 0); return "ok"; });' +
+        't("setInterval.bind(window)", function () { var id = cw.setInterval.bind(window)(tick, 5); cw.clearInterval.bind(window)(id); return "ok"; });' +
+        't("requestAnimationFrame.bind(window)", function () { cw.requestAnimationFrame.bind(window)(tick); return "ok"; });' +
+        't("clearTimeout.bind(window)", function () { var id = setTimeout(tick, 1000); cw.clearTimeout.bind(window)(id); return "ok"; });' +
+        't("addEventListener.call(window)", function () { cw.addEventListener.call(window, "zp-x", tick); window.dispatchEvent(new Event("zp-x")); return "ok"; });' +
+        't("removeEventListener.call(window)", function () { var g = function () { hits += 100; }; cw.addEventListener.call(window, "zp-y", g); cw.removeEventListener.call(window, "zp-y", g); window.dispatchEvent(new Event("zp-y")); return "ok"; });' +
+        't("getComputedStyle.call(window)", function () { return typeof cw.getComputedStyle.call(window, document.body).color; });' +
+        't("atob.bind(window)", function () { return cw.atob.bind(window)("aGk="); });' +
+        't("btoa.call(window)", function () { return cw.btoa.call(window, "hi"); });' +
+        't("structuredClone.bind(window)", function () { return JSON.stringify(cw.structuredClone.bind(window)({ a: 1 })); });' +
+        't("queueMicrotask.bind(window)", function () { cw.queueMicrotask.bind(window)(tick); return "ok"; });' +
+        't("matchMedia.call(window)", function () { return typeof cw.matchMedia.call(window, "(min-width: 1px)").matches; });' +
+        't("MutationObserver ctor", function () { var mo = new cw.MutationObserver(function () {}); mo.observe(document.body, { childList: true }); mo.disconnect(); return "ok"; });' +
+        't("window.setTimeout is not the iframe\'s", function () { return String(cw.setTimeout === window.setTimeout); });' +
+        'var d = document.createElement("div"); var inp = document.createElement("input"); inp.type = "checkbox";' +
+        // React's value tracker plus rrweb's setter hook on the same property: the shape of the Tistory failure
+        'var proto = HTMLInputElement.prototype; var orig = Object.getOwnPropertyDescriptor(proto, "checked");' +
+        'var untaintedTimeout = cw.setTimeout.bind(window);' +
+        't("rrweb hookSetter on checked", function () { Object.defineProperty(proto, "checked", { set: function (v) { untaintedTimeout(function () { hits += 1000; }, 0); orig.set.call(this, v); }, get: orig.get, configurable: true }); inp.checked = true; return String(inp.checked); });' +
+        'setTimeout(function () { out.hits = hits; f.remove(); window.__done = true; }, 500);' +
+        '</script></body>');
+      return;
+    }
     if (url.pathname === '/xsel.js' || url.pathname === '/xsel.css') {
       res.writeHead(200, { 'Content-Type': url.pathname.endsWith('.js') ? 'text/javascript' : 'text/css', 'Cache-Control': 'no-store' });
       res.end(url.pathname.endsWith('.js') ? 'window.__selLoads = (window.__selLoads || 0) + 1;' : 'body { margin: 0 }');
@@ -6833,6 +6867,23 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
         resolve(err && err.message || String(err));
       }
     });
+    // A string given to a child iframe window's timers: the engine would compile it in the child, unrewritten, with the raw top and parent in reach (the membrane's
+    // __zp_get is a function on them); it must run rewritten like the child's eval, where the parent's internals are hidden. And a timer taken from the child and called
+    // on this window (rrweb, Sentry Replay) is this window's timer.
+    out.childStringTimer = await new Promise(resolve => {
+      try {
+        const f = document.createElement('iframe');
+        document.body.appendChild(f);
+        const cw = f.contentWindow;
+        cw.setTimeout('window.__seenTop = typeof top.__zp_get + "/" + typeof parent.__zp_get', 0);
+        cw.setInterval('window.__seenTopInterval = typeof top.__zp_get; clearInterval(window.__childIv)', 5);
+        let foreign = 'not-ran';
+        cw.setTimeout.call(window, () => { foreign = 'ran'; }, 0);
+        setTimeout(() => { resolve([cw.__seenTop, cw.__seenTopInterval, foreign].join('|')); f.remove(); }, 80);
+      } catch (err) {
+        resolve(err && err.message || String(err));
+      }
+    });
     out.blobWorker = await new Promise(resolve => {
       let worker;
       try {
@@ -7164,6 +7215,7 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
   await t.test('topOrigin', () => { assert.equal(escapeMatrix.topOrigin, `http://${targetHost}:${targetPort}`); });
   await t.test('proxy-origin navigation', () => { assert.equal(page.url().startsWith(`http://proxy.localhost:${proxyPort}/`), true); });
   await t.test('stringTimer', () => { assert.equal(escapeMatrix.stringTimer, 'ran'); });
+  await t.test('childStringTimer', () => { assert.equal(escapeMatrix.childStringTimer, 'undefined/undefined|undefined|ran'); });
   await t.test('blobWorker', () => { assert.equal(escapeMatrix.blobWorker, 'ran:blob:'); });
   await t.test('dataWorker', () => { assert.equal(escapeMatrix.dataWorker, 'ran:data:'); });
   await t.test('eventHandlerLocation', () => { assert.ok(escapeMatrix.eventHandlerLocation === '' || escapeMatrix.eventHandlerLocation === `http://${targetHost}:${targetPort}/#compound-tail`, `event handler location: ${escapeMatrix.eventHandlerLocation}`); });
@@ -8264,6 +8316,32 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     assert.deepEqual(proxied.later, direct.later);
     assert.deepEqual(proxied.sync, direct.sync);
     assert.equal(proxied.selLoads, direct.selLoads);
+  });
+  await t.test('window operations taken from a fresh iframe and called on the page window work, as natively', async () => {
+    const targetBase = `http://${targetHost}:${targetPort}`;
+    const collect = async p => {
+      try {
+        await p.waitForFunction(() => window.__done === true, { timeout: 60000, polling: 100 });
+        return await p.evaluate(() => window.__ifr);
+      } finally {
+        await p.close();
+      }
+    };
+    const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    let direct;
+    try {
+      const p = await directBrowser.newPage();
+      await p.goto(`${targetBase}/xifrnative`, { waitUntil: 'domcontentloaded' });
+      direct = await collect(p);
+    } finally {
+      await directBrowser.close();
+    }
+    const proxied = await collect(await openProxiedPage(`${targetBase}/xifrnative`));
+    fs.writeFileSync(path.join(artifacts, 'iframe-native-operations.json'), JSON.stringify({ direct, proxied }, null, 2));
+    // The native reference: each operation works on the page's window, and the rrweb setter hook ran its timer (hits counts every callback that ran).
+    assert.ok(Object.entries(direct).filter(([k]) => k !== 'hits' && !k.startsWith('window.setTimeout')).every(([, v]) => !String(v).startsWith('threw')), JSON.stringify(direct));
+    assert.ok(direct.hits >= 1000, `the setter hook's timer did not run: ${direct.hits}`);
+    assert.deepEqual(proxied, direct);
   });
   await t.test('localStorage and sessionStorage inherit from Object.prototype and Storage.prototype, as natively', async () => {
     const targetBase = `http://${targetHost}:${targetPort}`;

@@ -20,6 +20,16 @@
       return u.origin === proxyOrigin && ZP.isSharePath(u.pathname) && String(doc.contentType || '') === 'text/html';
     } catch { return false; }
   }
+  // The window a child-realm window operation acts on. The engine accepts any same-origin Window as the receiver of these operations, and the idiom for an untouched
+  // timer or encoder is to take one from a fresh iframe and call it on the page's own window (`iframe.contentWindow.setTimeout.bind(window)`: rrweb, Sentry Replay, Datadog,
+  // zone.js escapes). The page's `window` is the membrane's facade, which the engine refuses with `Illegal invocation` (Tistory's React app stopped on its first input), so
+  // it is mapped to the real window it stands for. A call with no receiver acts on the child, as natively.
+  const CHILD_FOREIGN_RECEIVER_OPS = ['clearTimeout', 'clearInterval', 'requestAnimationFrame', 'cancelAnimationFrame', 'requestIdleCallback', 'cancelIdleCallback', 'queueMicrotask',
+    'atob', 'btoa', 'structuredClone', 'matchMedia', 'createImageBitmap', 'reportError', 'scroll', 'scrollTo', 'scrollBy'];
+  function foreignWindowReceiver(recv, child) {
+    if (recv === undefined || recv === null) return child;
+    return pageRewriteHooks ? pageRewriteHooks.unwrapScope(recv) : recv;
+  }
   function installNetworkContainment(w) {
     if (!w) return;
     try { if (w[networkContainmentMarker]) return; } catch {}
@@ -156,6 +166,24 @@
       maskNativeFunction(childDynamicEval, 'eval');
       maskNativeFunction(childFunctionFacade, 'Function');
       if (!define(w, 'eval', childDynamicEval) || !define(w, 'Function', childFunctionFacade)) throw normalizedError('SecurityError');
+      // A string handed to the child window's `setTimeout` or `setInterval` is compiled by the engine in the child as it is: unrewritten, with the raw `top` and `parent` in
+      // reach. It runs as the child's global code like `eval` does, rewritten, when the timer fires (the main realm's `timerHandler` does the same for its own window).
+      // The receiver is normalized as for the other window operations below, and a call on the page's own window goes to its timer.
+      const childTimerHandler = (handler, sink) => {
+        if (typeof handler === 'function') return handler;
+        const text = ttIsTrusted('Script', handler) ? ttText('Script', handler) : ttCompliant('Script', sink, String(handler), '', childTT);
+        return function () { if (cspRefusal(w.document)) return undefined; return childEvalText(text); };
+      };
+      for (const [name, sink] of [['setTimeout', 'Window setTimeout'], ['setInterval', 'Window setInterval']]) {
+        const childNative = w[name];
+        if (typeof childNative !== 'function') continue;
+        const childTimer = function (handler, delay, ...args) {
+          const recv = foreignWindowReceiver(this, w);
+          if (recv === root) return Reflect.apply(root[name], root, [handler, delay, ...args]);
+          return Reflect.apply(childNative, recv, [childTimerHandler(handler, sink), delay, ...args]);
+        };
+        if (!define(w, name, childTimer)) throw normalizedError('SecurityError');
+      }
       // Direct `eval(x)` support for the child realm. Compiles sloppy and strict
       // runners lazily using the child's `Function` constructor so `eval` inside
       // `with(__zp_env)` resolves caller locals and shared child lexical bindings.
@@ -323,6 +351,12 @@
     installGetterMasking(w);
     installStorageFacades(w);
     installPostMessageHooks(w);
+    // The window operations a library takes from a fresh iframe and calls on the page's own window (see `foreignWindowReceiver`).
+    for (const name of CHILD_FOREIGN_RECEIVER_OPS) {
+      const childNative = w[name];
+      if (typeof childNative !== 'function') continue;
+      define(w, name, function (...args) { return Reflect.apply(childNative, foreignWindowReceiver(this, w), args); });
+    }
     if (root.XMLHttpRequest && !define(w, 'XMLHttpRequest', root.XMLHttpRequest)) throw normalizedError('SecurityError');
     if (root.EventSource && !define(w, 'EventSource', root.EventSource)) throw normalizedError('SecurityError');
     if (root.WebSocket && !define(w, 'WebSocket', root.WebSocket)) throw normalizedError('SecurityError');
