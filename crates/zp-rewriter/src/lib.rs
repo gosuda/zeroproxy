@@ -2269,9 +2269,18 @@ impl RewriteVisitor {
         // Skip schemes the SW cannot proxy and bare specifiers (package-manager
         // names with no URL semantics that never round-trip through fetch).
         let lower = raw.trim_start().to_ascii_lowercase();
-        // A `data:` or `blob:` module is code the browser would load as it is. Its source is only known where the blob lives, so the page's own
-        // rewriter swaps the placeholder for a rewritten copy (`resolveModuleImportPlaceholders`); anywhere else the unknown scheme fails to load.
-        if lower.starts_with("data:") || lower.starts_with("blob:") {
+        // A `data:` module is code in its own address, which the service worker serves decoded and rewritten on the module route; the browser would otherwise load it as it is.
+        if lower.starts_with("data:") {
+            self.patches.push(Patch {
+                start: lit.span.start,
+                end: lit.span.end,
+                replacement: format!("'{}'", module_route_url(raw.trim_start(), &self.proxy_origin)),
+            });
+            return;
+        }
+        // A `blob:` module's source is only known where the blob lives, so the page's own rewriter swaps the placeholder for a rewritten copy
+        // (`resolveModuleImportPlaceholders`); anywhere else the unknown scheme fails to load.
+        if lower.starts_with("blob:") {
             use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
             self.patches.push(Patch {
                 start: lit.span.start,
@@ -2939,13 +2948,18 @@ fn proxied_module_url(raw: &str, target_url: &str, proxy_origin: &str) -> Option
         return None;
     }
     let abs = resolve_module_base(raw, target_url)?;
+    Some(module_route_url(&abs, proxy_origin))
+}
+
+/// The service worker's module route for an absolute address: `http(s):`, or a `data:` module, which carries its own code.
+fn module_route_url(abs: &str, proxy_origin: &str) -> String {
     use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
     const QUERY_ENC: &AsciiSet = &CONTROLS
         .add(b' ').add(b'"').add(b'#').add(b'<').add(b'>').add(b'&').add(b'=')
         .add(b'+').add(b'%').add(b'?').add(b'/').add(b':').add(b';').add(b'\'')
         .add(b'\\').add(b'`').add(b'{').add(b'}').add(b'[').add(b']').add(b'^').add(b'|');
-    let encoded = utf8_percent_encode(&abs, QUERY_ENC).to_string();
-    Some(format!("{}/zp/api/script?u={encoded}&kind=module", proxy_origin.trim_end_matches('/')))
+    let encoded = utf8_percent_encode(abs, QUERY_ENC).to_string();
+    format!("{}/zp/api/script?u={encoded}&kind=module", proxy_origin.trim_end_matches('/'))
 }
 
 /// Detect a `true`-equivalent constant expression (`true` literal or non-zero
@@ -4184,11 +4198,13 @@ impl<'a> Visit<'a> for RewriteVisitor {
         //   single-hop local aliases (`var u = n.location; u.protocol`, such as
         //   desugared optional chains `n.location?.protocol`) still route
         //   through the membrane.
+        // `prepareStackTrace` is here for the aliases bundles make of `Error` (`const be = Error; be.prepareStackTrace`): left alone, the read returns the membrane's
+        // stack sanitizer, which natively is not there until the page assigns a hook, and a library that saves the hook and calls it (Transcend's airgap) throws.
         const URL_SHAPE_MEMBERS: &[&str] = &[
             "href", "protocol", "host", "hostname", "port", "pathname", "search", "hash",
             "origin", "location", "top", "parent", "opener", "frameElement",
             "window", "self", "globalThis", "frames", "document", "defaultView",
-            "contentWindow", "contentDocument",
+            "contentWindow", "contentDocument", "prepareStackTrace",
         ];
         if let Expression::Identifier(recv) = &expr.object {
             let recv_name = recv.name.as_str();
@@ -4998,6 +5014,17 @@ mod tests {
         );
     }
 
+    // Bundles alias `Error` (`const be = Error`), and a library that saves the stack hook before installing its own reads `be.prepareStackTrace`: the page's view of it
+    // (nothing until it assigns one) has to come from the membrane, as it does for `Error.prepareStackTrace`.
+    #[test]
+    fn prepare_stack_trace_read_through_an_alias_routes_through_the_membrane() {
+        let o = opts();
+        let out = rewrite_script("const be = Error; function f(){ let i = be.prepareStackTrace; return i; }", &o).unwrap();
+        assert!(out.code.contains("__zp_get(be,\"prepareStackTrace\")"), "alias read must route: {}", out.code);
+        let param = rewrite_script("function f(E){ return E.prepareStackTrace; }", &o).unwrap();
+        assert!(param.code.contains("__zp_get(E,\"prepareStackTrace\")"), "parameter read must route: {}", param.code);
+    }
+
     #[test]
     fn computed_dynamic_import_is_wrapped_at_runtime() {
         let o = RewriteOpts {
@@ -5528,13 +5555,14 @@ mod tests {
             strict: true,
             proxy_origin: "http://proxy.localhost:18080".to_string(),
         };
-        // Bare specifiers are package names with no URL semantics; data:/blob:
-        // never round-trip through fetch. Rewriting either would break the
-        // module graph rather than fix it.
+        // Bare specifiers are package names with no URL semantics, and blob: modules
+        // never round-trip through fetch. Rewriting either would break the module graph
+        // rather than fix it (a data: module has its own route, see
+        // `static_data_imports_go_to_the_module_route`).
         for src in [
             "import react from 'react';",
             "export { x } from 'lodash-es';",
-            "import 'data:text/javascript,void 0';",
+            "import 'blob:http://h.example/3f2a-9';",
         ] {
             let r = rewrite_script(src, &opts).unwrap();
             assert!(
@@ -5904,18 +5932,34 @@ mod tests {
     }
 
     #[test]
-    fn static_data_and_blob_imports_become_placeholders_that_cannot_load() {
+    fn static_blob_imports_become_placeholders_that_cannot_load() {
         let mut o = opts();
         o.kind = ScriptKind::Module;
-        let src = "import a from 'blob:http://h.example/3f2a-9';\nimport 'data:text/javascript,1';\nexport * from \"blob:http://h.example/x\";\nexport { b } from 'DATA:text/javascript,export const b=1';";
+        let src = "import a from 'blob:http://h.example/3f2a-9';
+export * from \"blob:http://h.example/x\";";
         let r = rewrite_script(src, &o).unwrap();
-        assert!(!r.code.contains("'blob:") && !r.code.contains("\"blob:") && !r.code.contains("'data:") && !r.code.contains("'DATA:"),
-            "a data:/blob: specifier must not reach the browser as it is: {}", r.code);
-        assert_eq!(r.code.matches("'zp-import:").count(), 4, "every static specifier is marked: {}", r.code);
+        assert!(!r.code.contains("'blob:") && !r.code.contains("\"blob:"), "a blob: specifier must not reach the browser as it is: {}", r.code);
+        assert_eq!(r.code.matches("'zp-import:").count(), 2, "every static specifier is marked: {}", r.code);
         assert!(r.code.contains("zp-import:blob%3Ahttp%3A%2F%2Fh%2Eexample%2F3f2a%2D9"), "the original rides along percent-encoded: {}", r.code);
         // the dynamic literal form takes the runtime path and is not marked
         let dynamic = rewrite_script("import('blob:http://h.example/y');", &o).unwrap();
         assert!(!dynamic.code.contains("zp-import:"), "a dynamic import is resolved by the runtime: {}", dynamic.code);
+    }
+
+    #[test]
+    fn static_data_imports_go_to_the_module_route() {
+        let mut o = opts();
+        o.kind = ScriptKind::Module;
+        o.proxy_origin = "http://proxy.example".to_string();
+        let src = "import 'data:text/javascript,1';
+export { b } from 'DATA:text/javascript;base64,ZXhwb3J0IGNvbnN0IGI9MQ==';
+import * as c from \"data:text/javascript,export default 2\";";
+        let r = rewrite_script(src, &o).unwrap();
+        assert!(!r.code.contains("'data:") && !r.code.contains("'DATA:") && !r.code.contains("\"data:"), "a data: specifier must not reach the browser as it is: {}", r.code);
+        assert!(!r.code.contains("zp-import:"), "a data: module is served, not marked: {}", r.code);
+        assert_eq!(r.code.matches("http://proxy.example/zp/api/script?u=").count(), 3, "every static specifier is routed: {}", r.code);
+        assert!(r.code.contains("u=data%3Atext%2Fjavascript,1&kind=module"), "the address rides along percent-encoded: {}", r.code);
+        assert!(r.code.contains("u=DATA%3Atext%2Fjavascript%3Bbase64,ZXhwb3J0IGNvbnN0IGI9MQ%3D%3D&kind=module"), "base64 padding is encoded too: {}", r.code);
     }
 
     #[test]

@@ -441,6 +441,9 @@
   const integrityBackupAttr = 'data-zp-integrity';
   const hiddenIconHref = 'data:application/x-zeroproxy-icon,1';
   const WINDOW_BOUND_METHODS = newSet(['addEventListener','removeEventListener','dispatchEvent','setTimeout','setInterval','clearTimeout','clearInterval','requestAnimationFrame','cancelAnimationFrame','requestIdleCallback','cancelIdleCallback','matchMedia','getComputedStyle','postMessage','atob','btoa','focus','blur','close','print','alert','confirm','prompt','scroll','scrollTo','scrollBy']);
+  // Window operations the engine runs only on a Window receiver (anything else, the page's facade included, is refused with `Illegal invocation`), for the page's window and for child realms.
+  const WINDOW_RECEIVER_OPS = ['clearTimeout', 'clearInterval', 'requestAnimationFrame', 'cancelAnimationFrame', 'requestIdleCallback', 'cancelIdleCallback', 'queueMicrotask',
+    'atob', 'btoa', 'structuredClone', 'matchMedia', 'createImageBitmap', 'reportError', 'scroll', 'scrollTo', 'scrollBy'];
   const serviceWorkerFacades = newWeakMap();
   // Shared hook table populated by installPhase2Membrane so sibling functions
   // (such as installNetworkContainment) can invoke the script rewriter for

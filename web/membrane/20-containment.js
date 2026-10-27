@@ -24,8 +24,6 @@
   // timer or encoder is to take one from a fresh iframe and call it on the page's own window (`iframe.contentWindow.setTimeout.bind(window)`: rrweb, Sentry Replay, Datadog,
   // zone.js escapes). The page's `window` is the membrane's facade, which the engine refuses with `Illegal invocation` (Tistory's React app stopped on its first input), so
   // it is mapped to the real window it stands for. A call with no receiver acts on the child, as natively.
-  const CHILD_FOREIGN_RECEIVER_OPS = ['clearTimeout', 'clearInterval', 'requestAnimationFrame', 'cancelAnimationFrame', 'requestIdleCallback', 'cancelIdleCallback', 'queueMicrotask',
-    'atob', 'btoa', 'structuredClone', 'matchMedia', 'createImageBitmap', 'reportError', 'scroll', 'scrollTo', 'scrollBy'];
   function foreignWindowReceiver(recv, child) {
     if (recv === undefined || recv === null) return child;
     return pageRewriteHooks ? pageRewriteHooks.unwrapScope(recv) : recv;
@@ -352,7 +350,7 @@
     installStorageFacades(w);
     installPostMessageHooks(w);
     // The window operations a library takes from a fresh iframe and calls on the page's own window (see `foreignWindowReceiver`).
-    for (const name of CHILD_FOREIGN_RECEIVER_OPS) {
+    for (const name of WINDOW_RECEIVER_OPS) {
       const childNative = w[name];
       if (typeof childNative !== 'function') continue;
       define(w, name, function (...args) { return Reflect.apply(childNative, foreignWindowReceiver(this, w), args); });

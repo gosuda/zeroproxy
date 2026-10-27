@@ -1081,6 +1081,32 @@
       const boot = bootOwnAccessors.get(prop);
       return !boot || boot.get !== own.get || boot.set !== own.set;
     }
+    // The idiom that wraps an accessor keeps the original getter and calls it with the receiver it was given (TikTok's privacy framework wraps `screen` this way). Page-installed
+    // accessors run with `scope` as `this`, so the native getter taken from the descriptor would be called on the facade and throw `Illegal invocation`; natively the receiver is the window.
+    const windowAccessorWrappers = newWeakMap();
+    function windowReceiverAccessor(fn, kind, prop) {
+      if (typeof fn !== 'function') return fn;
+      let wrapper = windowAccessorWrappers.get(fn);
+      if (!wrapper) {
+        wrapper = function () { return nativeApply(fn, isScopeProxy(this) ? root : this, arguments); };
+        maskAccessorFn(wrapper, kind, prop);
+        lengthLike(wrapper, fn);
+        windowAccessorWrappers.set(fn, wrapper);
+      }
+      return wrapper;
+    }
+    // Only the window's own accessors as they were at boot; one the page installed is its own function and is returned as it is.
+    function pageWindowDescriptor(desc, prop) {
+      if (!desc || typeof prop !== 'string') return desc;
+      const boot = bootOwnAccessors.get(prop);
+      if (!boot || boot.get !== desc.get || boot.set !== desc.set) return desc;
+      return {
+        get: windowReceiverAccessor(desc.get, 'get', prop),
+        set: windowReceiverAccessor(desc.set, 'set', prop),
+        enumerable: desc.enumerable,
+        configurable: desc.configurable,
+      };
+    }
     function isPrototypeAccessor(prop) {
       if (prop === '__proto__') return false;
       for (let p = nativeReflectGetPrototypeOf(root); p; p = nativeReflectGetPrototypeOf(p)) {
@@ -1205,7 +1231,7 @@
         const desc = nativeReflectGOPD(root, prop);
         // Mirror non-configurable descriptors onto `target` to satisfy Proxy invariants.
         if (desc && !desc.configurable) nativeReflectDefineProperty(target, prop, desc);
-        return desc;
+        return pageWindowDescriptor(desc, prop);
       },
       ownKeys() { return nativeOwnKeys(root).filter(k => typeof k !== 'string' || !ZP_HIDDEN_RE.test(k)); },
       defineProperty(target, prop, desc) {
@@ -1251,6 +1277,15 @@
       },
     }));
     function isScopeProxy(value) { return value === scope || value === withScope; }
+    // The same operations on the page's own window. A script whose free identifiers the rewriter leaves alone holds the native `clearTimeout`, and `clearTimeout.bind(window)` or
+    // `.call(window)` hands it the facade, which the engine refuses (react-idle-timer takes its timers this way, and TikTok's page stopped on it). A method shorthand has no
+    // `prototype`, so `needsWindowReceiver` still binds these for reads through the facade.
+    for (const name of WINDOW_RECEIVER_OPS) {
+      const native = root[name];
+      if (typeof native !== 'function') continue;
+      const holder = { [name](...args) { return nativeApply(native, isScopeProxy(this) ? root : this, args); } };
+      define(root, name, holder[name]);
+    }
     // Property names mediated by the membrane during `Reflect.get`, `Reflect.set`, and descriptor lookups.
     const MEMBER_DANGER = newSet([
       'location', 'contentWindow', 'contentDocument', 'defaultView',
@@ -1597,7 +1632,8 @@
           configurable: native ? native.configurable : false,
         };
       }
-      return nativeReflectGOPD(Object(base), prop);
+      const desc = nativeReflectGOPD(Object(base), prop);
+      return base === root ? pageWindowDescriptor(desc, prop) : desc;
     }
     function ownKeys(base) {
       if (!isObjectLike(base)) return nullishFail('own', base);

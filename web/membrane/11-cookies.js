@@ -113,7 +113,8 @@
   // ── virtual cookieStore
   // Back `window.cookieStore` with `documentCookieRecords` so it shares the virtual
   // origin's jar with `document.cookie` instead of reading or writing physical proxy-origin cookies.
-  let virtualCookieStoreSingleton = null;
+  // `var`, not `let`: the `EventTarget.prototype` wrappers (09-nav-net.js) read it from their first call, which can come before this file has run, and a `let` would throw there.
+  var virtualCookieStoreSingleton = null;
   const cookieStoreListeners = newSet();
   let cookieStoreOnChange = null;
   function cookieItemFromRec(r) {
@@ -140,6 +141,28 @@
       try { typeof l === 'function' ? l.call(virtualCookieStoreSingleton, ev) : l.handleEvent.call(l, ev); } catch {}
     }
     if (cookieStoreOnChange) { try { cookieStoreOnChange.call(virtualCookieStoreSingleton, ev); } catch {} }
+  }
+  // The facade is not a real EventTarget, so the native `EventTarget.prototype` methods refuse it (`Illegal invocation`). A page that wraps `cookieStore.addEventListener` keeps the
+  // original it finds on the prototype chain and calls it on the facade (Sentry's browser API errors do, with Transcend's airgap above it), so those methods are answered for the facade
+  // with these (`virtualEventTargetMethod`).
+  const cookieStoreEventMethods = {
+    addEventListener(type, listener) {
+      if (type === 'change' && listener) cookieStoreListeners.add(listener);
+    },
+    removeEventListener(type, listener) {
+      if (type === 'change') cookieStoreListeners.delete(listener);
+    },
+    dispatchEvent(ev) {
+      if (ev && ev.type === 'change') {
+        for (const l of cookieStoreListeners) { try { typeof l === 'function' ? l.call(virtualCookieStoreSingleton, ev) : l.handleEvent.call(l, ev); } catch {} }
+        if (cookieStoreOnChange) { try { cookieStoreOnChange.call(virtualCookieStoreSingleton, ev); } catch {} }
+      }
+      return true;
+    },
+  };
+  function virtualEventTargetMethod(receiver, name) {
+    // A bare `addEventListener(…)` arrives with no receiver, which would equal the singleton before it exists.
+    return receiver != null && receiver === virtualCookieStoreSingleton ? cookieStoreEventMethods[name] : null;
   }
   function virtualCookieStore() {
     if (virtualCookieStoreSingleton) return virtualCookieStoreSingleton;
@@ -180,19 +203,9 @@
         sendCookieSet(line);
         return Promise.resolve();
       }, enumerable: false, configurable: true, writable: true },
-      addEventListener: { value: function addEventListener(type, listener) {
-        if (type === 'change' && listener) cookieStoreListeners.add(listener);
-      }, enumerable: false, configurable: true, writable: true },
-      removeEventListener: { value: function removeEventListener(type, listener) {
-        if (type === 'change') cookieStoreListeners.delete(listener);
-      }, enumerable: false, configurable: true, writable: true },
-      dispatchEvent: { value: function dispatchEvent(ev) {
-        if (ev && ev.type === 'change') {
-          for (const l of cookieStoreListeners) { try { typeof l === 'function' ? l.call(facade, ev) : l.handleEvent.call(l, ev); } catch {} }
-          if (cookieStoreOnChange) { try { cookieStoreOnChange.call(facade, ev); } catch {} }
-        }
-        return true;
-      }, enumerable: false, configurable: true, writable: true },
+      addEventListener: { value: function addEventListener(type, listener) { cookieStoreEventMethods.addEventListener(type, listener); }, enumerable: false, configurable: true, writable: true },
+      removeEventListener: { value: function removeEventListener(type, listener) { cookieStoreEventMethods.removeEventListener(type, listener); }, enumerable: false, configurable: true, writable: true },
+      dispatchEvent: { value: function dispatchEvent(ev) { return cookieStoreEventMethods.dispatchEvent(ev); }, enumerable: false, configurable: true, writable: true },
       onchange: {
         get() { return cookieStoreOnChange; },
         set(v) { cookieStoreOnChange = typeof v === 'function' ? v : null; },

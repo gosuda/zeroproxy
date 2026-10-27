@@ -3192,6 +3192,115 @@ document.body.appendChild(doc);
         '</script></body>');
       return;
     }
+    if (url.pathname === '/xcookiestore') {
+      // A page that wraps `cookieStore.addEventListener` and calls the original it found on the prototype chain on `cookieStore` (Sentry's browser API errors, under Transcend's
+      // airgap on Notion). The page's `cookieStore` is a facade over the virtual cookie jar, which the native EventTarget methods refuse.
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end('<!doctype html><title>cookiestore</title><body><script>' +
+        'var out = window.__cs = { wrapped: 0, fired: 0, removedFired: 0 };' +
+        'var t = function (name, fn) { try { out[name] = fn(); } catch (e) { out[name] = "threw " + e.name + ": " + String(e.message).slice(0, 60); } };' +
+        'var proto = Object.getPrototypeOf(cookieStore);' +
+        'var origAdd = proto.addEventListener, origRemove = proto.removeEventListener, origDispatch = proto.dispatchEvent;' +
+        'var wrapAdd = function (type, listener, options) { out.wrapped++; return origAdd.apply(this, [type, listener, options]); };' +
+        'cookieStore.addEventListener = wrapAdd;' +
+        'var onChange = function () { out.fired++; }, removed = function () { out.removedFired++; };' +
+        't("add through the wrapper", function () { cookieStore.addEventListener("change", onChange); return "ok"; });' +
+        't("add and remove", function () { cookieStore.addEventListener("change", removed); origRemove.call(cookieStore, "change", removed); return "ok"; });' +
+        't("dispatch through the prototype", function () { return origDispatch.call(cookieStore, new Event("change")); });' +
+        'setTimeout(function () {' +
+        '  t("delivered", function () { return out.fired === 1; });' +
+        '  t("removed listener silent", function () { return out.removedFired === 0; });' +
+        '  window.__done = true;' +
+        '}, 300);' +
+        '</script></body>');
+      return;
+    }
+    if (url.pathname === '/xstackalias') {
+      // Bundles alias `Error` and libraries save its stack hook, install their own and fall back to the saved one (Transcend's airgap, which Notion loads): natively nothing is saved
+      // until the page assigns a hook, and the saved value must not be the membrane's own sanitizer.
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end('<!doctype html><title>stackalias</title><body><script>' +
+        'var out = window.__stk = {};' +
+        'var t = function (name, fn) { try { out[name] = fn(); } catch (e) { out[name] = "threw " + e.name + ": " + String(e.message).slice(0, 60); } };' +
+        'var E = Error;' +
+        't("saved hook type", function () { return typeof E.prepareStackTrace; });' +
+        't("hook is listed", function () { return Object.keys(E).indexOf("prepareStackTrace") >= 0; });' +
+        't("hook receives frames", function () { var prev = E.prepareStackTrace; E.prepareStackTrace = function (e, sites) { return typeof sites + ":" + Array.isArray(sites); }; var v = new E("a").stack; E.prepareStackTrace = prev; return v; });' +
+        't("chain to the saved hook", function () { var saved = E.prepareStackTrace; E.prepareStackTrace = function (e, sites) { return saved ? saved(e, sites) : "default:" + typeof sites; }; var v = new E("b").stack; E.prepareStackTrace = saved; return v; });' +
+        't("airgap capture", function () {' +
+        '  var call = Function.prototype.call.bind(Function.prototype.call);' +
+        '  var capture = function () { var prev = E.prepareStackTrace, got; E.prepareStackTrace = function () { var c = arguments; got = c[1]; return prev ? call(prev, c[0], c[1]) : "x"; }; var o = {}; E.captureStackTrace(o); void o.stack; E.prepareStackTrace = prev; return got; };' +
+        '  var sites = capture(); return Array.isArray(sites) && sites.length > 0 && typeof sites[0].getFileName;' +
+        '});' +
+        't("restored type", function () { return typeof E.prepareStackTrace; });' +
+        't("stack is a string", function () { return typeof new E("c").stack; });' +
+        'window.__done = true;' +
+        '</script></body>');
+      return;
+    }
+    if (url.pathname === '/xdatascript') {
+      // Scripts whose code is in their address: Instagram's bootstrap stubs are `<script src="data:application/x-javascript;…;base64,…">`, es-module-shims probes with `<script type=module src=data:…>`,
+      // and a module may `import 'data:…'`. They must run, rewritten (`location` is the target's), and in the page's order.
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end('<!doctype html><title>datascript</title><body>' +
+        '<script>window.__dat = { order: [] };</script>' +
+        '<script src="data:text/javascript,__dat.order.push(%22plain%22);__dat.plainHref=location.href;__dat.plainWindowTop=(window.top===window)"></script>' +
+        '<script src="data:application/x-javascript; charset=utf-8;base64,X19kYXQub3JkZXIucHVzaCgiYjY0Iik7X19kYXQuY3VycmVudFNyYz1kb2N1bWVudC5jdXJyZW50U2NyaXB0LnNyYy5zbGljZSgwLDQwKQ=="></script>' +
+        '<script type="module" src="data:text/javascript,import %22data:text/javascript,globalThis.__dat.order.push(%2522inner%2522)%22;__dat.order.push(%22module%22);__dat.moduleUrl=import.meta.url.slice(0,40)"></script>' +
+        '<script type="module">import "data:text/javascript,globalThis.__dat.order.push(%22inline-import%22)"; __dat.order.push("inline-module");</script>' +
+        '<script>var d = document.createElement("script"); d.src = "data:text/javascript,__dat.order.push(%22dynamic%22)"; d.onload = function () { __dat.dynamicLoaded = true; }; document.body.appendChild(d);' +
+        'var a = document.createElement("script"); a.setAttribute("src", "data:text/javascript,__dat.order.push(%22attribute%22)"); document.body.appendChild(a);' +
+        '__dat.srcReadback = d.src.slice(0, 40); __dat.attributeReadback = a.getAttribute("src").slice(0, 40);' +
+        'window.addEventListener("load", function () { setTimeout(function () { __dat.order.sort(); window.__done = true; }, 300); });</script>' +
+        '</body>');
+      return;
+    }
+    if (url.pathname === '/xwinaccessor') {
+      // The "wrap the original accessor" idiom (TikTok's privacy framework wraps `screen` and the cookie accessors this way): the descriptor's getter is kept and called with the receiver the
+      // wrapper is given. Natively that receiver is the window; the page's window here is a facade, which a native getter refuses.
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end('<!doctype html><title>winaccessor</title><body><script>' +
+        'var out = window.__acc = {}; var hits = 0;' +
+        'var t = function (name, fn) { try { out[name] = fn(); } catch (e) { out[name] = "threw " + e.name + ": " + String(e.message).slice(0, 60); } };' +
+        'var wrap = function (obj, name) {' +
+        '  var d, owner = obj; while (owner && !(d = Object.getOwnPropertyDescriptor(owner, name))) owner = Object.getPrototypeOf(owner);' +
+        '  var g = d.get, s = d.set;' +
+        '  Object.defineProperty(owner, name, { get: function () { hits++; return g.call(this); }, set: s && function (v) { s.call(this, v); }, enumerable: d.enumerable, configurable: true });' +
+        '};' +
+        't("wrap screen", function () { wrap(window, "screen"); return "ok"; });' +
+        't("screen.width via window", function () { return typeof window.screen.width; });' +
+        't("screen.width bare", function () { return typeof screen.width; });' +
+        't("screen.width via self", function () { return typeof self.screen.width; });' +
+        't("wrapped getter ran", function () { return hits >= 3; });' +
+        't("wrap onclick", function () { wrap(window, "onclick"); return "ok"; });' +
+        't("onclick round trip", function () { var f = function () {}; window.onclick = f; var same = window.onclick === f; window.onclick = null; return same; });' +
+        'var dpr = Object.getOwnPropertyDescriptor(window, "devicePixelRatio");' +
+        't("getter.call(window)", function () { return typeof dpr.get.call(window); });' +
+        't("getter.call(self)", function () { return typeof dpr.get.call(self); });' +
+        't("getter.call(globalThis)", function () { return typeof dpr.get.call(globalThis); });' +
+        't("getter identity", function () { return Object.getOwnPropertyDescriptor(window, "devicePixelRatio").get === dpr.get; });' +
+        't("getter name", function () { return dpr.get.name; });' +
+        't("getter source", function () { return /\\[native code\\]/.test(Function.prototype.toString.call(dpr.get)); });' +
+        't("getter on a foreign object", function () { return dpr.get.call({}); });' +
+        'var om = Object.getOwnPropertyDescriptor(window, "onerror");' +
+        't("setter.call(window)", function () { var f = function () {}; om.set.call(window, f); var same = om.get.call(window) === f; om.set.call(window, null); return same; });' +
+        't("descriptors keys", function () { var all = Object.getOwnPropertyDescriptors(window); return typeof all.innerWidth.get + " " + typeof all.onclick.set; });' +
+        't("reflect descriptor", function () { return typeof Reflect.getOwnPropertyDescriptor(window, "innerHeight").get.call(window); });' +
+        'var tick = function () { hits += 1000; };' +
+        't("setTimeout.bind(window)", function () { setTimeout.bind(window)(tick, 0); return "ok"; });' +
+        't("timers object (react-idle-timer)", function () { var timers = { setTimeout: setTimeout.bind(window), clearTimeout: clearTimeout.bind(window), setInterval: setInterval.bind(window), clearInterval: clearInterval.bind(window) }; var id = timers.setTimeout(tick, 1000); timers.clearTimeout(id); var iv = timers.setInterval(tick, 1000); timers.clearInterval(iv); return typeof id; });' +
+        't("setTimeout.call(window)", function () { setTimeout.call(window, tick, 0); return "ok"; });' +
+        't("setTimeout.apply(window)", function () { setTimeout.apply(window, [tick, 0]); return "ok"; });' +
+        't("requestAnimationFrame.bind(window)", function () { requestAnimationFrame.bind(window)(tick); return "ok"; });' +
+        't("addEventListener.call(window)", function () { addEventListener.call(window, "zp-w", tick); window.dispatchEvent(new Event("zp-w")); return "ok"; });' +
+        't("getComputedStyle.call(window)", function () { return typeof getComputedStyle.call(window, document.body).color; });' +
+        't("atob.call(window)", function () { return atob.call(window, "aGk="); });' +
+        't("structuredClone.bind(window)", function () { return JSON.stringify(structuredClone.bind(window)({ a: 1 })); });' +
+        't("queueMicrotask.call(window)", function () { queueMicrotask.call(window, tick); return "ok"; });' +
+        'window.__done = true;' +
+        '</script></body>');
+      return;
+    }
     if (url.pathname === '/xifrnative') {
       // The "untainted native" idiom (rrweb and Sentry Replay, Datadog, zone.js escapes): a method of a fresh iframe's window, called with this page's window as the receiver.
       // Sentry Replay takes setTimeout this way (`e6("setTimeout")` = `iframe.contentWindow.setTimeout.bind(window)`), and Tistory's React app broke on its first input.
@@ -8382,6 +8491,112 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     assert.deepEqual(proxied.later, direct.later);
     assert.deepEqual(proxied.sync, direct.sync);
     assert.equal(proxied.selLoads, direct.selLoads);
+  });
+  await t.test('cookieStore event methods taken from the prototype chain work on the facade, as natively', async () => {
+    const targetBase = `http://${targetHost}:${targetPort}`;
+    const collect = async p => {
+      try {
+        await p.waitForFunction(() => window.__done === true, { timeout: 60000, polling: 100 });
+        return await p.evaluate(() => window.__cs);
+      } finally {
+        await p.close();
+      }
+    };
+    const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    let direct;
+    try {
+      const p = await directBrowser.newPage();
+      await p.goto(`${targetBase}/xcookiestore`, { waitUntil: 'domcontentloaded' });
+      direct = await collect(p);
+    } finally {
+      await directBrowser.close();
+    }
+    const proxied = await collect(await openProxiedPage(`${targetBase}/xcookiestore`));
+    fs.writeFileSync(path.join(artifacts, 'cookie-store-events.json'), JSON.stringify({ direct, proxied }, null, 2));
+    // The native reference: the wrapper ran, the listener heard the event dispatched through the prototype, and the removed one heard nothing.
+    assert.ok(Object.entries(direct).every(([, v]) => !String(v).startsWith('threw')), JSON.stringify(direct));
+    assert.equal(direct.delivered, true, JSON.stringify(direct));
+    assert.deepEqual(proxied, direct);
+  });
+  await t.test('the stack hook read through an alias of Error is the page\'s own, as natively', async () => {
+    const targetBase = `http://${targetHost}:${targetPort}`;
+    const collect = async p => {
+      try {
+        await p.waitForFunction(() => window.__done === true, { timeout: 60000, polling: 100 });
+        return await p.evaluate(() => window.__stk);
+      } finally {
+        await p.close();
+      }
+    };
+    const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    let direct;
+    try {
+      const p = await directBrowser.newPage();
+      await p.goto(`${targetBase}/xstackalias`, { waitUntil: 'domcontentloaded' });
+      direct = await collect(p);
+    } finally {
+      await directBrowser.close();
+    }
+    const proxied = await collect(await openProxiedPage(`${targetBase}/xstackalias`));
+    fs.writeFileSync(path.join(artifacts, 'stack-hook-alias.json'), JSON.stringify({ direct, proxied }, null, 2));
+    // The native reference: nothing is saved at first, so a library falls back to its own default.
+    assert.equal(direct['saved hook type'], 'undefined', JSON.stringify(direct));
+    assert.ok(Object.entries(direct).every(([, v]) => !String(v).startsWith('threw')), JSON.stringify(direct));
+    assert.deepEqual(proxied, direct);
+  });
+  await t.test('scripts whose code is in their address run rewritten and in order, as natively', async () => {
+    const targetBase = `http://${targetHost}:${targetPort}`;
+    const collect = async p => {
+      try {
+        await p.waitForFunction(() => window.__done === true, { timeout: 60000, polling: 100 });
+        return await p.evaluate(() => window.__dat);
+      } finally {
+        await p.close();
+      }
+    };
+    const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    let direct;
+    try {
+      const p = await directBrowser.newPage();
+      await p.goto(`${targetBase}/xdatascript`, { waitUntil: 'domcontentloaded' });
+      direct = await collect(p);
+    } finally {
+      await directBrowser.close();
+    }
+    const proxied = await collect(await openProxiedPage(`${targetBase}/xdatascript`));
+    fs.writeFileSync(path.join(artifacts, 'data-scripts.json'), JSON.stringify({ direct, proxied }, null, 2));
+    // The native reference: every kind of data: script ran (the two static classic ones, a module with an import, an inline module with an import, and two dynamic ones).
+    assert.deepEqual(direct.order, ['attribute', 'b64', 'dynamic', 'inline-import', 'inline-module', 'inner', 'module', 'plain'], JSON.stringify(direct));
+    assert.equal(direct.plainHref, `${targetBase}/xdatascript`);
+    // Rewritten, not run as written: the script sees the target's location rather than the proxy's.
+    assert.deepEqual(proxied, direct);
+  });
+  await t.test('native window accessors and methods that the page wraps or binds with its window as the receiver work, as natively', async () => {
+    const targetBase = `http://${targetHost}:${targetPort}`;
+    const collect = async p => {
+      try {
+        await p.waitForFunction(() => window.__done === true, { timeout: 60000, polling: 100 });
+        return await p.evaluate(() => window.__acc);
+      } finally {
+        await p.close();
+      }
+    };
+    const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    let direct;
+    try {
+      const p = await directBrowser.newPage();
+      await p.goto(`${targetBase}/xwinaccessor`, { waitUntil: 'domcontentloaded' });
+      direct = await collect(p);
+    } finally {
+      await directBrowser.close();
+    }
+    const proxied = await collect(await openProxiedPage(`${targetBase}/xwinaccessor`));
+    fs.writeFileSync(path.join(artifacts, 'window-accessors.json'), JSON.stringify({ direct, proxied }, null, 2));
+    // The native reference: the wrapped getter ran and every call with the window as receiver works; only the foreign receiver is refused.
+    assert.equal(direct['screen.width via window'], 'number', JSON.stringify(direct));
+    assert.ok(Object.entries(direct).filter(([k]) => k !== 'getter on a foreign object').every(([, v]) => !String(v).startsWith('threw')), JSON.stringify(direct));
+    assert.match(String(direct['getter on a foreign object']), /Illegal invocation/);
+    assert.deepEqual(proxied, direct);
   });
   await t.test('window operations taken from a fresh iframe and called on the page window work, as natively', async () => {
     const targetBase = `http://${targetHost}:${targetPort}`;

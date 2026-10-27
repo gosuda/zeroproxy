@@ -50,11 +50,14 @@
     } catch { return String(value); }
   }
   // Route classic scripts in SW-less frames through the synchronous relay so they do not bypass the service worker.
-  function swLessScriptURL(el, target, kind) {
-    if (!target || kind === 'module') return '';
+  function inSWLessDocument(el) {
     let doc = null;
     try { doc = el.ownerDocument; } catch {}
-    if (!doc || !doc.defaultView || !documentIsSWLess(doc)) return '';
+    return !!(doc && doc.defaultView && documentIsSWLess(doc));
+  }
+  function swLessScriptURL(el, target, kind) {
+    if (!target || kind === 'module') return '';
+    if (!inSWLessDocument(el)) return '';
     // Reuse an existing relay URL for the same target to avoid triggering an infinite MutationObserver loop.
     const current = Native.getAttribute.call(el, 'src');
     if (current && relayTargetOf(current) === target) return current;
@@ -81,6 +84,16 @@
     if (!kind) {
       urlMeta.delete(el);
       return Native.setAttribute.call(el, 'src', value);
+    }
+    // A script whose code is in its address (Instagram's bootstrap stubs, es-module-shims' feature probes) runs from the service worker's script route, which decodes and rewrites it.
+    // A document with no service worker has no such route, and keeps the script blocked.
+    if (/^data:/i.test(trimmed)) {
+      if (inSWLessDocument(el)) return blockExecutableURL(el, 'src', value);
+      urlMeta.set(el, trimmed);
+      litSet(el, 'src', raw);
+      const dataSrc = scriptProxyPath(trimmed, kind);
+      if (Native.getAttribute.call(el, 'src') === dataSrc) return;
+      return Native.setAttribute.call(el, 'src', dataSrc);
     }
     if (hasExecutableURLScheme(value)) return blockExecutableURL(el, 'src', value);
     const target = targetURLForElement(el, value);

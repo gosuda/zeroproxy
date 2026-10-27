@@ -385,7 +385,12 @@ fn attr_settings(
                                         }),
                                         _ => false,
                                     };
-                                    let next = if module_fetch {
+                                    let next = if tag.as_str() == "script"
+                                        && lower == "src"
+                                        && starts_with_ascii_ci(trimmed, "data:")
+                                    {
+                                        proxied_data_script_url(trimmed, &proxy_origin, module_fetch)
+                                    } else if module_fetch {
                                         proxied_module_script_url(trimmed, &attr_base, &proxy_origin)
                                     } else {
                                         proxied_subresource_url(
@@ -1098,15 +1103,27 @@ fn proxied_module_script_url(raw: &str, target_url: &str, proxy_origin: &str) ->
         return None;
     }
     let abs = absolute_target_url(raw, target_url)?;
+    Some(script_route_url(&abs, proxy_origin, "module"))
+}
+
+/// The script route for a `data:` script: the code is in the address, so the service worker decodes it and serves it rewritten (nothing is fetched).
+fn proxied_data_script_url(raw: &str, proxy_origin: &str, module: bool) -> Option<String> {
+    if proxy_origin.is_empty() {
+        return None;
+    }
+    Some(script_route_url(raw.trim(), proxy_origin, if module { "module" } else { "classic" }))
+}
+
+fn script_route_url(abs: &str, proxy_origin: &str, kind: &str) -> String {
     use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
-    // Same encode set as zp-rewriter::proxied_module_url so the two forms
+    // Same encode set as zp-rewriter::module_route_url so the two forms
     // produce identical URLs.
     const QUERY_ENC: &AsciiSet = &CONTROLS
         .add(b' ').add(b'"').add(b'#').add(b'<').add(b'>').add(b'&').add(b'=')
         .add(b'+').add(b'%').add(b'?').add(b'/').add(b':').add(b';').add(b'\'')
         .add(b'\\').add(b'`').add(b'{').add(b'}').add(b'[').add(b']').add(b'^').add(b'|');
-    let encoded = utf8_percent_encode(&abs, QUERY_ENC).to_string();
-    Some(format!("{}/zp/api/script?u={encoded}&kind=module", proxy_origin.trim_end_matches('/')))
+    let encoded = utf8_percent_encode(abs, QUERY_ENC).to_string();
+    format!("{}/zp/api/script?u={encoded}&kind={kind}", proxy_origin.trim_end_matches('/'))
 }
 
 /// Rewrite every candidate URL in a `srcset` / `imagesrcset` list, keeping the
@@ -2490,6 +2507,21 @@ mod tests {
         assert!(imported.code.contains(m), "differed from static import canonical form: {}", imported.code);
         assert!(out.contains("__ZP_EXEC_INLINE_MODULE(\"let e = 1;\")"), "{out}");
         assert!(out.contains("__ZP_EXEC_INLINE_SCRIPT(\"let f = 1;\")"), "{out}");
+    }
+
+    #[test]
+    fn data_script_src_goes_to_the_script_route() {
+        // A `data:` script is code in its address (Instagram's bootstrap stubs): it must reach the service worker's script route, which decodes and rewrites it,
+        // rather than the browser, which would run it as written (or refuse it under the page's CSP). Images with a `data:` source are left to the browser.
+        let html = "<script src=\"data:text/javascript,var a=1;\"></script>\
+                    <script type=\"module\" src=\"data:text/javascript;base64,dmFyIGI9Mjs=\"></script>\
+                    <img src=\"data:image/png;base64,AAAA\">";
+        let r = transform(html, &opts()).unwrap();
+        let out = r.html.replace("&amp;", "&");
+        assert!(out.contains("http://proxy.localhost:18080/zp/api/script?u=data%3Atext%2Fjavascript,var%20a%3D1%3B&kind=classic"), "classic data script: {out}");
+        assert!(out.contains("http://proxy.localhost:18080/zp/api/script?u=data%3Atext%2Fjavascript%3Bbase64,dmFyIGI9Mjs%3D&kind=module"), "module data script: {out}");
+        assert!(out.contains("data-zp-lit-src=\"data:text/javascript,var a=1;\""), "the author's address stays readable: {out}");
+        assert!(out.contains("src=\"data:image/png;base64,AAAA\""), "an image keeps its data: source: {out}");
     }
 
     #[test]

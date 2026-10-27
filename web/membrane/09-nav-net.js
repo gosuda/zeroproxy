@@ -567,16 +567,26 @@
         const receiverOf = self => (pageRewriteHooks && pageRewriteHooks.unwrapScope ? pageRewriteHooks.unwrapScope(self) : self);
         define(ETProto, 'addEventListener', function(type, listener, options) {
           const self = receiverOf(this);
+          const virtual = virtualEventTargetMethod(self, 'addEventListener');
+          if (virtual) return virtual(type, listener);
           if (forThisWindow(self) && String(type) === 'message') return rawAdd.call(w, String(type), wrap(listener), options);
           return rawAdd.apply(self, arguments);
         });
         define(ETProto, 'removeEventListener', function(type, listener, options) {
           const self = receiverOf(this);
+          const virtual = virtualEventTargetMethod(self, 'removeEventListener');
+          if (virtual) return virtual(type, listener);
           if (forThisWindow(self) && String(type) === 'message') return rawRemove.call(w, String(type), messageListenerWrappers.get(listener) || listener, options);
           return rawRemove.apply(self, arguments);
         });
         const rawDispatch = ETProto.dispatchEvent;
-        if (typeof rawDispatch === 'function') define(ETProto, 'dispatchEvent', function(event) { return rawDispatch.apply(receiverOf(this), arguments); });
+        if (typeof rawDispatch === 'function') {
+          define(ETProto, 'dispatchEvent', function(event) {
+            const self = receiverOf(this);
+            const virtual = virtualEventTargetMethod(self, 'dispatchEvent');
+            return virtual ? virtual(event) : rawDispatch.apply(self, arguments);
+          });
+        }
       }
     }
     // Keep the native `postMessage` on `w` rather than installing a parent-realm

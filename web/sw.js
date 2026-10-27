@@ -1078,6 +1078,12 @@ async function runtimeAPI(req, url, clientId) {
     const namedEntry = urlEntry && explicitTab.entries.get(urlEntry);
     if (!scriptCtx && namedEntry && clientId) bindClientContext(clientId, explicitTab, namedEntry);
     const scriptEntryId = (scriptCtx && scriptCtx.entryId) || (namedEntry && urlEntry) || tab.activeEntryId;
+    // A `data:` script is code in its own address (Instagram's bootstrap stubs, es-module-shims' feature probes, a module's `import 'data:…'`): there is nothing to fetch, and it
+    // runs only after the rewriter, like any other script.
+    if (/^data:/i.test(target)) {
+      const decoded = decodeDataURLScript(target);
+      return decoded ? rewriteScriptResponse(decoded, { targetUrl: target, kind, req }) : safeError('TARGET_PROTOCOL_BLOCKED', 403, 'data:');
+    }
     const elementCors = elementCorsOptions(req, tab.entries.get(scriptEntryId));
     const resp = await transportFetch(target, Object.assign({ request: req, tab, entryId: scriptEntryId, refOverride }, elementCors));
     if (elementCors && resp.type === 'error') return resp;
@@ -1146,6 +1152,33 @@ async function runtimeAPI(req, url, clientId) {
     );
   } catch {}
   return safeError('POLICY_BLOCKED', 404);
+}
+
+// The code a `data:` URL carries, as a response the rewriter can take, or null when the URL is malformed. Percent escapes are bytes (not code points) and `;base64` is decoded
+// as the data URL spec does (whitespace ignored), so the response decodes with the charset the URL declares.
+function decodeDataURLScript(href) {
+  const comma = href.indexOf(',');
+  if (comma < 0) return null;
+  const meta = href.slice(5, comma);
+  const payload = href.slice(comma + 1);
+  const bytes = [];
+  try {
+    if (/;\s*base64\s*$/i.test(meta)) {
+      const bin = atob(decodeURIComponent(payload).replace(/\s+/g, '').replace(/=+$/, ''));
+      for (let i = 0; i < bin.length; i++) bytes.push(bin.charCodeAt(i));
+    } else {
+      const utf8 = new TextEncoder();
+      for (let i = 0; i < payload.length; i++) {
+        const c = payload.charCodeAt(i);
+        if (c === 37 && /^[0-9a-fA-F]{2}$/.test(payload.substr(i + 1, 2))) { bytes.push(parseInt(payload.substr(i + 1, 2), 16)); i += 2; continue; }
+        const cp = payload.codePointAt(i);
+        if (cp > 0xFFFF) i++;
+        for (const b of utf8.encode(String.fromCodePoint(cp))) bytes.push(b);
+      }
+    }
+  } catch { return null; }
+  const mime = meta.replace(/;\s*base64\s*$/i, '');
+  return new Response(new Uint8Array(bytes), { status: 200, headers: { 'Content-Type': mime || 'text/javascript;charset=US-ASCII' } });
 }
 
 // Resolve and fetch the script's original sourceMappingURL pragma (or decode an inline data: URI), returning '' on failure.
@@ -1792,7 +1825,8 @@ async function rewriteScriptResponse(resp, opt) {
       // Append a sourceMappingURL pointing to /zp/api/sourcemap for classic, module, and worker scripts.
       const kind = opt.kind || 'classic';
       const target = opt.targetUrl || '';
-      if (target && (kind === 'classic' || kind === 'module' || kind === 'worker')) {
+      // A `data:` script is its own source: there is no address to fetch the map's input from.
+      if (target && !/^data:/i.test(target) && (kind === 'classic' || kind === 'module' || kind === 'worker')) {
         const mapURL = ZP.apiPath('sourcemap') + '?u=' + encodeURIComponent(target) + '&k=' + encodeURIComponent(kind);
         code = code + '\n//# sourceMappingURL=' + mapURL + '\n';
       }
