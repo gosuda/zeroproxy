@@ -30,7 +30,7 @@ use super::dialer::{dialer, TargetAddr};
 use super::http1::{self, HttpResponse};
 use super::http2::{self, Http2Client};
 use super::pool::{self, PoolKey, PooledConn};
-use super::tls::TlsStream;
+use super::tls::{self, TlsStream};
 
 /// Top-level entry. The caller (`kernel_fetch`) supplies a fully parsed
 /// JS Request as `(url, method, headers, body)`; this function does the
@@ -299,17 +299,37 @@ async fn open_fresh(
         // Advertise both protocols. The server picks one; we branch on
         // `tls.alpn_protocol()` after the handshake to wire either the
         // h2 multiplex client or the HTTP/1.1 per-stream client.
-        let tls = TlsStream::connect(stream, &parsed.host, alpn_list)
-            .await
-            .map_err(|e| {
+        let first = TlsStream::connect(stream, &parsed.host, alpn_list).await;
+        // The browser-shaped hello lists legacy suites the TLS stack cannot negotiate. A server whose own preference puts one of them first
+        // answers with it, and the handshake cannot complete, though the same server accepts an AEAD suite when none of the legacy ones is
+        // offered (DCInside prefers ECDHE-RSA-AES256-SHA over its GCM suites). Make the connection again, on a new stream, with a hello
+        // that lists only what can be negotiated, and remember the host so its next connection starts there.
+        let tls = match first {
+            Err(e) if tls::is_unoffered_suite(&e) => {
                 crate::kernel::push_trace(&format!(
-                    "tx:tls-err host={} err={} t={}ms",
+                    "tx:tls-retry host={} reason=legacy-suite err={} t={}ms",
                     parsed.host,
                     e,
                     delta_ms(t0)
                 ));
-                jserr("TARGET_TLS_FAILED", &e)
-            })?;
+                tls::remember_plain_suites(&parsed.host);
+                let again = dialer()
+                    .connect(&addr, relay_url)
+                    .await
+                    .map_err(|e| e.into_js_error())?;
+                TlsStream::connect_with(again, &parsed.host, alpn_list, false).await
+            }
+            other => other,
+        }
+        .map_err(|e| {
+            crate::kernel::push_trace(&format!(
+                "tx:tls-err host={} err={} t={}ms",
+                parsed.host,
+                e,
+                delta_ms(t0)
+            ));
+            jserr("TARGET_TLS_FAILED", &e)
+        })?;
         let alpn = tls.alpn_protocol();
         crate::kernel::push_trace(&format!(
             "tx:tls-ok host={} tls={}ms t={}ms alpn={}",

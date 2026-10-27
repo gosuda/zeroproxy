@@ -40,6 +40,7 @@
 //! from `ja3::CapturedSpec` when installed.
 
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::io;
 // `Read`/`Write` are brought in unprefixed so rustls's sync `Reader`/`Writer`
 // methods resolve. The futures `Async*` traits are scoped to where the
@@ -61,9 +62,50 @@ thread_local! {
     /// `rustls_rustcrypto::provider()` runs per-call setup. Caching makes
     /// this a one-time cost per ALPN combination (`["http/1.1"]` or
     /// `["h2", "http/1.1"]`).
-    static CONFIG_CACHE: RefCell<Vec<(Vec<Vec<u8>>, Arc<ClientConfig>)>> = const {
+    static CONFIG_CACHE: RefCell<Vec<(Vec<Vec<u8>>, bool, Arc<ClientConfig>)>> = const {
         RefCell::new(Vec::new())
     };
+
+    /// Hosts whose server answered the browser-shaped hello with one of its legacy suites (see `is_unoffered_suite`). They get the hello
+    /// without those suites from the first attempt on.
+    static PLAIN_SUITE_HOSTS: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+}
+
+/// The handshake failed because the server selected a cipher suite the ClientHello listed only for its shape (a browser's legacy CBC or
+/// static-RSA suite, which the TLS stack does not implement). The server's own preference decides this, so the same connection made
+/// with a hello that lists only what can be negotiated succeeds when the server supports any AEAD suite.
+pub fn is_unoffered_suite(e: &io::Error) -> bool {
+    e.get_ref()
+        .and_then(|inner| inner.downcast_ref::<TlsProcessError>())
+        .is_some_and(|p| {
+            matches!(
+                p.0,
+                rustls::Error::PeerMisbehaved(rustls::PeerMisbehaved::SelectedUnofferedCipherSuite)
+            )
+        })
+}
+
+/// A rustls error from `process_new_packets`, kept as a value so `is_unoffered_suite` can tell it from the others; it prints as it always has.
+#[derive(Debug)]
+pub struct TlsProcessError(pub rustls::Error);
+
+impl std::fmt::Display for TlsProcessError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "tls: process: {}", self.0)
+    }
+}
+
+impl std::error::Error for TlsProcessError {}
+
+/// Remember that `host` needs the hello without unimplemented suites.
+pub fn remember_plain_suites(host: &str) {
+    PLAIN_SUITE_HOSTS.with(|s| {
+        s.borrow_mut().insert(host.to_ascii_lowercase());
+    });
+}
+
+fn host_needs_plain_suites(host: &str) -> bool {
+    PLAIN_SUITE_HOSTS.with(|s| s.borrow().contains(&host.to_ascii_lowercase()))
 }
 
 /// Build a Chrome-ordered cipher suite list from `rustls_rustcrypto`'s
@@ -97,10 +139,14 @@ fn chrome_ordered_cipher_suites() -> Vec<rustls::SupportedCipherSuite> {
     ]
 }
 
-fn build_client_config(alpn: &[&[u8]]) -> io::Result<Arc<ClientConfig>> {
+fn build_client_config(alpn: &[&[u8]], advertise_unimplemented: bool) -> io::Result<Arc<ClientConfig>> {
     let wanted: Vec<Vec<u8>> = alpn.iter().map(|p| p.to_vec()).collect();
     CONFIG_CACHE.with(|cell| -> io::Result<Arc<ClientConfig>> {
-        if let Some((_, c)) = cell.borrow().iter().find(|(k, _)| k == &wanted) {
+        if let Some((_, _, c)) = cell
+            .borrow()
+            .iter()
+            .find(|(k, adv, _)| k == &wanted && *adv == advertise_unimplemented)
+        {
             return Ok(c.clone());
         }
         let mut roots = RootCertStore::empty();
@@ -120,8 +166,9 @@ fn build_client_config(alpn: &[&[u8]]) -> io::Result<Arc<ClientConfig>> {
             .with_root_certificates(roots)
             .with_no_client_auth();
         config.alpn_protocols = wanted.clone();
+        config.advertise_unimplemented_suites = advertise_unimplemented;
         let arc = Arc::new(config);
-        cell.borrow_mut().push((wanted, arc.clone()));
+        cell.borrow_mut().push((wanted, advertise_unimplemented, arc.clone()));
         Ok(arc)
     })
 }
@@ -152,7 +199,17 @@ where
     /// then drive the handshake to completion before returning. After this
     /// resolves, plaintext reads/writes succeed.
     pub async fn connect(inner: S, server_name: &str, alpn: &[&[u8]]) -> io::Result<Self> {
-        let config = build_client_config(alpn)?;
+        Self::connect_with(inner, server_name, alpn, !host_needs_plain_suites(server_name)).await
+    }
+
+    /// `connect`, choosing whether the ClientHello may list suites the TLS stack cannot negotiate (the browser-shaped hello does).
+    pub async fn connect_with(
+        inner: S,
+        server_name: &str,
+        alpn: &[&[u8]],
+        advertise_unimplemented: bool,
+    ) -> io::Result<Self> {
+        let config = build_client_config(alpn, advertise_unimplemented)?;
         // ServerName::try_from rejects IP literals; callers only pass hostnames.
         let name = ServerName::try_from(server_name.to_string())
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, format!("tls: SNI: {e}")))?;
@@ -195,7 +252,7 @@ where
             if self.conn.is_handshaking() && self.conn.wants_read() {
                 self.read_more_into_conn().await?;
                 self.conn.process_new_packets().map_err(|e| {
-                    io::Error::new(io::ErrorKind::InvalidData, format!("tls: process: {e}"))
+                    io::Error::new(io::ErrorKind::InvalidData, TlsProcessError(e))
                 })?;
             }
         }

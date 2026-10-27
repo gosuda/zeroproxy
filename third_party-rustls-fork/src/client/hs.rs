@@ -435,6 +435,17 @@ fn emit_client_hello_for_retry(
         // renegotiation_info extension instead; see SCSV-skip comment
         // above where the non-captured path adds it).
         cipher_suites = captured_ciphers;
+        // A config that must not offer what it cannot negotiate (`advertise_unimplemented_suites`) keeps only the captured suites the
+        // provider implements, in their captured order, so a server with a CBC preference picks a suite the handshake can complete.
+        if !config.advertise_unimplemented_suites {
+            cipher_suites.retain(|cs| {
+                config
+                    .provider
+                    .cipher_suites
+                    .iter()
+                    .any(|implemented| implemented.suite() == *cs)
+            });
+        }
     }
 
     // Phase 5.6: GREASE cipher inject (RFC 8701). cipher_suites is a

@@ -184,6 +184,7 @@ impl ConfigBuilder<ClientConfig, WantsClientCert> {
             cert_compressors: compress::default_cert_compressors().to_vec(),
             cert_compression_cache: Arc::new(compress::CompressionCache::default()),
             cert_decompressors: compress::default_cert_decompressors().to_vec(),
+            advertise_unimplemented_suites: true,
             ech_mode: self.state.client_ech_mode,
         }
     }

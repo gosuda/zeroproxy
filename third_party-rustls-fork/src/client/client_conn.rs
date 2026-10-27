@@ -285,6 +285,14 @@ pub struct ClientConfig {
     /// a cache that does no caching.
     pub cert_compression_cache: Arc<compress::CompressionCache>,
 
+    /// Whether the ClientHello may list cipher suites the provider cannot negotiate.
+    ///
+    /// ZeroProxy fork: an installed browser spec (`ja3::CapturedSpec`) is emitted as captured, with the legacy CBC and static-RSA suites
+    /// a browser still offers. The provider implements none of them, so a server whose own preference puts one first answers with it
+    /// and the handshake fails (`SelectedUnofferedCipherSuite`). With `false` the hello lists only the captured suites the provider
+    /// implements, and such a server picks one of those. The default is true.
+    pub advertise_unimplemented_suites: bool,
+
     /// How to offer Encrypted Client Hello (ECH). The default is to not offer ECH.
     pub(super) ech_mode: Option<EchMode>,
 }
