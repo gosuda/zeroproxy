@@ -92,6 +92,9 @@
     if (String(raw) === SWLESS_PIXEL) { upgradeSWLessURL(el, key, String(raw)); return; }
     const target = targetURLForElement(el, raw);
     if (!target) return;
+    // The value the page wrote, kept for `getAttribute` and for attribute selectors, when no earlier write recorded one (the HTML transformer stashes it for markup it
+    // transforms; a `<template>`'s `innerHTML` is not transformed, and FAST finds its `fast-x{…}fast-x` binding markers in what `getAttribute` returns).
+    if (litGet(el, localKey) === undefined && !Native.hasAttribute.call(el, litAttrName(localKey))) litSet(el, localKey, raw);
     // Park frame src attributes while inside inert documents (such as template fragments).
     if ((tag === 'iframe' || tag === 'frame') && localKey === 'src' && inertFrameDocument(el)) {
       urlMeta.set(el, target);

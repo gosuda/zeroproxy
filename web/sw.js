@@ -1903,7 +1903,8 @@ async function transformDocumentResponse(resp, opt) {
     if (self.ZPBundle && self.ZPBundle.ready && typeof self.ZPBundle.transformHtml === 'function') {
       const targetUrl = (opt.entry && (opt.entry.targetUrl || opt.entry.baseUrl)) || '';
       const out = self.ZPBundle.transformHtml(html, targetUrl);
-      if (typeof out === 'string' && out.length > 0) {
+      // An empty output is a failure only for a document that had content: an empty document (Bing's hidden token frame answers its form POST with a 0-byte 200) transforms to nothing.
+      if (typeof out === 'string' && (out.length > 0 || html.length === 0)) {
         transformed = out;
         transformOk = true;
       } else {

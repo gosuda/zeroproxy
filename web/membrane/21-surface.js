@@ -114,15 +114,21 @@
       if (ms) {
         const MSProto = (w.MediaSession && w.MediaSession.prototype) || Object.getPrototypeOf(ms);
         const nativeSetMetadata = Object.getOwnPropertyDescriptor(MSProto, 'metadata');
+        const NativeMediaMetadata = w.MediaMetadata;
         if (nativeSetMetadata && nativeSetMetadata.set) {
           defineMasked(MSProto, 'metadata', {
             get: nativeSetMetadata.get ? function get() { return nativeSetMetadata.get.call(this); } : undefined,
             set: function set(meta) {
+              // The browser's media UI fetches artwork itself, so a target URL has to be the proxy's by the time the metadata reaches it. The setter takes a `MediaMetadata` (or
+              // null) and refuses any other object, so the rewritten copy is a native `MediaMetadata` built from the same fields: a plain object here made every assignment with
+              // artwork throw `Failed to convert value to 'MediaMetadata'` (the Twitch player stopped on it).
               try {
-                if (meta && meta.artwork && Array.isArray(meta.artwork)) {
-                  meta = Object.assign({}, meta, {
-                    artwork: meta.artwork.map(a => (a && typeof a.src === 'string' && /^https?:/i.test(a.src))
-                      ? Object.assign({}, a, { src: subresourceProxyPath(targetURL(a.src)) }) : a),
+                // A relative address was resolved against the proxy's own origin when the `MediaMetadata` was made; the service worker maps that back, so only a target address is rewritten.
+                const isTarget = a => !!a && typeof a.src === 'string' && /^https?:/i.test(a.src) && !a.src.startsWith(proxyOrigin);
+                if (meta && typeof NativeMediaMetadata === 'function' && Array.isArray(meta.artwork) && meta.artwork.some(isTarget)) {
+                  meta = new NativeMediaMetadata({
+                    title: meta.title, artist: meta.artist, album: meta.album,
+                    artwork: meta.artwork.map(a => (isTarget(a) ? { src: subresourceProxyPath(targetURL(a.src)), sizes: a.sizes, type: a.type } : a)),
                   });
                 }
               } catch {}

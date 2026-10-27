@@ -3226,6 +3226,72 @@ document.body.appendChild(doc);
         '</script></body>');
       return;
     }
+    if (url.pathname.startsWith('/xinert-')) {
+      res.writeHead(200, { 'Content-Type': 'image/gif', 'Cache-Control': 'no-store' });
+      res.end(Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', 'base64'));
+      return;
+    }
+    if (url.pathname === '/xinertdoc') {
+      // Documents with no window (a template's content, DOMParser, createHTMLDocument) load nothing, so an image the page puts in one is not requested (FAST templates hold
+      // `fast-x{…}fast-x` placeholders in src attributes and Bing's MSN widgets made ninety failing requests); the nodes load once a document adopts them.
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end('<!doctype html><title>inertdoc</title><body><script>' +
+        'var out = window.__inert = {}; var origin = location.origin;' +
+        'var count = function (needle) { return performance.getEntriesByType("resource").filter(function (e) { try { return decodeURIComponent(e.name).indexOf(needle) >= 0; } catch (x) { return false; } }).length; };' +
+        'var t = document.createElement("template");' +
+        't.innerHTML = "<img src=\'" + origin + "/xinert-innerhtml.gif\'><video poster=\'" + origin + "/xinert-poster.gif\'></video><img src=\'fast-x{fast-x-1}fast-x/xinert-placeholder.gif\'>";' +
+        'var img = document.createElement("img"); t.content.appendChild(img); img.setAttribute("src", origin + "/xinert-setattribute.gif"); img.src = origin + "/xinert-property.gif";' +
+        'var doc = document.implementation.createHTMLDocument("x"); var i2 = doc.createElement("img"); i2.src = origin + "/xinert-otherdoc.gif"; doc.body.appendChild(i2);' +
+        'var dp = new DOMParser().parseFromString("<img src=\'" + origin + "/xinert-domparser.gif\'>", "text/html");' +
+        'out.readback = [t.content.firstChild.getAttribute("src"), t.content.childNodes[1].getAttribute("poster"), t.content.childNodes[2].getAttribute("src"), img.getAttribute("src"), i2.getAttribute("src"), dp.images[0].getAttribute("src")];' +
+        'setTimeout(function () {' +
+        '  out.beforeAdopt = count("xinert-");' +
+        '  var t2 = document.createElement("template"); t2.innerHTML = "<img id=\'adopted\' src=\'" + origin + "/xinert-adopted.gif\'>"; document.body.appendChild(document.importNode(t2.content, true));' +
+        '  var t3 = document.createElement("template"); t3.innerHTML = "<img id=\'inserted\' src=\'" + origin + "/xinert-inserted.gif\'>"; document.body.appendChild(t3.content);' +
+        '  setTimeout(function () {' +
+        '    out.afterAdopt = { adopted: count("xinert-adopted"), inserted: count("xinert-inserted"), other: count("xinert-") - count("xinert-adopted") - count("xinert-inserted") };' +
+        '    out.adoptedRead = [document.getElementById("adopted").getAttribute("src"), document.getElementById("inserted").getAttribute("src")];' +
+        '    window.__done = true;' +
+        '  }, 800);' +
+        '}, 800);' +
+        '</script></body>');
+      return;
+    }
+    if (url.pathname === '/xmediasession') {
+      // Media metadata with artwork (every media site sets it; the Twitch player stopped on it): the setter takes a MediaMetadata, so a copy with proxied artwork URLs has to be one.
+      const site = `http://${req.headers.host}`;
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end('<!doctype html><title>mediasession</title><body><script>' +
+        'var out = window.__ms = {};' +
+        'try { navigator.mediaSession.metadata = new MediaMetadata({ title: "T", artist: "A", album: "B", artwork: [{ src: "' + site + '/art.png", sizes: "96x96", type: "image/png" }, { src: "/rel.png", sizes: "128x128" }] }); out.set = "ok"; } catch (e) { out.set = e.name + ": " + e.message; }' +
+        'var m = navigator.mediaSession.metadata;' +
+        'out.title = m && m.title; out.artist = m && m.artist; out.album = m && m.album; out.count = m && m.artwork.length;' +
+        'out.sizes = m && m.artwork.map(function (a) { return a.sizes; }).join(","); out.type0 = m && m.artwork[0].type; out.abs = m && m.artwork[0].src; out.rel = m && m.artwork[1].src;' +
+        'try { navigator.mediaSession.metadata = new MediaMetadata({ title: "x", artwork: [{ src: "' + site + '/a.png" }] }); navigator.mediaSession.metadata.title = "live"; out.live = navigator.mediaSession.metadata.title; } catch (e) { out.live = e.name; }' +
+        'try { navigator.mediaSession.metadata = new MediaMetadata({ title: "plain" }); out.plain = navigator.mediaSession.metadata.title; } catch (e) { out.plain = e.name; }' +
+        'try { navigator.mediaSession.metadata = null; out.cleared = String(navigator.mediaSession.metadata); } catch (e) { out.cleared = e.name; }' +
+        'try { navigator.mediaSession.metadata = { title: "not a MediaMetadata" }; out.plainObject = "accepted"; } catch (e) { out.plainObject = e.name; }' +
+        'window.__done = true;' +
+        '</script></body>');
+      return;
+    }
+    if (url.pathname === '/xemptydoc') {
+      // A charset other than UTF-8 sends the document down the buffered path, where an empty transform output used to read as a failure.
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=iso-8859-1', 'Cache-Control': 'no-store' });
+      res.end('');
+      return;
+    }
+    if (url.pathname === '/xemptyframe') {
+      // A document with no bytes (Bing's hidden token frame answers its form POST this way): a 200 and a blank document, not an error page.
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end('<!doctype html><title>emptyframe</title><body><iframe id="f" src="/xemptydoc"></iframe><script>' +
+        'var out = window.__empty = {};' +
+        'var f = document.getElementById("f");' +
+        'var read = function () { var d = f.contentDocument; out.readyState = d.readyState; out.bodyText = d.body ? d.body.textContent : null; out.bodyChildren = d.body ? d.body.childNodes.length : -1; out.title = d.title; out.hasError = /POLICY|MALFORMED|ZeroProxy/.test(d.documentElement.textContent); };' +
+        'f.addEventListener("load", function () { read(); fetch("/xemptydoc").then(function (r) { return r.text().then(function (t) { out.fetched = r.status + ":" + t.length; window.__done = true; }); }); });' +
+        '</script></body>');
+      return;
+    }
     if (url.pathname === '/xsel.js' || url.pathname === '/xsel.css') {
       res.writeHead(200, { 'Content-Type': url.pathname.endsWith('.js') ? 'text/javascript' : 'text/css', 'Cache-Control': 'no-store' });
       res.end(url.pathname.endsWith('.js') ? 'window.__selLoads = (window.__selLoads || 0) + 1;' : 'body { margin: 0 }');
@@ -8342,6 +8408,91 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     assert.ok(Object.entries(direct).filter(([k]) => k !== 'hits' && !k.startsWith('window.setTimeout')).every(([, v]) => !String(v).startsWith('threw')), JSON.stringify(direct));
     assert.ok(direct.hits >= 1000, `the setter hook's timer did not run: ${direct.hits}`);
     assert.deepEqual(proxied, direct);
+  });
+  await t.test('images the page puts in a document with no window are not requested, and load once adopted, as natively', async () => {
+    const targetBase = `http://${targetHost}:${targetPort}`;
+    const collect = async p => {
+      try {
+        await p.waitForFunction(() => window.__done === true, { timeout: 60000, polling: 100 });
+        return await p.evaluate(() => window.__inert);
+      } finally {
+        await p.close();
+      }
+    };
+    const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    let direct;
+    try {
+      const p = await directBrowser.newPage();
+      await p.goto(`${targetBase}/xinertdoc`, { waitUntil: 'domcontentloaded' });
+      direct = await collect(p);
+    } finally {
+      await directBrowser.close();
+    }
+    const proxied = await collect(await openProxiedPage(`${targetBase}/xinertdoc`));
+    fs.writeFileSync(path.join(artifacts, 'inert-document-images.json'), JSON.stringify({ direct, proxied }, null, 2));
+    // The native reference: nothing is requested for what sits in a window-less document; an image requests once a document adopts or receives its node.
+    assert.equal(direct.beforeAdopt, 0);
+    assert.deepEqual(direct.afterAdopt, { adopted: 1, inserted: 1, other: 0 });
+    assert.equal(direct.readback[2], 'fast-x{fast-x-1}fast-x/xinert-placeholder.gif');
+    assert.deepEqual(proxied, direct);
+  });
+  await t.test('a document with no bytes loads as a blank document, as natively', async () => {
+    const targetBase = `http://${targetHost}:${targetPort}`;
+    const collect = async p => {
+      try {
+        await p.waitForFunction(() => window.__done === true, { timeout: 60000, polling: 100 });
+        return await p.evaluate(() => window.__empty);
+      } finally {
+        await p.close();
+      }
+    };
+    const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    let direct;
+    try {
+      const p = await directBrowser.newPage();
+      await p.goto(`${targetBase}/xemptyframe`, { waitUntil: 'domcontentloaded' });
+      direct = await collect(p);
+    } finally {
+      await directBrowser.close();
+    }
+    const proxied = await collect(await openProxiedPage(`${targetBase}/xemptyframe`));
+    fs.writeFileSync(path.join(artifacts, 'empty-document.json'), JSON.stringify({ direct, proxied }, null, 2));
+    assert.deepEqual(direct, { readyState: 'complete', bodyText: '', bodyChildren: 0, title: '', hasError: false, fetched: '200:0' });
+    assert.deepEqual(proxied, direct);
+  });
+  await t.test('media session metadata with artwork is accepted and shows the same fields, as natively', async () => {
+    const targetBase = `http://${targetHost}:${targetPort}`;
+    const collect = async p => {
+      try {
+        await p.waitForFunction(() => window.__done === true, { timeout: 60000, polling: 100 });
+        return await p.evaluate(() => window.__ms);
+      } finally {
+        await p.close();
+      }
+    };
+    const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    let direct;
+    try {
+      const p = await directBrowser.newPage();
+      await p.goto(`${targetBase}/xmediasession`, { waitUntil: 'domcontentloaded' });
+      direct = await collect(p);
+    } finally {
+      await directBrowser.close();
+    }
+    const proxied = await collect(await openProxiedPage(`${targetBase}/xmediasession`));
+    fs.writeFileSync(path.join(artifacts, 'media-session-metadata.json'), JSON.stringify({ direct, proxied }, null, 2));
+    // The native reference: the assignment works, the fields read back, a plain object is refused, and the metadata stays live.
+    assert.equal(direct.set, 'ok');
+    assert.deepEqual([direct.title, direct.artist, direct.album, direct.count, direct.sizes, direct.type0], ['T', 'A', 'B', 2, '96x96,128x128', 'image/png']);
+    assert.equal(direct.live, 'live');
+    assert.equal(direct.plainObject, 'TypeError');
+    // Through the proxy: the same, except the artwork addresses, which the browser's media UI would fetch itself: the target's own address is the proxy's route to it.
+    const { abs: directAbs, rel: directRel, ...directRest } = direct;
+    const { abs: proxiedAbs, rel: proxiedRel, ...proxiedRest } = proxied;
+    assert.deepEqual(proxiedRest, directRest);
+    assert.equal(directAbs, `${targetBase}/art.png`);
+    assert.ok(!proxiedAbs.startsWith(targetBase) && decodeURIComponent(proxiedAbs).includes(`${targetBase}/art.png`), `artwork address: ${proxiedAbs}`);
+    assert.ok(proxiedRel.endsWith('/rel.png'), `relative artwork address: ${proxiedRel}`);
   });
   await t.test('localStorage and sessionStorage inherit from Object.prototype and Storage.prototype, as natively', async () => {
     const targetBase = `http://${targetHost}:${targetPort}`;

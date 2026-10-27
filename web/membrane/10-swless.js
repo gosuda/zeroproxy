@@ -71,6 +71,10 @@
   const swLessDocs = newWeakMap();
   function documentIsSWLess(doc) {
     if (!doc || doc === document) return false;
+    // A document with no window (a `<template>`'s content, `DOMParser`, `createHTMLDocument`) loads nothing, and natively nothing is requested for what the page puts in it
+    // (FAST's templates hold `fast-x{…}fast-x` placeholders in `src` attributes). Its attributes get the proxy path like a live document's; if its nodes are adopted into a
+    // document, the proxy path is what that document loads (or, in a SW-less frame, upgrades).
+    try { if (!doc.defaultView) return false; } catch { return false; }
     let cached = swLessDocs.get(doc);
     if (cached !== undefined) return cached;
     let url = null;
