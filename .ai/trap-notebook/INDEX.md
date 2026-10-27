@@ -6,6 +6,8 @@ Keep each summary to a single line under 160 characters and point every detail l
 
 | Date | Category | Summary | Detail |
 |---|---|---|---|
+| 2026-10-27 | transport / TLS | DCInside: a server that prefers a legacy suite picked a decoy the stack cannot negotiate; one retry with a hello that lists only implemented suites. | tls-fingerprint.md#tls-legacy-suite-retry-2026-10-27 |
+| 2026-10-27 | child windows | Tistory: a child window's string timers ran unrewritten and its native operations refused the page's window (rrweb idiom); strings rewritten, receivers mapped. | rewriter.md#child-window-operations-2026-10-27 |
 | 2026-10-26 | membrane / selectors | Selectors on URL attributes read the proxy path, so loaders found nothing and loaded twice (BBC, Medium, Yahoo); translated to the literal stash. | rewriter.md#url-attribute-selectors-2026-10-26 |
 | 2026-10-26 | membrane / modules | Medium: page-side rewrites wrote root-relative module URLs, which a blob-loaded inline module cannot resolve; the proxy origin is passed now. | rewriter.md#inline-module-origin-2026-10-26 |
 | 2026-10-26 | rewriter / membrane | YouTube: a wrong rebase table printed a marker into an 11 MB bundle (parse error); window receivers for EventTarget methods; innerText redefinable. | rewriter.md#youtube-home-2026-10-26 |

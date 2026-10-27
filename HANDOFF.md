@@ -40,6 +40,9 @@ All Phase 2 security and compatibility gates in [`PHASE2_STATUS.md`](PHASE2_STAT
    - A runtime `modulepreload` link is suppressed with its `rel` and `href` removed, so a selector or `getAttribute('href')` on it finds nothing (inert in the proxy).
    - Bing: `/identity/idtokenv2` answers an empty body and the service worker returns 502 `MALFORMED_HTML`; the page matches native with it.
    - Twitch: 1 612 against 1 688 elements, no page error on either side; not examined.
+   - A `<script src="data:…">` is blocked, as unrewritten code must not run (11st's `data-modern` feature detector; the page renders identically). The `blob:` case is routed through a rewritten copy (`routeBlobScript`); `data:` could be decoded and routed the same way.
+   - Coupang and eBay: the Akamai bot-manager sensor throws `Function.prototype.apply was called on undefined` through `__zp_call` only when proxied (page unaffected; native runs none). Not pursued: the script is obfuscated and telling bots apart is not a goal.
+   - A server that offers only CBC or static-RSA cipher suites is unreachable (the TLS stack implements neither); a server that prefers one is reached by the retry.
    - Looked at and decided against: attribute selectors inside stylesheets (68 selectors on 19 sites, none matches differently; [`real-site-compat.md`](.ai/trap-notebook/real-site-compat.md#stylesheet-url-selectors-2026-10-26)).
 
 ## 3. Build, Run, and Diagnostic Workflow
