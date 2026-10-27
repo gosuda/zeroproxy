@@ -6,6 +6,9 @@ Keep each summary to a single line under 160 characters and point every detail l
 
 | Date | Category | Summary | Detail |
 |---|---|---|---|
+| 2026-10-27 | service worker / documents | An empty document with a non-UTF-8 charset read as a failed transform and became a 502 page; empty in, empty out. | sw-integration.md#empty-document-charset-2026-10-27 |
+| 2026-10-27 | membrane / inert documents | Bing: images in template and DOMParser documents were fetched (natively none), and a template attribute lost its literal (FAST markers). | rewriter.md#inert-document-images-2026-10-27 |
+| 2026-10-27 | membrane / surface | Twitch: media session metadata with artwork threw (a plain object reached the native setter); a native MediaMetadata is built now. | rewriter.md#media-session-metadata-2026-10-27 |
 | 2026-10-27 | transport / TLS | DCInside: a server that prefers a legacy suite picked a decoy the stack cannot negotiate; one retry with a hello that lists only implemented suites. | tls-fingerprint.md#tls-legacy-suite-retry-2026-10-27 |
 | 2026-10-27 | child windows | Tistory: a child window's string timers ran unrewritten and its native operations refused the page's window (rrweb idiom); strings rewritten, receivers mapped. | rewriter.md#child-window-operations-2026-10-27 |
 | 2026-10-26 | membrane / selectors | Selectors on URL attributes read the proxy path, so loaders found nothing and loaded twice (BBC, Medium, Yahoo); translated to the literal stash. | rewriter.md#url-attribute-selectors-2026-10-26 |
