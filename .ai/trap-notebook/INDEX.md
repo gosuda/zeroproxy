@@ -6,6 +6,10 @@ Keep each summary to a single line under 160 characters and point every detail l
 
 | Date | Category | Summary | Detail |
 |---|---|---|---|
+| 2026-10-27 | membrane / cookies | Notion: the cookieStore facade refused EventTarget methods a page took from the prototype chain (Sentry over airgap); answered for the facade. | rewriter.md#cookie-store-event-methods-2026-10-27 |
+| 2026-10-27 | rewriter / membrane | Notion: Error.prepareStackTrace read through an alias of Error returned the membrane sanitizer; such reads are routed now. | rewriter.md#stack-hook-alias-2026-10-27 |
+| 2026-10-27 | rewriter / modules | Instagram, Facebook, 11st: data: scripts and static data: imports were blocked; the service worker decodes and rewrites them on its script route. | rewriter.md#data-scripts-2026-10-27 |
+| 2026-10-27 | membrane / window facade | TikTok: native window accessors and bound methods refused the page window as receiver (privacy framework, react-idle-timer); mapped. | rewriter.md#window-receivers-2026-10-27 |
 | 2026-10-27 | service worker / documents | An empty document with a non-UTF-8 charset read as a failed transform and became a 502 page; empty in, empty out. | sw-integration.md#empty-document-charset-2026-10-27 |
 | 2026-10-27 | membrane / inert documents | Bing: images in template and DOMParser documents were fetched (natively none), and a template attribute lost its literal (FAST markers). | rewriter.md#inert-document-images-2026-10-27 |
 | 2026-10-27 | membrane / surface | Twitch: media session metadata with artwork threw (a plain object reached the native setter); a native MediaMetadata is built now. | rewriter.md#media-session-metadata-2026-10-27 |
