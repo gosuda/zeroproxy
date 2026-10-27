@@ -1,0 +1,20 @@
+lexical 6.1.1 (crates.io), replaced rather than forked.
+
+Why: GHSA-c2hm-mjxv-89r4 (`lexical` <= 6.1.1) and GHSA-2326-pfpj-vx3h (`lexical-core` < 1.0.0) are soundness advisories in the crate's unsafe code (`Bytes::read`,
+`BytesIter::read`, `write_float`, `radix`). The fixed releases are lexical 7 and lexical-core 1, but every published `swc_css_parser` (23 to 26) requires `lexical ^6.1`, so a
+version bump of the parser does not reach them.
+
+What: `swc_css_parser` calls only `lexical::parse` (three sites: the tokenizer's number, and the `An+B` offsets in the selector parser), on text its tokenizer has already
+checked. This crate keeps that one function and its generic shape (`parse::<N, Bytes: AsRef<[u8]>>`), implemented with the standard library's `FromStr`. It is version 6.1.2 so
+the parser's `^6.1` requirement is met, and the workspace `[patch.crates-io]` points `lexical` here. `lexical`, `lexical-core`, `lexical-parse-float`,
+`lexical-parse-integer` and `lexical-util` are gone from Cargo.lock.
+
+Differences from lexical 6, checked against the real 6.1.1 on 1.5 million random inputs (CSS number shapes up to 400 digits with sign, fraction and exponent for `f64`; signed
+digit runs up to 12 digits for `i32`, the `An+B` offsets):
+- `f64`: identical on every input, bit for bit, and on the hand-picked edges (`1.e3`, `-0`, `inf`, `nan`, empty, a lone sign or dot, separators, hex, whitespace, non-ASCII digits).
+- `i32` within range: identical. Outside it (about 345 thousand of the inputs) lexical 6 either wrapped (`6255912584` gave 1960945288, 21 580 inputs) or returned an error
+  (323 366 inputs), and `swc_css_parser` answers an error with `unreachable!`, a panic on a page's `:nth-child(9999999999n)`. The stand-in clamps to the type's range, as CSS does.
+- Error values: one kind (`InvalidNumber`) instead of lexical's detailed ones; only their `Debug` is used. Digit separators and other radixes, which lexical can be configured to
+  accept, are not (the tokenizer never produces them).
+
+Re-check when `swc_css_parser` moves to a `lexical` release without the advisories: then this directory and the patch line can be deleted.

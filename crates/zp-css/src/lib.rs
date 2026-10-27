@@ -216,6 +216,20 @@ mod tests {
         assert!(out.code.contains("/zp/api/fetch?url=https%3A%2F%2Fexample.com%2Fimg%2Fbg.png"), "got: {}", out.code);
     }
 
+    // `swc_css_parser` turns the text of a number and of an `An+B` offset into a value with `lexical::parse` and panics (`unreachable!`) when that fails. `lexical` is the
+    // stand-in in third_party-lexical (the real crate's releases carry soundness advisories), which clamps an integer out of range, as CSS does, where the real one wrapped or failed.
+    #[test]
+    fn numbers_and_nth_offsets_out_of_range_do_not_panic_the_parser() {
+        let (base, prefix) = opts();
+        let css = "li:nth-child(99999999999n+99999999999) { width: 1e999px; margin: -1e999px; flex: 0.000000000000000000001; background: url(/a.png) }\n\
+                   li:nth-last-child(-n-99999999999) { z-index: 99999999999999999999 }\n\
+                   p { line-height: 1.5e+3; opacity: .5; top: -.5em; left: +7px }";
+        let out = rewrite_css(css, base, prefix, "");
+        assert!(out.ok, "rewrite failed: {}", out.error);
+        assert!(out.code.contains("/zp/api/fetch?url=https%3A%2F%2Fexample.com%2Fa.png"), "got: {}", out.code);
+        assert!(out.code.contains("nth-child(99999999999n+99999999999)"), "the selector is kept as written: {}", out.code);
+    }
+
     #[test]
     fn skips_data_blob_javascript_schemes() {
         let (base, prefix) = opts();
