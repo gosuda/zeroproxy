@@ -333,7 +333,7 @@ pub fn compose_rewrite_map(
 ///
 /// `script_url` is the script's absolute target URL. Relative `sources`
 /// entries in the upstream map are resolved against `script_url` so
-/// DevTools does not resolve them against the `/zp/api/sourcemap` endpoint.
+/// DevTools does not resolve them against the `/zp/api/sourcemaps` endpoint.
 pub fn chain_with_original_map(
     zp_map_json: &str,
     original_map_json: &str,
@@ -362,7 +362,7 @@ fn chain_with_original_map_impl(
     for i in 0..orig_map.get_source_count() {
         let src = orig_map.get_source(i).unwrap_or("");
         // Absolutise against the script so DevTools doesn't resolve the name
-        // against our `/zp/api/sourcemap` URL. Names that already carry a
+        // against our `/zp/api/sourcemaps` URL. Names that already carry a
         // scheme (`http:`, `webpack://`, etc.) are left untouched.
         let resolved = if src.is_empty() || src.contains("://") {
             src.to_string()
@@ -548,7 +548,7 @@ mod tests {
             .map(|i| chained_map.get_source(i).unwrap_or(""))
             .collect();
         // Resolved against the script URL so DevTools does not resolve the
-        // bare name against `/zp/api/sourcemap`.
+        // bare name against `/zp/api/sourcemaps`.
         assert!(
             sources.contains(&"https://cdn.example.com/original.ts"),
             "chained map must point at the absolutised original.ts, got {sources:?}"

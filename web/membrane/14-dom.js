@@ -50,7 +50,7 @@
   }
   function selectorTargetsZP(selector) {
     const s = String(selector || '').toLowerCase();
-    return s.includes('data-zp-') || s.includes('#__zp-boot') || s.includes('/zp/assets/') || s.includes('x-zeroproxy-icon');
+    return s.includes('data-zp-') || s.includes('#__zp-boot') || s.includes('/zp/Asset/') || s.includes('x-zeroproxy-icon');
   }
   // An attribute selector on a URL-bearing attribute (`script[src="…"]`, `a[href^="http"]`, `link[href$=".css"]`) is evaluated against the real attribute, which holds the proxy
   // path, while the page means the value `getAttribute` answers with: loaders look their own element up this way to avoid loading a script or stylesheet twice, and without the

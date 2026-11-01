@@ -26,7 +26,7 @@ Historical category summaries, not current approved specifications. Recorded mea
 <a id="2026-05-29-server-web-arg-trap"></a>
 ## 2026-05-29: Misconfigured server `-web` flag
 
-- Cause: Passing `-web web` points to the source tree instead of the `wasm-bindgen` output under `dist/web/__zp/`. Failed `os.Open` calls result in 503 responses and a missing Service Worker controller.
+- Cause: Passing `-web web` points to the source tree instead of the `wasm-bindgen` output under `dist/web/Asset/`. Failed `os.Open` calls result in 503 responses and a missing Service Worker controller.
 - Rule: Pass `-web dist/web` or an absolute path; use `-web "$(realpath dist/web)"` to avoid Windows or non-ASCII path resolution issues.
 - Status at the time: Asserting the presence of `__zp/zp_bundle_sw.js` at startup was proposed but unverified.
 

@@ -6,7 +6,6 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "build:web": "node scripts/build.mjs --web-only",
-    "build:kernel": "node scripts/build.mjs --kernel-only",
     "build:server": "node scripts/build.mjs --server-only",
     "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
     "test": "node scripts/test.mjs",

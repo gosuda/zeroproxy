@@ -11,27 +11,14 @@
     const ab = await req.clone().arrayBuffer();
     return new Uint8Array(ab);
   }
-  // `/zp/api/v2/fetch` accepts binary envelopes. Fall back to v1 (base64-in-JSON)
-  // if a 404 without `X-ZP-Fetch-Meta` indicates an older Service Worker.
-  let v2FetchOK = true;
+  // `/zp/api/v2/fetch` takes a binary envelope: [u32 head length][JSON head][raw body].
   async function postRuntimeEnvelope(target, payload, bodyBytes, extraInit) {
     // Wait for pending cookie writes before dispatching the request.
     const written = cookieWritesSettled();
     if (written) await written;
     const label = '?url=' + encodeURLParam(target);
-    if (v2FetchOK) {
-      try {
-        const r = await Native.fetch(proxyOrigin + ZP.apiPath('v2/fetch') + label,
-          Object.assign({ method: 'POST', headers: { 'Content-Type': ZP.ENVELOPE_MIME }, body: ZP.encodeEnvelope(payload, bodyBytes) }, extraInit || {}));
-        if (r.status === 404 && !r.headers.get('X-ZP-Fetch-Meta')) { v2FetchOK = false; try { r.arrayBuffer().catch(() => {}); } catch {} }
-        else return r;
-      } catch (e) { /* Fall back to v1 */ }
-    }
-    payload.init.body = bodyBytes ? ZP.bytesToBase64Url(bodyBytes) : null;
-    const r = await Native.fetch(proxyOrigin + ZP.apiPath('fetch') + label,
-      Object.assign({ method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }, extraInit || {}));
-    v2FetchOK = false;
-    return r;
+    return Native.fetch(proxyOrigin + ZP.apiPath('v2/fetch') + label,
+      Object.assign({ method: 'POST', headers: { 'Content-Type': ZP.ENVELOPE_MIME }, body: ZP.encodeEnvelope(payload, bodyBytes) }, extraInit || {}));
   }
   // `blob:` and `data:` URLs are inline resources resolved locally by the browser;
   // routing them through the proxy would replace their content with a proxy response.
@@ -69,7 +56,7 @@
       init: {
         method: req.method,
         headers: Array.from(req.headers.entries()),
-        // v2 carries the body in the envelope tail; v1 fallback populates `init.body` in base64.
+        // The body travels in the envelope tail, not in the head.
         body: null,
         credentials: req.credentials,
         mode: (internal && internal.mode) || req.mode,

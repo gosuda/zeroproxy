@@ -1,6 +1,6 @@
 # Website Compatibility Design and Refactor Tracks
 
-This document defines the architecture, layer ownership boundaries, and refactor tracks (`R0` through `R5`) for improving real-world website compatibility while preserving ZeroProxy's containment guarantees. Resolved defects and open residuals are tracked in [`ERRATA.md`](../../ERRATA.md) and [`PHASE2_STATUS.md`](../../PHASE2_STATUS.md).
+This document defines the architecture, layer ownership boundaries, and refactor tracks (`R0` through `R5`) for improving real-world website compatibility while preserving ZeroProxy's containment guarantees. Open residuals are tracked in [`docs/errata.md`](../../docs/errata.md) and the gate evidence in [`docs/containment-gates.md`](../../docs/containment-gates.md).
 
 ## 1. Core Compatibility Mechanisms
 

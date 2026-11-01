@@ -80,18 +80,6 @@ type syncFetchResult struct {
 	Err        string
 }
 
-// syncFetchLegacyResult supports the JSON fallback format for older Service
-// Worker instances still active in a tab.
-type syncFetchLegacyResult struct {
-	ID         string     `json:"id"`
-	Status     int        `json:"status"`
-	StatusText string     `json:"statusText"`
-	Headers    [][]string `json:"headers"`
-	V          string     `json:"v"`
-	BodyB64    string     `json:"bodyB64"`
-	Err        string     `json:"err"`
-}
-
 type syncFetchHub struct {
 	mu        sync.Mutex
 	jobs      map[string]*syncFetchJob
@@ -369,22 +357,12 @@ func (s *server) handleSyncFetchResult(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// readSyncResult parses a binary result payload (metadata in headers, raw bytes
-// in body) or falls back to the JSON envelope format.
+// readSyncResult parses a result payload: metadata in X-ZP-Sync-* headers and
+// the raw response bytes in the body.
 func readSyncResult(w http.ResponseWriter, r *http.Request) (string, *syncFetchResult, error) {
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 32<<20))
 	if err != nil {
 		return "", nil, err
-	}
-	if strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") {
-		var p syncFetchLegacyResult
-		if err := json.Unmarshal(body, &p); err != nil {
-			return "", nil, err
-		}
-		return p.ID, &syncFetchResult{
-			Status: p.Status, StatusText: p.StatusText, Headers: p.Headers,
-			V: p.V, Body: decodeB64(p.BodyB64), Err: p.Err,
-		}, nil
 	}
 	id := r.Header.Get("X-ZP-Sync-Id")
 	if id == "" {

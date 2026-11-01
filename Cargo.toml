@@ -12,14 +12,10 @@ members = [
     "crates/zp-page-bundle",
     "crates/zp-page-rt",
 ]
-# zp-bundle absorbs the former zp-kernel / zp-membrane / zp-wtproxy-client /
-# zp-rtcgw-client crates as internal modules (they all link into the same
-# cdylib regardless). zp-shared stays separate for the Go parity boundary,
-# and zp-page-rt stays separate to avoid wasm-bindgen + raw-extern-"C"
-# dead-strip interference (see trap-notebook 2026-05-30 wasm-page-rt entry).
-# 2026-06-08 split-bundle (c.1) Step 4: rewriter-rs/ crate deleted. Both JS
-# and CSS rewriters now live in zp-rewriter / zp-bundle (modern OXC 0.133
-# for JS, SWC for CSS).
+# zp-shared stays separate for the Go parity boundary, and zp-page-rt stays
+# separate to avoid wasm-bindgen + raw-extern-"C" dead-strip interference
+# (see the wasm-page-rt entries in .ai/trap-notebook). The JS rewriter lives in
+# zp-rewriter (OXC 0.133) and the CSS rewriter in zp-css (SWC).
 exclude = ["third_party-rustls-fork", "third_party-h2-fork", "third_party-rustls-rustcrypto", "third_party-lexical"]
 
 [workspace.package]
@@ -27,7 +23,7 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.80"
 license = "Apache-2.0"
-repository = "https://github.com/teamlitmus/zeroproxy"
+repository = "https://github.com/gosuda/zeroproxy"
 
 [workspace.dependencies]
 zp-shared = { path = "crates/zp-shared" }

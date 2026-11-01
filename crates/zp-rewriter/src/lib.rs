@@ -78,7 +78,6 @@ impl std::str::FromStr for ScriptKind {
 pub struct RewriteOpts {
     pub kind: ScriptKind,
     pub target_url: String,
-    pub strict: bool,
     /// Proxy origin (e.g. `http://proxy.localhost:18080`). Dynamic-import URLs
     /// are emitted absolute against it. A root-relative `/zp/api/script?…`
     /// resolves against the importing context's base, which the membrane
@@ -356,7 +355,7 @@ fn is_helper_prefix_declaration(decl: &VariableDeclaration<'_>) -> bool {
 }
 
 /// What a script that names a reserved helper becomes: it throws before running anything. An error result would not
-/// do because a non-strict caller runs the unrewritten source when the rewrite fails. No braces, so the dynamic-function
+/// do because a caller that ignores the error would run the unrewritten source. No braces, so the dynamic-function
 /// unwrappers (which slice the body out between the first `{` and the last `}`) refuse it as well.
 fn reserved_name_patch(source_len: usize, name: &str) -> Patch {
     Patch {
@@ -390,7 +389,7 @@ pub fn rewrite_script_patches(
     let allocator = Allocator::default();
     let (ret, kind) = parse_for_kind(&allocator, source, opts.kind);
 
-    if !ret.errors.is_empty() && opts.strict {
+    if !ret.errors.is_empty() {
         let msg = ret
             .errors
             .iter()
@@ -496,7 +495,7 @@ pub fn rewrite_script(source: &str, opts: &RewriteOpts) -> Result<RewriteResult,
     let allocator = Allocator::default();
     let (ret, kind) = parse_for_kind(&allocator, source, opts.kind);
 
-    if !ret.errors.is_empty() && opts.strict {
+    if !ret.errors.is_empty() {
         let msg = ret
             .errors
             .iter()
@@ -1755,7 +1754,7 @@ impl RewriterInstance {
         // for the next call.
         let (ret, kind) = parse_for_kind(&self.allocator, source, opts.kind);
 
-        if !ret.errors.is_empty() && opts.strict {
+        if !ret.errors.is_empty() {
             let msg = ret
                 .errors
                 .iter()
@@ -1798,7 +1797,7 @@ impl RewriterInstance {
     ) -> Result<RewriteResult, RewriteError> {
         let (ret, kind) = parse_for_kind(&self.allocator, source, opts.kind);
 
-        if !ret.errors.is_empty() && opts.strict {
+        if !ret.errors.is_empty() {
             let msg = ret
                 .errors
                 .iter()
@@ -4970,7 +4969,6 @@ mod tests {
         RewriteOpts {
             kind: ScriptKind::Classic,
             target_url: "https://example.com/".into(),
-            strict: true,
             proxy_origin: "http://proxy.localhost:18080".into(),
         }
     }
@@ -5030,7 +5028,6 @@ mod tests {
         let o = RewriteOpts {
             kind: ScriptKind::Module,
             target_url: "https://cdn.example.com/a/b.js".into(),
-            strict: true,
             proxy_origin: "http://proxy.localhost:18080".into(),
         };
         let out = rewrite_script("const p = import(base + '/mod.js');", &o)
@@ -5056,7 +5053,6 @@ mod tests {
         let o = RewriteOpts {
             kind: ScriptKind::Classic,
             target_url: "https://cdn.example.com/a/b.js".into(),
-            strict: true,
             proxy_origin: "http://proxy.localhost:18080".into(),
         };
         let out = rewrite_script("import(u.replace('.png','.js'));", &o)
@@ -5090,7 +5086,6 @@ mod tests {
         let o = RewriteOpts {
             kind: ScriptKind::Module,
             target_url: "https://cdn.example.com/a/b.js".into(),
-            strict: true,
             proxy_origin: "http://proxy.localhost:18080".into(),
         };
         let out = rewrite_script("import('./mod.js');", &o).unwrap().code;
@@ -5120,7 +5115,7 @@ mod tests {
     }
 
     #[test]
-    fn html_body_must_parse_error_under_strict_mode() {
+    fn html_body_must_parse_error() {
         // Strict-mode parse rejection is required for the SW's fail-closed posture
         // when an upstream returns an HTML error page for a script subresource.
         for html in &[
@@ -5258,7 +5253,7 @@ mod tests {
         // Verify that both `rewrite_script` (full re-emit) and `rewrite_script_patches`
         // + `apply_patches` (patch envelope) produce identical, syntactically valid JS
         // on the real-world `ndp-loader-fixture.js` bundle.
-        let src = include_str!("ndp-loader-fixture.js");
+        let src = include_str!("../tests/fixtures/ndp-loader-fixture.js");
         let alloc1 = oxc_allocator::Allocator::default();
         let st = oxc_span::SourceType::cjs();
         let r1 = rewrite_script(src, &opts()).expect("full re-emit must succeed");
@@ -5433,7 +5428,6 @@ mod tests {
             kind: ScriptKind::Module,
             target_url: "https://ssl.pstatic.net/tveta/libs/glad/prod/3.10.7/gfp-display-sdk.js"
                 .to_string(),
-            strict: true,
             proxy_origin: "http://proxy.localhost:18080".to_string(),
         };
         // Every static form that carries a specifier, plus dynamic import for
@@ -5485,7 +5479,6 @@ mod tests {
         let opts = RewriteOpts {
             kind: ScriptKind::Module,
             target_url: "https://github.githubassets.com/assets/app-runtime.js".to_string(),
-            strict: true,
             proxy_origin: "http://proxy.localhost:18080".to_string(),
         };
         // Bundlers derive `publicPath` from `import.meta.url`. If the proxy URL leaks,
@@ -5510,7 +5503,6 @@ mod tests {
         let bare = RewriteOpts {
             kind: ScriptKind::Module,
             target_url: String::new(),
-            strict: true,
             proxy_origin: String::new(),
         };
         let r3 = rewrite_script("const p = import.meta.url;", &bare).unwrap();
@@ -5522,7 +5514,6 @@ mod tests {
         let opts = RewriteOpts {
             kind: ScriptKind::Module,
             target_url: "https://example.com/dir/app.js".to_string(),
-            strict: true,
             proxy_origin: "http://proxy.localhost:18080".to_string(),
         };
         // Native `import.meta.resolve` resolves against the module's physical URL
@@ -5540,7 +5531,6 @@ mod tests {
         let bare = RewriteOpts {
             kind: ScriptKind::Module,
             target_url: String::new(),
-            strict: true,
             proxy_origin: String::new(),
         };
         let r2 = rewrite_script("const u = import.meta.resolve('./x');", &bare).unwrap();
@@ -5552,7 +5542,6 @@ mod tests {
         let opts = RewriteOpts {
             kind: ScriptKind::Module,
             target_url: "https://example.com/app/main.js".to_string(),
-            strict: true,
             proxy_origin: "http://proxy.localhost:18080".to_string(),
         };
         // Bare specifiers are package names with no URL semantics, and blob: modules
@@ -6717,49 +6706,6 @@ import * as c from \"data:text/javascript,export default 2\";";
 }
 
 #[cfg(test)]
-mod naver_js_perf {
-    use super::*;
-    // Diagnostic: NAVER ships ~1.5 MB of JS (main 706 KB, search 294 KB,
-    // polyfill 261 KB, preload 197 KB). Every one is rewritten by OXC on the
-    // Service Worker's single thread. Whatever this costs natively, the SW is
-    // blocked for at least that long in production (wasm is slower still) —
-    // no fetch handling, no stream pumping, CDP unresponsive.
-    #[test]
-    #[ignore]
-    fn time_naver_bundles() {
-        let dir = std::env::var("ZP_NAVER_JS_DIR").expect("set ZP_NAVER_JS_DIR");
-        let mut total = 0u128;
-        for name in [
-            "main.fdb73099.js",
-            "search.ff8beebc.js",
-            "polyfill.9d57c570.js",
-            "preload.7ebb5d79.js",
-        ] {
-            let p = format!("{dir}/{name}");
-            let src = match std::fs::read_to_string(&p) {
-                Ok(s) => s,
-                Err(e) => {
-                    println!("skip {name}: {e}");
-                    continue;
-                }
-            };
-            let opts = RewriteOpts {
-                kind: ScriptKind::Classic,
-                target_url: "https://pm.pstatic.net/".into(),
-                strict: true,
-                proxy_origin: "http://proxy.localhost:18080".into(),
-            };
-            let t = std::time::Instant::now();
-            let r = rewrite_script(&src, &opts);
-            let ms = t.elapsed().as_millis();
-            total += ms;
-            println!("{name}: {}B -> {} ms (ok={})", src.len(), ms, r.is_ok());
-        }
-        println!("TOTAL native: {total} ms");
-    }
-}
-
-#[cfg(test)]
 mod dynamic_import_probe {
     use super::*;
     // Relative dynamic imports must route through the script-proxy URL in both
@@ -6772,7 +6718,6 @@ mod dynamic_import_probe {
             let opts = RewriteOpts {
                 kind,
                 target_url: "https://ssl.pstatic.net/tveta/libs/glad/prod/gfp-core.js".into(),
-                strict: true,
                 proxy_origin: "http://proxy.localhost:18080".into(),
             };
             let src = r#"async function f(){ const m = await import("./gfp-display-sdk.js"); return m; }"#;

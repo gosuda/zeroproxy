@@ -161,7 +161,7 @@
     }
 
     // Classifies N URLs in a single WASM call. Returns a Uint32Array view into scratch memory where each entry is
-    // `(class << 16) | (handle & 0xFFFF)`, or null if the batch exceeds SCRATCH_CAP.
+    // `(class << 28) | handle` (4-bit class, 28-bit handle), or null if the batch exceeds SCRATCH_CAP.
     // Scratch layout (8-byte aligned base):
     //   [0  .. 4N) : little-endian u32 lengths
     //   [4N .. 8N) : output u32[N]
@@ -216,8 +216,8 @@
       return new Uint32Array(memU8().buffer, outPtr, N);
     }
 
-    function batchClass(packed) { return (packed >>> 16) & 0xFFFF; }
-    function batchHandleLow(packed) { return packed & 0xFFFF; }
+    function batchClass(packed) { return packed >>> 28; }
+    function batchHandle(packed) { return packed & 0x0FFFFFFF; }
 
     function reset() { ex.pool_reset(); }
 
@@ -242,7 +242,7 @@
       classifySchemeOnly,
       classifyBatch,
       batchClass,
-      batchHandleLow,
+      batchHandle,
       viewURL,
       reset,
       stats,

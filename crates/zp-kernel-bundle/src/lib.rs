@@ -6,17 +6,18 @@
 //! fetch happens (first `transportFetch`), so it is fetched and instantiated
 //! lazily via `self.ZPKernelWBG`.
 
-#![cfg(target_arch = "wasm32")]
+pub mod dial;
 
+#[cfg(target_arch = "wasm32")]
 pub mod kernel;
-pub mod membrane;
-pub mod rtcgw_client;
-pub mod wtproxy_client;
 
+#[cfg(target_arch = "wasm32")]
 pub use kernel::transport::dialer;
 
+#[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
 
+#[cfg(target_arch = "wasm32")]
 #[wasm_bindgen(start)]
 pub fn init() {
     // Diagnostic panic hook: a Rust panic in wasm compiles to an opaque

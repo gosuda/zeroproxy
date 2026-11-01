@@ -19,7 +19,7 @@
     try {
       const factory = root.__zp_bridge_factory;
       if (typeof factory === 'function') {
-        const b = factory(ctx);
+        const b = factory(realmHandle);
         if (b && typeof b.send === 'function') return b;
       }
     } catch {}

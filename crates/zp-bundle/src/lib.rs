@@ -6,8 +6,8 @@
 //! and is loaded lazily on first `transportFetch`.
 //!
 //! Loaded by the Service Worker (`web/sw.js`) via
-//! `importScripts('/__zp/zp_bundle_sw.js')` and `wbg({ module_or_path:
-//! '/__zp/zp_bundle_sw_bg.wasm' })` inside `initBundle()`.
+//! `importScripts('/zp/Asset/zp-bundle.js')` and `wbg({ module_or_path:
+//! '/zp/Asset/zp-bundle.wasm' })` inside `initBundle()`.
 //!
 //! The page realm uses `zp-page-bundle`, a smaller cdylib that omits HTML,
 //! CSS, source-map, and CSP exports.
@@ -19,7 +19,7 @@ pub use zp_css as css;
 use std::cell::RefCell;
 
 use wasm_bindgen::prelude::*;
-use zp_engine::{DocCtx, TransformEngine};
+use zp_engine::{parse_script_kind, DocCtx, TransformEngine};
 
 thread_local! {
     /// Thread-local engine shared across WASM exports so warm-path rewrites
@@ -90,7 +90,7 @@ pub fn bundle_version() -> String {
 #[wasm_bindgen(js_name = rewriteScript)]
 pub fn rewrite_script_js(source: &str, kind: &str, target_url: &str, proxy_origin: &str) -> Result<String, JsError> {
     let ctx = DocCtx::new(target_url, proxy_origin);
-    with_engine(|e| e.rewrite_script(source, kind, &ctx))
+    with_engine(|e| e.rewrite_script(source, parse_script_kind(kind)?, &ctx))
 }
 
 /// Patch-mode script rewrite. Returns a flat JSON patch list that the caller
@@ -110,12 +110,12 @@ pub fn rewrite_script_patches_js(
     proxy_origin: &str,
 ) -> Result<String, JsError> {
     let ctx = DocCtx::new(target_url, proxy_origin);
-    with_engine(|e| e.rewrite_script_patches_json(source, kind, &ctx))
+    with_engine(|e| e.rewrite_script_patches_json(source, parse_script_kind(kind)?, &ctx))
 }
 
 /// Source-map composer: returns a Source Map v3 JSON document mapping the
 /// rewritten script back to the original source. Served by the Service Worker
-/// at `/__zp/sourcemap?u=<targetUrl>&k=<kind>` so DevTools breakpoints on
+/// at `/zp/api/sourcemaps?u=<targetUrl>&k=<kind>` so DevTools breakpoints on
 /// rewritten (`__zp_*`-wrapped) code resolve to original identifiers.
 #[wasm_bindgen(js_name = composeSourceMap)]
 pub fn compose_source_map_js(
@@ -125,7 +125,7 @@ pub fn compose_source_map_js(
     proxy_origin: &str,
 ) -> Result<String, JsError> {
     let ctx = DocCtx::new(target_url, proxy_origin);
-    with_engine(|e| e.compose_source_map(source, kind, &ctx, target_url))
+    with_engine(|e| e.compose_source_map(source, parse_script_kind(kind)?, &ctx, target_url))
 }
 
 /// Composes the rewriter source map and chains it with the target site's
@@ -142,7 +142,7 @@ pub fn compose_source_map_chained_js(
 ) -> Result<String, JsError> {
     let ctx = DocCtx::new(target_url, proxy_origin);
     with_engine(|e| {
-        e.compose_source_map_chained(source, kind, &ctx, target_url, original_map_json)
+        e.compose_source_map_chained(source, parse_script_kind(kind)?, &ctx, target_url, original_map_json)
     })
 }
 
@@ -209,7 +209,7 @@ impl HtmlTxn {
 /// `control_prefix` is typically `/zp/`.
 ///
 /// When `proxy_origin` (e.g. `http://proxy.localhost:18080`) is non-empty,
-/// emitted `/zp/api/fetch?url=...` URLs are absolute so they do not resolve
+/// emitted `/zp/api/v2/fetch?url=...` URLs are absolute so they do not resolve
 /// against a virtualized target `<base>` inside proxied iframes.
 #[wasm_bindgen(js_name = rewriteCSS)]
 pub fn rewrite_css_js(

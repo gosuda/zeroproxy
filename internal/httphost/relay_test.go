@@ -201,9 +201,9 @@ func TestBridgeInternalSOCKSBlocksLinkLocalAndPrivateTargets(t *testing.T) {
 	defer ln.Close()
 	port := uint16(ln.Addr().(*net.TCPAddr).Port)
 
-	disallowSrv := &server{socksAddr: internalSOCKSMode, disallowPrivateTargets: true}
+	disallowSrv := &server{socksAddr: internalSOCKSMode, targetPolicy: TargetPolicyBlockPrivate}
 	if rep := dialSOCKS5IPv4(t, disallowSrv, net.ParseIP("127.0.0.1"), port); rep == 0x00 {
-		t.Fatal("DisallowPrivateTargets must reject 127.0.0.1")
+		t.Fatal("TargetPolicyBlockPrivate must reject 127.0.0.1")
 	}
 
 	directSrv := &server{socksAddr: directSOCKSMode}
@@ -213,7 +213,10 @@ func TestBridgeInternalSOCKSBlocksLinkLocalAndPrivateTargets(t *testing.T) {
 }
 
 func TestCrossOriginRejectedOnPipeAndConfig(t *testing.T) {
-	h := NewHandler(Config{SocksAddr: internalSOCKSMode})
+	h, err := NewServer(Config{SocksAddr: internalSOCKSMode})
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	for _, path := range []string{"/zp/ws-pipe", "/zp/api/config"} {
 		req := httptest.NewRequest(http.MethodGet, "http://proxy.localhost:8080"+path, nil)

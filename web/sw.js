@@ -1,9 +1,12 @@
 /* ZeroProxy Service Worker: controlled network requests are routed through the Rust WASM kernel. */
-importScripts('/zp/assets/zp-core.js?v=__ZP_BUILD_ID__');
+importScripts('/zp/Asset/zp-core.js?v=__ZP_BUILD_ID__');
 // SW importScripts only succeeds during initial script evaluation, so load both
 // WASM JS glue bundles at top level and instantiate their WASM modules lazily.
-importScripts('/__zp/zp_bundle_sw.js?v=__ZP_BUILD_ID__');
-importScripts('/__zp/zp_kernel_sw.js?v=__ZP_BUILD_ID__');
+importScripts('/zp/Asset/zp-bundle.js?v=__ZP_BUILD_ID__');
+importScripts('/zp/Asset/zp-kernel.js?v=__ZP_BUILD_ID__');
+
+// The Service Worker uses the full runtime table; `globalThis.ZP` is only the embedder-facing subset.
+const ZP = self.__zp_internal;
 
 const nativeFetch = self.fetch.bind(self);
 const ORIGIN = self.location.origin;
@@ -203,13 +206,13 @@ function utf8Base64(s) {
   for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
   return btoa(bin);
 }
-// Rewrite `/zp/api/fetch?url=...` paths inside CSS delivered to uncontrolled documents into sync-fetch relay URLs, capped to prevent HTTP/1.1 connection exhaustion.
+// Rewrite `/zp/api/v2/fetch?url=...` paths inside CSS delivered to uncontrolled documents into sync-fetch relay URLs, capped to prevent HTTP/1.1 connection exhaustion.
 const MAX_RELAYED_CSS_URLS = 12;
 const CSS_URL_STOP = '"\') \t\r\n';
 async function relayifyCSSFetchURLs(resp, job) {
   let css;
   try { css = (await decodeResponseText(resp.clone(), false)).text; } catch { return resp; }
-  const marker = ZP.apiPath('fetch') + '?url=';
+  const marker = ZP.apiPath('v2/fetch') + '?url=';
   if (!css || css.indexOf(marker) < 0) return resp;
   let out = '';
   let i = 0;
@@ -587,7 +590,7 @@ async function initBundle() {
     throw new Error('REALM_INJECTION_FAILURE');
   }
   bundlePromise = (async () => {
-    await wbg({ module_or_path: '/__zp/zp_bundle_sw_bg.wasm?v=__ZP_BUILD_ID__' });
+    await wbg({ module_or_path: '/zp/Asset/zp-bundle.wasm?v=__ZP_BUILD_ID__' });
     // Read exports from the wbg factory properties rather than the raw wasm.exports return value so JS heap wrappers run.
     self.ZPBundle = Object.freeze({
       ready: true,
@@ -599,7 +602,7 @@ async function initBundle() {
         : null,
       transformHtml: (html, targetUrl) => wbg.transformHtml(html, targetUrl || '', ORIGIN),
       HtmlTxn: typeof wbg.HtmlTxn === 'function' ? wbg.HtmlTxn : null,
-      // Pass ORIGIN as proxyOrigin so emitted /zp/api/fetch URLs are absolute regardless of the consuming context's virtual base.
+      // Pass ORIGIN as proxyOrigin so emitted /zp/api/v2/fetch URLs are absolute regardless of the consuming context's virtual base.
       rewriteCSS: (source, baseUrl, controlPrefix, proxyOrigin) =>
         wbg.rewriteCSS(source, baseUrl || '', controlPrefix || '/zp/', proxyOrigin === undefined ? ORIGIN : (proxyOrigin || '')),
       composeSourceMap: (source, kind, targetUrl) =>
@@ -624,15 +627,13 @@ async function initKernel() {
     throw new Error('KERNEL_REALM_INJECTION_FAILURE');
   }
   kernelPromise = (async () => {
-    await wbg({ module_or_path: '/__zp/zp_kernel_sw_bg.wasm?v=__ZP_BUILD_ID__' });
+    await wbg({ module_or_path: '/zp/Asset/zp-kernel.wasm?v=__ZP_BUILD_ID__' });
     self.ZPKernel = Object.freeze({
       ready: true,
       kernelVersion: wbg.kernelVersion,
       kernelInit: wbg.kernelInit,
       kernelFetch: wbg.kernelFetch,
-      kernelEchoSync: wbg.kernelEchoSync,
       kernelStream: wbg.kernelStream,
-      kernelLastNamedGroups: wbg.kernelLastNamedGroups,
     });
     if (typeof self.ZPKernel.kernelFetch === 'function') {
       self.kernelFetch = self.ZPKernel.kernelFetch;
@@ -714,7 +715,7 @@ function internalPath(path) {
   return ZP.isInternalPath(path);
 }
 function isRuntimeAPIPath(path) {
-  return path === ZP.apiPath('fetch') || path === ZP.apiPath('v2/fetch') || path === ZP.apiPath('script') || path === ZP.apiPath('worker-script') || path === ZP.apiPath('sourcemap') || path === '/zp/api/diag/trace';
+  return path === ZP.apiPath('v2/fetch') || path === ZP.apiPath('script') || path === ZP.apiPath('worker-script') || path === ZP.apiPath('sourcemaps') || path === '/zp/api/diag/trace';
 }
 
 async function internalAsset(req, url) {
@@ -817,7 +818,7 @@ function shouldRewriteCSS(req, resp) {
   return /\btext\/css\b/i.test(ct);
 }
 async function rewriteCSSResponse(resp, opt) {
-  // Rewrite CSS url(...) and @import references to /zp/api/fetch?url=<absolute>, falling back to the original body on parse failure.
+  // Rewrite CSS url(...) and @import references to /zp/api/v2/fetch?url=<absolute>, falling back to the original body on parse failure.
   let css = '';
   try { css = (await decodeResponseText(resp, false)).text; } catch { return resp; }
   let out = css;
@@ -835,7 +836,7 @@ async function rewriteCSSResponse(resp, opt) {
 }
 
 // Native media elements fetch HLS variants, keys, and segments directly in the browser media stack, bypassing page hooks.
-// Rewrite playlist URIs to /zp/api/fetch?url=<absolute> when the request originates from a video or audio element.
+// Rewrite playlist URIs to /zp/api/v2/fetch?url=<absolute> when the request originates from a video or audio element.
 const PLAYLIST_TYPE_RE = /\b(?:application\/(?:vnd\.apple\.mpegurl|x-mpegurl|mpegurl)|audio\/(?:x-)?mpegurl)\b/i;
 const PLAYLIST_PATH_RE = /\.m3u8?$/i;
 function isMediaElementRequest(req) {
@@ -860,7 +861,7 @@ function playlistProxyURI(uri, baseUrl, tab) {
   let abs;
   try { abs = new URL(t, baseUrl); } catch { return uri; }
   if (abs.protocol !== 'http:' && abs.protocol !== 'https:') return uri;
-  return ORIGIN + ZP.apiPath('fetch') + '?url=' + encodeURIComponent(abs.href) + (tab ? '&tab=' + encodeURIComponent(tab.tabId) : '');
+  return ORIGIN + ZP.apiPath('v2/fetch') + '?url=' + encodeURIComponent(abs.href) + (tab ? '&tab=' + encodeURIComponent(tab.tabId) : '');
 }
 function rewritePlaylistText(text, baseUrl, tab) {
   return String(text).replace(/^﻿/, '').split(/(\r?\n)/).map(line => {
@@ -946,12 +947,6 @@ async function runtimeAPI(req, url, clientId) {
     const rawMatches = filter
       ? ring.filter(l => l.includes(filter)).slice(-50)
       : [];
-    let namedGroups = '';
-    try {
-      if (self.ZPKernel && typeof self.ZPKernel.kernelLastNamedGroups === 'function') {
-        namedGroups = self.ZPKernel.kernelLastNamedGroups();
-      }
-    } catch (e) { namedGroups = 'err: ' + (e && e.message); }
     return new Response(JSON.stringify({
       totalLines: ring.length,
       head,
@@ -960,14 +955,12 @@ async function runtimeAPI(req, url, clientId) {
       hostCount,
       slow,
       rawMatches,
-      namedGroups,
     }, null, 2), { status: 200, headers: { 'Content-Type': 'application/json' } });
   }
-  if (url.pathname === '/zp/api/fetch' || url.pathname === ZP.apiPath('v2/fetch')) {
-    // GET ?url=<absolute> serves rewritten CSS url(...) / @import subresources and iframe navigations (v1 only).
+  if (url.pathname === ZP.apiPath('v2/fetch')) {
+    // GET ?url=<absolute> serves rewritten CSS url(...) / @import subresources, media playlists, and iframe navigations; POST carries a runtime fetch envelope.
     const ctx = contextFor(req, clientId);
     if (req.method === 'GET') {
-      if (url.pathname !== ZP.apiPath('fetch')) return safeError('POLICY_BLOCKED', 405);
       const target = url.searchParams.get('url');
       if (!target) return safeError('MALFORMED_ROUTE', 400);
       const explicitTab = url.searchParams.get('tab') && tabs.get(url.searchParams.get('tab'));
@@ -1029,16 +1022,10 @@ async function runtimeAPI(req, url, clientId) {
       return shouldRewriteCSS(req, resp) ? rewriteCSSResponse(resp, { targetUrl: target }) : resp;
     }
     if (req.method !== 'POST') return safeError('POLICY_BLOCKED', 405);
-    // v2 uses a binary envelope ([u32le headLen][JSON head][raw body]) instead of base64-in-JSON.
-    const isV2 = url.pathname === ZP.apiPath('v2/fetch');
+    // The body is a binary envelope: [u32 head length][JSON head][raw body].
     let payload, bodyBytes;
-    if (isV2) {
-      try { const env = ZP.decodeEnvelope(await req.arrayBuffer()); payload = env.head; bodyBytes = env.body.length ? env.body : null; }
-      catch { return safeError('MALFORMED_ROUTE', 400); }
-    } else {
-      payload = await req.json();
-      bodyBytes = payload.init && payload.init.body != null ? ZP.base64UrlToBytes(payload.init.body) : null;
-    }
+    try { const env = ZP.decodeEnvelope(await req.arrayBuffer()); payload = env.head; bodyBytes = env.body.length ? env.body : null; }
+    catch { return safeError('MALFORMED_ROUTE', 400); }
     const explicitTab = payload.tabId && tabs.get(payload.tabId);
     if (explicitTab && ctx && explicitTab.tabId !== ctx.tabId) return Response.error();
     const tab = explicitTab || (ctx && tabs.get(ctx.tabId));
@@ -1116,7 +1103,7 @@ async function runtimeAPI(req, url, clientId) {
     const rewritten = await rewriteScriptResponse(upstream, { targetUrl: target, kind, req });
     return rewritten;
   }
-  if (url.pathname === ZP.apiPath('sourcemap')) {
+  if (url.pathname === ZP.apiPath('sourcemaps')) {
     // Serve composed Source Map v3 JSON for a rewritten script.
     const target = url.searchParams.get('u') || '';
     const kind = url.searchParams.get('k') || 'classic';
@@ -1822,12 +1809,12 @@ async function rewriteScriptResponse(resp, opt) {
     if (!code) {
       code = "throw new DOMException('Blocked by ZeroProxy rewrite policy','NotSupportedError');";
     } else {
-      // Append a sourceMappingURL pointing to /zp/api/sourcemap for classic, module, and worker scripts.
+      // Append a sourceMappingURL pointing to /zp/api/sourcemaps for classic, module, and worker scripts.
       const kind = opt.kind || 'classic';
       const target = opt.targetUrl || '';
       // A `data:` script is its own source: there is no address to fetch the map's input from.
       if (target && !/^data:/i.test(target) && (kind === 'classic' || kind === 'module' || kind === 'worker')) {
-        const mapURL = ZP.apiPath('sourcemap') + '?u=' + encodeURIComponent(target) + '&k=' + encodeURIComponent(kind);
+        const mapURL = ZP.apiPath('sourcemaps') + '?u=' + encodeURIComponent(target) + '&k=' + encodeURIComponent(kind);
         code = code + '\n//# sourceMappingURL=' + mapURL + '\n';
       }
       if (cacheKey) {
@@ -2112,19 +2099,6 @@ async function handleMessage(event) {
   }
   if (msg && msg.type === '__zpRefusalDump') {
     if (reply) reply.postMessage({ ok: true, refusals: refusalLog.slice(-MAX_REFUSAL_LOG) });
-    return;
-  }
-  if (msg && msg.type === '__zpKernelEchoTest') {
-    try { await initKernel(); } catch {}
-    let result;
-    try {
-      const echoFn = (self.ZPKernel && self.ZPKernel.kernelEchoSync) || (self.ZPKernelWBG && self.ZPKernelWBG.kernelEchoSync);
-      const echoed = echoFn ? echoFn(msg.val) : null;
-      result = { ok: true, echoedType: typeof echoed, echoed, kernelType: typeof self.kernelFetch };
-    } catch (e) {
-      result = { ok: false, error: (e && e.message) || String(e) };
-    }
-    if (reply) reply.postMessage(result);
     return;
   }
   if (msg && msg.type === '__zpKernelProbe') {
@@ -3355,11 +3329,11 @@ function workerBootstrap(url) {
   }
   const body = srcu != null
     ? (mod
-      ? head + "import('/zp/assets/zp-core.js?v=__ZP_BUILD_ID__').then(function(){return import('/zp/assets/zp-page-bundle.js?v=__ZP_BUILD_ID__').catch(function(){})}).then(function(){return import('/zp/assets/worker-prelude.js?v=__ZP_BUILD_ID__')}).catch(function(e){setTimeout(function(){throw e},0)});"
-      : head + ttOpen + "importScripts(" + U("'/zp/assets/worker-prelude.js?v=__ZP_BUILD_ID__'") + ");try{importScripts(" + U("'/zp/assets/zp-page-bundle.js?v=__ZP_BUILD_ID__'") + ")}catch(e){};if(self.__zp_settle)self.__zp_settle();if(self.__zp_runSrcu)self.__zp_runSrcu();" + ttClose)
+      ? head + "import('/zp/Asset/zp-core.js?v=__ZP_BUILD_ID__').then(function(){return import('/zp/Asset/zp-page-bundle.js?v=__ZP_BUILD_ID__').catch(function(){})}).then(function(){return import('/zp/Asset/worker-prelude.js?v=__ZP_BUILD_ID__')}).catch(function(e){setTimeout(function(){throw e},0)});"
+      : head + ttOpen + "importScripts(" + U("'/zp/Asset/worker-prelude.js?v=__ZP_BUILD_ID__'") + ");try{importScripts(" + U("'/zp/Asset/zp-page-bundle.js?v=__ZP_BUILD_ID__'") + ")}catch(e){};if(self.__zp_settle)self.__zp_settle();if(self.__zp_runSrcu)self.__zp_runSrcu();" + ttClose)
     : (mod
-      ? head + "var __zp_script_url=" + scriptURL + ";import('/zp/assets/zp-core.js?v=__ZP_BUILD_ID__').then(function(){return import('/zp/assets/zp-page-bundle.js?v=__ZP_BUILD_ID__').catch(function(){})}).then(function(){return import('/zp/assets/worker-prelude.js?v=__ZP_BUILD_ID__')}).then(function(){return import(__zp_script_url)}).catch(function(e){setTimeout(function(){throw e},0)});"
-      : head + ttOpen + "importScripts(" + U("'/zp/assets/worker-prelude.js?v=__ZP_BUILD_ID__'") + ");try{importScripts(" + U("'/zp/assets/zp-page-bundle.js?v=__ZP_BUILD_ID__'") + ")}catch(e){};if(self.__zp_settle)self.__zp_settle();importScripts(" + U(scriptURL) + ");" + ttClose);
+      ? head + "var __zp_script_url=" + scriptURL + ";import('/zp/Asset/zp-core.js?v=__ZP_BUILD_ID__').then(function(){return import('/zp/Asset/zp-page-bundle.js?v=__ZP_BUILD_ID__').catch(function(){})}).then(function(){return import('/zp/Asset/worker-prelude.js?v=__ZP_BUILD_ID__')}).then(function(){return import(__zp_script_url)}).catch(function(e){setTimeout(function(){throw e},0)});"
+      : head + ttOpen + "importScripts(" + U("'/zp/Asset/worker-prelude.js?v=__ZP_BUILD_ID__'") + ");try{importScripts(" + U("'/zp/Asset/zp-page-bundle.js?v=__ZP_BUILD_ID__'") + ")}catch(e){};if(self.__zp_settle)self.__zp_settle();importScripts(" + U(scriptURL) + ");" + ttClose);
   // Emit `Cross-Origin-Embedder-Policy: require-corp` on the worker bootstrap response so workers spawned by COEP-isolated documents (`require-corp` or `credentialless`) are not blocked by the browser.
   return new Response(body, { headers: { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Security-Policy': [proxiedCSP([], false)].concat(tt).join(', '), 'Cross-Origin-Embedder-Policy': 'require-corp', 'X-Content-Type-Options': 'nosniff' } });
 }

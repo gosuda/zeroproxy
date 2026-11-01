@@ -339,7 +339,7 @@
       defineMasked(w, 'isSecureContext', { get() { return vsc; }, configurable: true, enumerable: true });
     } catch {}
     // Virtualize PerformanceEntry `.name` and `toJSON()` so resource timing entries
-    // report target URLs rather than `/zp/api/fetch?url=...` proxy paths.
+    // report target URLs rather than `/zp/api/v2/fetch?url=...` proxy paths.
     try {
       const entryProto = w.PerformanceEntry && w.PerformanceEntry.prototype;
       const nameDesc = entryProto && Object.getOwnPropertyDescriptor(entryProto, 'name');

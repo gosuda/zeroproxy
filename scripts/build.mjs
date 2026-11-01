@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import esbuild from 'esbuild';
 import { spawnSync } from 'node:child_process';
-import { access, copyFile, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { access, copyFile, mkdir, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -27,7 +27,8 @@ const minify = args.noMinify !== true;
 const zpBundleWasm = path.join(repoRoot, 'target', 'wasm32-unknown-unknown', 'release', 'zp_bundle.wasm');
 const zpKernelBundleWasm = path.join(repoRoot, 'target', 'wasm32-unknown-unknown', 'release', 'zp_kernel_bundle.wasm');
 const zpPageRtWasm = path.join(repoRoot, 'target', 'wasm32-unknown-unknown', 'release', 'zp_page_rt.wasm');
-const zpBundleOutDir = path.join(webOut, '__zp');
+// Served at /zp/Asset/<name> (see internal/httphost wasmAssets).
+const zpBundleOutDir = path.join(webOut, 'Asset');
 
 if (args.help) {
   process.stdout.write(`Usage: node scripts/build.mjs [options]\n\nOptions:\n  --out <dir>       Output directory (default: dist)\n  --web-only        Build only browser assets\n  --server-only     Build only the relay server\n  --rust-only       Build only the Rust WASM bundle\n  --skip-web        Do not build browser assets\n  --skip-server     Do not build the relay server\n  --skip-rust       Do not build the Rust WASM bundle\n  --minify          Minify bundled JavaScript (default)
@@ -56,11 +57,9 @@ function parseArgs(argv) {
         parsed.out = argv[++i];
         break;
       case '--web-only':
-      case '--kernel-only':
       case '--server-only':
       case '--rust-only':
       case '--skip-web':
-      case '--skip-kernel':
       case '--skip-server':
       case '--skip-rust':
       case '--minify':
@@ -97,12 +96,12 @@ function selectedTargets(parsed) {
 }
 
 async function cleanSelectedOutputs(selected) {
-  // Preserve dist/web/__zp/ when skipping the Rust build so existing wasm-bindgen outputs remain usable.
+  // Preserve dist/web/Asset/ when skipping the Rust build so existing wasm-bindgen outputs remain usable.
   async function rmWebPreserveZp() {
     if (!selected.rust) {
       const entries = await readdir(webOut, { withFileTypes: true }).catch(() => []);
       await Promise.all(entries
-        .filter(d => d.name !== '__zp')
+        .filter(d => d.name !== 'Asset')
         .map(d => rm(path.join(webOut, d.name), { recursive: true, force: true })));
     } else {
       await rm(webOut, { recursive: true, force: true });
@@ -124,7 +123,7 @@ async function cleanSelectedOutputs(selected) {
 
 async function buildWeb() {
   await mkdir(webOut, { recursive: true });
-  // Compute buildId after buildRustBundle() so WASM artifacts in dist/web/__zp/ are included in the hash.
+  // Compute buildId after buildRustBundle() so WASM artifacts in dist/web/Asset/ are included in the hash.
   await computeBuildId();
 
   const zpBundlePage = await makeZPBundlePageClassic();
@@ -163,7 +162,7 @@ async function buildRustBundle() {
   run('cargo', ['build', '--locked', '--release', '--target', 'wasm32-unknown-unknown', '-p', 'zp-bundle']);
   // zp-kernel-bundle holds the SW transport and kernel stack, instantiated lazily on first transportFetch.
   run('cargo', ['build', '--locked', '--release', '--target', 'wasm32-unknown-unknown', '-p', 'zp-kernel-bundle']);
-  // zp-page-bundle contains only the page-realm rewriter, sourcemap, CSS, and HTML transform logic.
+  // zp-page-bundle contains only the page-realm JS rewriter (zp-rewriter) and shared URL primitives; HTML, CSS, and source map logic live in zp-bundle.
   run('cargo', ['build', '--locked', '--release', '--target', 'wasm32-unknown-unknown', '-p', 'zp-page-bundle']);
   // zp-page-rt is a raw extern "C" cdylib instantiated directly by web/zp-rt.js without wasm-bindgen glue.
   run('cargo', ['build', '--locked', '--release', '--target', 'wasm32-unknown-unknown', '-p', 'zp-page-rt']);
@@ -172,10 +171,10 @@ async function buildRustBundle() {
   run('wasm-bindgen', [
     '--target', 'no-modules',
     '--out-dir', zpBundleOutDir,
-    '--out-name', 'zp_bundle_sw',
+    '--out-name', 'zp-bundle',
     zpBundleWasm,
   ]);
-  const swJsPath = path.join(zpBundleOutDir, 'zp_bundle_sw.js');
+  const swJsPath = path.join(zpBundleOutDir, 'zp-bundle.js');
   const swGlue = await readFile(swJsPath, 'utf8');
   if (!swGlue.startsWith('(function(){')) {
     await writeFile(
@@ -187,10 +186,10 @@ async function buildRustBundle() {
   run('wasm-bindgen', [
     '--target', 'no-modules',
     '--out-dir', zpBundleOutDir,
-    '--out-name', 'zp_kernel_sw',
+    '--out-name', 'zp-kernel',
     zpKernelBundleWasm,
   ]);
-  const kernelJsPath = path.join(zpBundleOutDir, 'zp_kernel_sw.js');
+  const kernelJsPath = path.join(zpBundleOutDir, 'zp-kernel.js');
   const kernelGlue = await readFile(kernelJsPath, 'utf8');
   if (!kernelGlue.startsWith('(function(){')) {
     await writeFile(
@@ -203,16 +202,23 @@ async function buildRustBundle() {
   run('wasm-bindgen', [
     '--target', 'no-modules',
     '--out-dir', zpBundleOutDir,
-    '--out-name', 'zp_page_bundle',
+    '--out-name', 'zp-page-bundle-wbg',
     zpPageBundleWasm,
   ]);
-  const pageBundleJsPath = path.join(zpBundleOutDir, 'zp_page_bundle.js');
+  const pageBundleJsPath = path.join(zpBundleOutDir, 'zp-page-bundle-wbg.js');
   const pageBundleGlue = await readFile(pageBundleJsPath, 'utf8');
   if (!pageBundleGlue.startsWith('(function(){')) {
     await writeFile(
       pageBundleJsPath,
       '(function(){\n' + pageBundleGlue + '\n;try{ self.ZPPageBundleWBG = wasm_bindgen; }catch(_e){};\n})();\n',
     );
+  }
+  // wasm-bindgen names the module `<name>_bg.wasm`; the served names drop the suffix. The typings describe that
+  // suffixed name and nothing consumes them at runtime.
+  for (const name of ['zp-bundle', 'zp-kernel', 'zp-page-bundle-wbg']) {
+    await rename(path.join(zpBundleOutDir, `${name}_bg.wasm`), path.join(zpBundleOutDir, `${name}.wasm`));
+    await rm(path.join(zpBundleOutDir, `${name}.d.ts`), { force: true });
+    await rm(path.join(zpBundleOutDir, `${name}_bg.wasm.d.ts`), { force: true });
   }
   // Enable the WebAssembly features that rustc emits by default for wasm32.
   const WASM_OPT_FLAGS = [
@@ -224,9 +230,9 @@ async function buildRustBundle() {
     '--enable-multivalue',
     '--enable-reference-types',
   ];
-  const swWasm = path.join(zpBundleOutDir, 'zp_bundle_sw_bg.wasm');
-  const kernelWasm = path.join(zpBundleOutDir, 'zp_kernel_sw_bg.wasm');
-  const pageBundleWasm = path.join(zpBundleOutDir, 'zp_page_bundle_bg.wasm');
+  const swWasm = path.join(zpBundleOutDir, 'zp-bundle.wasm');
+  const kernelWasm = path.join(zpBundleOutDir, 'zp-kernel.wasm');
+  const pageBundleWasm = path.join(zpBundleOutDir, 'zp-page-bundle-wbg.wasm');
   const optimizedSw = tryRunOptional('wasm-opt', ['-Oz', ...WASM_OPT_FLAGS, swWasm, '-o', swWasm]);
   if (!optimizedSw) {
     process.stderr.write('wasm-opt not found; skipping size optimization (install binaryen to enable)\n');
@@ -234,7 +240,7 @@ async function buildRustBundle() {
     tryRunOptional('wasm-opt', ['-Oz', ...WASM_OPT_FLAGS, kernelWasm, '-o', kernelWasm]);
     tryRunOptional('wasm-opt', ['-Oz', ...WASM_OPT_FLAGS, pageBundleWasm, '-o', pageBundleWasm]);
   }
-  const pageRtDst = path.join(zpBundleOutDir, 'zp_page_rt.wasm');
+  const pageRtDst = path.join(zpBundleOutDir, 'zp-rt.wasm');
   await copyFile(zpPageRtWasm, pageRtDst);
   tryRunOptional('wasm-opt', ['-Oz', ...WASM_OPT_FLAGS, pageRtDst, '-o', pageRtDst]);
 }
@@ -325,7 +331,7 @@ async function computeBuildId() {
   return buildId;
 }
 async function listWasmArtifacts() {
-  const dir = path.join(webOut, '__zp');
+  const dir = zpBundleOutDir;
   try {
     return (await readdir(dir)).filter(n => n.endsWith('.wasm')).sort().map(n => path.join(dir, n));
   } catch { return []; }
@@ -346,17 +352,17 @@ async function writeBundled(fileName, parts) {
 
 function stripServiceWorkerImports(source) {
   // Match both LF and CRLF line endings so git autocrlf checkouts do not leave duplicate importScripts in the bundle.
-  return source.replace(/^importScripts\('\/zp\/assets\/zp-core\.js'\);\r?\n/gm, '');
+  return source.replace(/^importScripts\('\/zp\/Asset\/zp-core\.js'\);\r?\n/gm, '');
 }
 
 function stripWorkerPreludeImports(source) {
-  return source.replace(/^\s*importScripts\('\/zp\/assets\/zp-core\.js'\);\r?\n/m, '');
+  return source.replace(/^\s*importScripts\('\/zp\/Asset\/zp-core\.js'\);\r?\n/m, '');
 }
 
-// Build the classic-script page bundle wrapper from zp-page-bundle (rewriter and CSS only).
+// Build the classic-script page bundle wrapper from zp-page-bundle (the JS rewriter only).
 async function makeZPBundlePageClassic() {
-  const glueJs = await readFile(path.join(zpBundleOutDir, 'zp_page_bundle.js'), 'utf8');
-  const wasmBytes = await readFile(path.join(zpBundleOutDir, 'zp_page_bundle_bg.wasm'));
+  const glueJs = await readFile(path.join(zpBundleOutDir, 'zp-page-bundle-wbg.js'), 'utf8');
+  const wasmBytes = await readFile(path.join(zpBundleOutDir, 'zp-page-bundle-wbg.wasm'));
   const wasmBase64 = wasmBytes.toString('base64');
   return `/* Generated from Rust WASM ZeroProxy page bundle (rewriter + CSS only). */\n${glueJs}\n(() => {\nconst __zp_bundle_b64 = ${JSON.stringify(wasmBase64)};\nconst __zp_bundle_bytes = Uint8Array.from(atob(__zp_bundle_b64), c => c.charCodeAt(0));\nconst wbg = globalThis.ZPPageBundleWBG;\nif (typeof wbg !== 'function') throw new Error('ZP_PAGE_BUNDLE_BOOT_FAILED: ZPPageBundleWBG missing');\nwbg.initSync({ module: __zp_bundle_bytes });\nconst api = Object.freeze({\n  ready: true,\n  bundleVersion: wbg.bundleVersion,\n  rewriteScript: (source, kind, targetUrl, proxyOrigin) => wbg.rewriteScript(String(source || ''), String(kind || 'classic'), String(targetUrl || ''), String(proxyOrigin || '')),\n  rewriteCSS: typeof wbg.rewriteCSS === 'function'\n    ? (source, baseUrl, controlPrefix, proxyOrigin) => wbg.rewriteCSS(String(source || ''), String(baseUrl || ''), String(controlPrefix || '/zp/'), String(proxyOrigin || ''))\n    : null,\n});\nObject.defineProperty(globalThis, 'ZPBundle', { value: api, enumerable: false, configurable: false, writable: false });\n})();\n`;
 }

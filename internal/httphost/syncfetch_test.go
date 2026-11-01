@@ -59,7 +59,10 @@ func TestCorsMode(t *testing.T) {
 }
 
 func TestSyncFetchRejectsDuplicateRIDWithConflict(t *testing.T) {
-	h := NewHandler(Config{SocksAddr: internalSOCKSMode})
+	h, err := NewServer(Config{SocksAddr: internalSOCKSMode})
+	if err != nil {
+		t.Fatal(err)
+	}
 	s := &server{syncHub: newSyncFetchHub()}
 	first := &syncFetchJob{
 		ID:     "dup-1",

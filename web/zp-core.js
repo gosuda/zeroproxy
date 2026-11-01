@@ -28,7 +28,7 @@
   const HTTP_PROTOCOLS = newSet(['http:', 'https:']);
   const WS_PROTOCOLS = newSet(['ws:', 'wss:']);
   const CONTROL_PREFIX = '/zp/';
-  const ASSET_PREFIX = CONTROL_PREFIX + 'assets/';
+  const ASSET_PREFIX = CONTROL_PREFIX + 'Asset/';
   // Default User-Agent presented to target servers. Browsers forbid setting User-Agent on fetch(), so the SW sends
   // X-ZP-User-Agent and the relay promotes it. The HTTP User-Agent, navigator.userAgent, Sec-CH-UA brands, and the
   // captured TLS ClientHello in sw.js must all report the same Chrome major version to avoid cross-signal WAF detection.
@@ -255,15 +255,13 @@
   function assetURL(name) { return assetPath(name) + ASSET_VERSION_QUERY; }
   function versionedAsset(absolutePath) { return String(absolutePath || '') + ASSET_VERSION_QUERY; }
   // Canonical lists of proxy-internal assets. `INTERNAL_ASSET_SCRIPTS` identifies scripts stripped from DOM
-  // serialization by the prelude; `INTERNAL_ASSET_OTHER` covers non-script assets (`favicon.ico`, manifest) that
-  // the SW serves locally rather than routing as target subresources.
+  // serialization by the prelude; `INTERNAL_ASSET_OTHER` covers the wasm-bindgen glue, wasm modules, and other
+  // non-script assets that the server provides rather than the target.
   const INTERNAL_ASSET_SCRIPTS = Object.freeze(['zp-core.js', 'zp-page-bundle.js', 'runtime-prelude.js', 'worker-prelude.js']);
-  const INTERNAL_ASSET_OTHER = Object.freeze(['favicon.ico', 'manifest.webmanifest']);
+  const INTERNAL_ASSET_OTHER = Object.freeze(['favicon.ico', 'manifest.webmanifest', 'zp-bundle.js', 'zp-bundle.wasm', 'zp-kernel.js', 'zp-kernel.wasm', 'zp-rt.wasm']);
   function isInternalAssetScriptPath(path) { return INTERNAL_ASSET_SCRIPTS.some(n => path === assetPath(n)); }
   function isInternalPath(path) {
     const p = String(path || '');
-    // `/__zp/*` serves WASM artifacts and must not be routed as a target subresource.
-    if (p.startsWith('/__zp/')) return true;
     if (isInternalAssetScriptPath(p)) return true;
     if (INTERNAL_ASSET_OTHER.some(n => p === assetPath(n))) return true;
     return p === controlPath('worker-bootstrap.js');
@@ -608,8 +606,72 @@
     Object.defineProperty(w, '__zp_bridge_factory', { value: factory, configurable: true, enumerable: false, writable: true });
     return null;
   }
-  const api = Object.freeze({ CONTROL_PREFIX, ASSET_PREFIX, TARGET_USER_AGENT, TARGET_SEC_CH_UA, TARGET_CHROME_FULL_VERSION, TARGET_UA_HIGH_ENTROPY, uaHighEntropyValues, clientEnvOf, chromeBrandList, bytesToBase64Url, base64UrlToBytes, webTransportGatewayRequest, relayOnlyRTCConfiguration, ENVELOPE_MIME,encodeEnvelope, decodeEnvelope, encryptShareURL, decryptShareURL, makeShareURL, makeSharePath, makeShareFragment, defaultRelayServer, relayServersForShare, isSharePath, shareRouteKey, controlPath, assetPath, assetURL, versionedAsset, apiPath, errorPath, INTERNAL_ASSET_SCRIPTS, isInternalAssetScriptPath, isInternalPath, canonicalTargetURL, canonicalWebSocketURL, encodeTargetURL, decodeTargetURL, randomId, fixedCSP, filterMetaCSP, parseRelayServersFromFragment, normalizeRelayServers, isLoopbackHost, registrableDomain, siteOf, sameSite, siteFrameCapable, siteFrameOrigin, isSiteFrameOrigin, siteFrameSource, TT_POLICY_NAME, trustedTypesDirectives, trustedTypesPolicies, requiresTrustedTypes, evalBlockingPolicy, evalBlockingDirective, redirectMethod, createFetchResponseAdapter, configureBridge, ERRORS, errorInfo, MSG });
-  // `configurable: true` allows the page prelude to delete `globalThis.ZP` after capturing it into a closure binding,
-  // preventing `Object.getOwnPropertyNames(window)` from exposing `ZP` to target scripts.
-  Object.defineProperty(globalThis, 'ZP', { value: api, enumerable: false, configurable: true, writable: false });
+  // Everything the in-repo runtimes (Service Worker, worker prelude, membrane, launcher page) call. It is published only as
+  // `globalThis.__zp_internal`; each consumer captures it into a closure binding and deletes the property.
+  const internal = Object.freeze({
+    CONTROL_PREFIX,
+    TARGET_USER_AGENT,
+    TARGET_SEC_CH_UA,
+    TARGET_UA_HIGH_ENTROPY,
+    uaHighEntropyValues,
+    clientEnvOf,
+    chromeBrandList,
+    bytesToBase64Url,
+    base64UrlToBytes,
+    webTransportGatewayRequest,
+    relayOnlyRTCConfiguration,
+    ENVELOPE_MIME,
+    encodeEnvelope,
+    decodeEnvelope,
+    encryptShareURL,
+    decryptShareURL,
+    makeShareURL,
+    makeSharePath,
+    makeShareFragment,
+    defaultRelayServer,
+    relayServersForShare,
+    isSharePath,
+    shareRouteKey,
+    controlPath,
+    assetPath,
+    assetURL,
+    apiPath,
+    errorPath,
+    isInternalAssetScriptPath,
+    isInternalPath,
+    canonicalTargetURL,
+    canonicalWebSocketURL,
+    randomId,
+    fixedCSP,
+    filterMetaCSP,
+    parseRelayServersFromFragment,
+    isLoopbackHost,
+    siteOf,
+    sameSite,
+    siteFrameCapable,
+    siteFrameOrigin,
+    isSiteFrameOrigin,
+    siteFrameSource,
+    TT_POLICY_NAME,
+    trustedTypesDirectives,
+    trustedTypesPolicies,
+    requiresTrustedTypes,
+    evalBlockingPolicy,
+    evalBlockingDirective,
+    redirectMethod,
+    createFetchResponseAdapter,
+    configureBridge,
+    ERRORS,
+    errorInfo,
+    MSG,
+  });
+  // The embedder-facing contract documented in `zp-core.d.ts`: share links, the control/API/asset paths, the runtime
+  // fetch envelope, the bridge protocol, and bridge installation. Nothing else is promised to stay stable.
+  const PUBLIC_API = ['CONTROL_PREFIX', 'MSG', 'ENVELOPE_MIME', 'encodeEnvelope', 'decodeEnvelope', 'configureBridge', 'encryptShareURL', 'decryptShareURL', 'makeShareURL', 'makeSharePath', 'makeShareFragment', 'isSharePath', 'shareRouteKey', 'controlPath', 'assetPath', 'assetURL', 'apiPath', 'errorPath', 'canonicalTargetURL', 'canonicalWebSocketURL', 'bytesToBase64Url', 'base64UrlToBytes', 'defaultRelayServer', 'relayServersForShare', 'parseRelayServersFromFragment'];
+  const publicApi = Object.freeze(Object.fromEntries(PUBLIC_API.map(name => [name, internal[name]])));
+
+  // `configurable: true` lets a consumer delete these globals after capturing them into a closure binding, so
+  // `Object.getOwnPropertyNames(window)` cannot enumerate them to target scripts.
+  Object.defineProperty(globalThis, 'ZP', { value: publicApi, enumerable: false, configurable: true, writable: false });
+  Object.defineProperty(globalThis, '__zp_internal', { value: internal, enumerable: false, configurable: true, writable: false });
 })();

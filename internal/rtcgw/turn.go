@@ -39,8 +39,8 @@ type TURNServer struct {
 	sharedSecret string
 	defaultTTL   time.Duration
 
-	mu       sync.Mutex
-	conn     *net.UDPConn
+	mu   sync.Mutex
+	conn *net.UDPConn
 }
 
 // TURNConfig carries operator-supplied knobs. `Addr` is the UDP
@@ -113,7 +113,7 @@ func NewTURNServer(cfg TURNConfig) (*TURNServer, error) {
 	}
 
 	server, err := turn.NewServer(turn.ServerConfig{
-		Realm:       cfg.Realm,
+		Realm: cfg.Realm,
 		// IssueICEServerCreds mints TURN-REST usernames ("<expiry>:<label>"),
 		// which require LongTermTURNRESTAuthHandler rather than
 		// NewLongTermAuthHandler (which expects integer-only usernames).

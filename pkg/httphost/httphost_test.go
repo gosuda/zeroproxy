@@ -40,9 +40,20 @@ func TestNewServerConfigValidation(t *testing.T) {
 		t.Fatal("expected error when TransportDirect specifies an upstream SOCKS5 address")
 	}
 
+	if _, err := httphost.NewServer(httphost.Config{
+		TargetPolicy: httphost.TargetPolicy(9),
+	}); err == nil {
+		t.Fatal("expected error for an unknown TargetPolicy")
+	}
+
+	if _, err := httphost.NewServer(httphost.Config{
+		Transport: httphost.TransportMode(9),
+	}); err == nil {
+		t.Fatal("expected error for an unknown TransportMode")
+	}
+
 	srv, err := httphost.NewServer(httphost.Config{
-		Transport:           httphost.TransportDirect,
-		AllowPrivateTargets: false,
+		Transport: httphost.TransportDirect,
 	})
 	if err != nil {
 		t.Fatalf("unexpected error for valid TransportDirect config: %v", err)
@@ -58,9 +69,9 @@ func TestServerCloseUnblocksSyncFetchPoll(t *testing.T) {
 		t.Fatal(err)
 	}
 	srv, err := httphost.NewServer(httphost.Config{
-		WebDir:              dir,
-		Transport:           httphost.TransportDirect,
-		AllowPrivateTargets: true,
+		WebDir:       dir,
+		Transport:    httphost.TransportDirect,
+		TargetPolicy: httphost.TargetPolicyAllowPrivate,
 	})
 	if err != nil {
 		t.Fatal(err)

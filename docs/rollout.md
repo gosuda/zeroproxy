@@ -1,14 +1,14 @@
 # ZeroProxy Operational Dogfood and Rollout
 
-This runbook defines the operator verification checklist, runtime monitoring signals, and rollback procedure for ZeroProxy deployments. Passing automated CI tests does not substitute for multi-day operational verification across live websites. Current compatibility scope and active engineering tracks live in the [website compatibility refactor plan](.ai/design/website-compat-refactor.md).
+This runbook defines the operator verification checklist, runtime monitoring signals, and rollback procedure for ZeroProxy deployments. Passing automated CI tests does not substitute for multi-day operational verification across live websites. Current compatibility scope and active engineering tracks live in the [website compatibility refactor plan](../.ai/design/website-compat-refactor.md).
 
 ## Pre-Flight Checklist
 
 Complete these checks before starting an operational dogfood cycle:
 
 - Verify remote CI and browser E2E results for the exact candidate commit, including the E1 containment escape matrix.
-- Back up a known-good deployable build and record its commit SHA before rebuilding. [`scripts/build.mjs`](scripts/build.mjs) cleans `dist/` before compilation; confirm toolchain availability before replacing a working `dist/` directory.
-- Serve compiled assets from `dist/web`, never from the source `web/` directory. See the [README quickstart instructions](README.md#quickstart).
+- Back up a known-good deployable build and record its commit SHA before rebuilding. [`scripts/build.mjs`](../scripts/build.mjs) cleans `dist/` before compilation; confirm toolchain availability before replacing a working `dist/` directory.
+- Serve compiled assets from `dist/web`, never from the source `web/` directory. See the [README quickstart instructions](../README.md#quickstart).
 - Record whether the relay uses an external Tor SOCKS5 listener or `-socks internal`. Internal mode connects directly from the relay host and does not provide network anonymity. Optional WebTransport and WebRTC TURN gateways require explicit flag configuration and separate validation.
 - Keep Content Security Policy headers and fail-closed routing and rewrite rules enabled. Any containment escape or disabled security boundary blocks rollout.
 
@@ -40,10 +40,10 @@ Monitor the following runtime signals across both dogfood stages:
 | :--- | :--- |
 | **Malformed or rewrite error pages** | Failing URL, content type, triggering user action, and confirmation that the failure stayed contained. |
 | **Realm injection failures** | Bootstrap script ordering, bundle version mismatches, and any target script execution prior to membrane installation. |
-| **`SW_NOT_READY` responses** | Service Worker registration state, `dist/web/__zp/` asset availability, and initialization errors. |
+| **`SW_NOT_READY` responses** | Service Worker registration state, `dist/web/Asset/` asset availability, and initialization errors. |
 | **Cookies and storage** | Login session continuity, storage persistence across restarts, write errors, and cross-origin tab isolation. |
 | **Rewrite cache** | Warm-session latency and cache invalidation behavior across script updates. |
-| **WASM and renderer memory** | Compiled artifact sizes under `dist/web/__zp/`, cold-load latency, and browser tab memory growth over time. |
+| **WASM and renderer memory** | Compiled artifact sizes under `dist/web/Asset/`, cold-load latency, and browser tab memory growth over time. |
 | **Visible page compatibility** | Layout integrity, client-side routing, media playback, and console or network errors beyond HTTP status codes. |
 
 Run these commands against an active `taskweaver` `zp` instance to inspect per-tab diagnostics:

@@ -23,7 +23,7 @@ Immediately after fixing a newly discovered trap, add an anchored entry to `.ai/
 
 ### 2. Containment and Compatibility Verification Status
 
-[`PHASE2_STATUS.md`](PHASE2_STATUS.md) tracks the verification baseline and gates `A1` through `E5`, along with the code paths and automated tests that prove each gate holds. Check and update the corresponding gate evidence whenever you touch a security boundary.
+[`docs/containment-gates.md`](docs/containment-gates.md) tracks the verification baseline and gates `A1` through `E5`, along with the code paths and automated tests that prove each gate holds. Check and update the corresponding gate evidence whenever you touch a security boundary.
 
 ## Scope: Containment and Compatibility (Not Concealment)
 

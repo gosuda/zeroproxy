@@ -13,12 +13,12 @@
     const hash = s.indexOf('#');
     const head = hash < 0 ? s : s.slice(0, hash);
     const frag = hash < 0 ? '' : s.slice(hash);
-    let out = proxyOrigin + ZP.apiPath('fetch') + '?url=' + encodeURLParam(head);
+    let out = proxyOrigin + ZP.apiPath('v2/fetch') + '?url=' + encodeURLParam(head);
     if (boot && boot.tabId) out += '&tab=' + encodeURLParam(boot.tabId);
     return out + frag;
   }
   // Subresource relay URL for documents that are not Service Worker clients
-  // (such as `document.write` iframes). Because `/zp/api/fetch` only exists inside
+  // (such as `document.write` iframes). Because `/zp/api/v2/fetch` only exists inside
   // the Service Worker, requests from SW-less documents route through the Go
   // `/zp/api/sync-fetch` relay, which parks the HTTP response while the worker fetches.
   function swLessRelayURL(absolute, kind, cors) {
@@ -41,11 +41,11 @@
     if (s.indexOf(ZP.apiPath('sync-fetch') + '?') < 0) return '';
     try { return new URL(s, proxyOrigin).searchParams.get('u') || ''; } catch { return ''; }
   }
-  // Convert an already-rewritten `/zp/api/fetch?url=...` path into a relay URL
+  // Convert an already-rewritten `/zp/api/v2/fetch?url=...` path into a relay URL
   // when the destination document is known to be SW-less.
   function relayFromProxyPath(proxied, kind, cors) {
     const s = String(proxied || '');
-    const at = s.indexOf(ZP.apiPath('fetch') + '?url=');
+    const at = s.indexOf(ZP.apiPath('v2/fetch') + '?url=');
     if (at < 0) return '';
     let target = '';
     try { target = new URL(s, proxyOrigin).searchParams.get('url') || ''; } catch { return ''; }
@@ -167,7 +167,7 @@
   }
   function upgradeSWLessURL(el, key, raw) {
     if (String(raw) === SWLESS_PIXEL) return healSWLessPlaceholder(el, key);
-    if (raw.indexOf(ZP.apiPath('fetch')) < 0) return;
+    if (raw.indexOf(ZP.apiPath('v2/fetch')) < 0) return;
     let doc = null;
     try { doc = el.ownerDocument; } catch {}
     if (!documentIsSWLess(doc)) return;
@@ -181,7 +181,7 @@
   function upgradeSWLessSrcset(el, key, raw, cors) {
     const parts = splitSrcsetCandidates(raw);
     const jobs = parts.map(c => {
-      if (!c.url || c.url.indexOf(ZP.apiPath('fetch')) < 0) return Promise.resolve(c.lead + c.url + c.tail);
+      if (!c.url || c.url.indexOf(ZP.apiPath('v2/fetch')) < 0) return Promise.resolve(c.lead + c.url + c.tail);
       return swLessBlobURL(c.url, '', cors).then(u => c.lead + (u || c.url) + c.tail);
     });
     Promise.all(jobs).then(list => { try { Native.setAttribute.call(el, key, list.join('')); } catch {} });
@@ -248,7 +248,7 @@
     let doc = null;
     try { doc = el.ownerDocument; } catch {}
     if (srcdocMarkupDepth || !documentIsSWLess(doc)) { Native.setAttribute.call(el, key, proxied); return; }
-    // In SW-less documents, `/zp/api/fetch` would bypass the Service Worker and 403
+    // In SW-less documents, `/zp/api/v2/fetch` would bypass the Service Worker and 403
     // on the Go server. Set a non-network 1x1 transparent PNG placeholder first and
     // swap in the `blob:` URL once the parent fetch resolves.
     const placeholder = swLessPixelable(el, key);

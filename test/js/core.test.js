@@ -7,7 +7,7 @@ const { webcrypto } = require('node:crypto');
 function loadCore() {
   const ctx = { crypto: webcrypto, TextEncoder, TextDecoder, URL, URLSearchParams, btoa: s => Buffer.from(s, 'binary').toString('base64'), atob: s => Buffer.from(s, 'base64').toString('binary'), location: { origin: 'https://proxy.example', protocol: 'https:', host: 'proxy.example' } };
   vm.runInNewContext(fs.readFileSync('web/zp-core.js', 'utf8'), ctx);
-  return ctx.ZP;
+  return ctx.__zp_internal;
 }
 
 test('share URL envelope round-trips and rejects HMAC tamper', async () => {
@@ -114,22 +114,22 @@ test('sites: the proxy CSP admits site hosts only for tabs that use site frames'
   // The CSP builder reads the worker's own origin; give it one.
   const ctx = { crypto: require('node:crypto').webcrypto, TextEncoder, TextDecoder, URL, URLSearchParams, btoa: s => Buffer.from(s, 'binary').toString('base64'), atob: s => Buffer.from(s, 'base64').toString('binary'), location: new URL('http://proxy.localhost:18080/zp/sw.js') };
   vm.runInNewContext(fs.readFileSync('web/zp-core.js', 'utf8'), ctx);
-  const on = ctx.ZP.fixedCSP([], { siteFrames: true });
+  const on = ctx.__zp_internal.fixedCSP([], { siteFrames: true });
   assert.ok(on.includes("frame-src 'self' blob: data: http://*.localhost:18080"), on);
   assert.ok(on.includes("child-src 'self' blob: data: http://*.localhost:18080"), on);
   assert.equal(/script-src[^;]*localhost/.test(on), false, 'only frames and children, never scripts');
-  assert.equal(ctx.ZP.fixedCSP([]).includes('*.localhost'), false, 'a tab without site frames keeps its own policy');
+  assert.equal(ctx.__zp_internal.fixedCSP([]).includes('*.localhost'), false, 'a tab without site frames keeps its own policy');
   // A meta CSP of the target must not shut the site hosts out either.
-  const meta = ctx.ZP.filterMetaCSP("default-src 'none'; frame-src https://challenges.cloudflare.com", 'http://*.localhost:18080');
+  const meta = ctx.__zp_internal.filterMetaCSP("default-src 'none'; frame-src https://challenges.cloudflare.com", 'http://*.localhost:18080');
   assert.ok(meta.includes('frame-src https://challenges.cloudflare.com'), meta);
   assert.ok(/frame-src [^;]*http:\/\/\*\.localhost:18080/.test(meta), meta);
   assert.equal(/default-src [^;]*localhost/.test(meta), false);
-  assert.equal(ctx.ZP.filterMetaCSP("frame-src https://x.test"), "frame-src https://x.test 'self' blob: data:", 'unchanged without a site source');
+  assert.equal(ctx.__zp_internal.filterMetaCSP("frame-src https://x.test"), "frame-src https://x.test 'self' blob: data:", 'unchanged without a site source');
 });
 
 test('trusted types: the target\'s directives are carried and the membrane\'s policy name is admitted, as in the Rust filter', () => {
   require('../../web/zp-core.js');
-  const ZP = globalThis.ZP;
+  const ZP = globalThis.__zp_internal;
   assert.equal(ZP.TT_POLICY_NAME, 'zp-internal');
   assert.deepEqual(ZP.trustedTypesDirectives("default-src 'none'; require-trusted-types-for 'script'; trusted-types a default"),
     ["require-trusted-types-for 'script'", 'trusted-types a default zp-internal']);
@@ -167,4 +167,22 @@ test('a policy that refuses string evaluation: script-src (else default-src) wit
   assert.equal(ZP.evalBlockingPolicy("script-src 'unsafe-eval', default-src 'unsafe-eval'"), '');
   assert.equal(ZP.evalBlockingDirective("img-src 'self'; script-src 'self'"), 'script-src');
   assert.equal(ZP.evalBlockingDirective("default-src 'self'"), 'default-src');
+});
+
+test('the global ZP is the frozen embedder contract and keeps runtime internals off the global object', () => {
+  const ctx = { crypto: webcrypto, TextEncoder, TextDecoder, URL, URLSearchParams, btoa: s => Buffer.from(s, 'binary').toString('base64'), atob: s => Buffer.from(s, 'base64').toString('binary'), location: { origin: 'https://proxy.example', protocol: 'https:', host: 'proxy.example' } };
+  vm.runInNewContext(fs.readFileSync('web/zp-core.js', 'utf8'), ctx);
+  const pub = ctx.ZP;
+  const dts = fs.readFileSync('web/zp-core.d.ts', 'utf8');
+  const declared = dts.slice(dts.indexOf('interface ZPApi {'), dts.indexOf('declare const ZP'))
+    .split('\n').map(line => /^  (?:readonly )?(\w+)[(:<]/.exec(line)).filter(Boolean).map(m => m[1]);
+  assert.ok(declared.length > 20, 'zp-core.d.ts lost its member declarations');
+  assert.deepEqual(Object.keys(pub).sort(), declared.sort(), 'ZP and zp-core.d.ts must list the same members');
+  assert.ok(Object.isFrozen(pub));
+  for (const internalOnly of ['fixedCSP', 'filterMetaCSP', 'createFetchResponseAdapter', 'clientEnvOf', 'TARGET_USER_AGENT', 'randomId']) {
+    assert.equal(internalOnly in pub, false, internalOnly + ' leaked into the public API');
+    assert.equal(typeof ctx.__zp_internal[internalOnly] === 'undefined', false, internalOnly + ' missing from the runtime table');
+  }
+  for (const name of Object.keys(pub)) assert.equal(pub[name], ctx.__zp_internal[name], name + ' differs between tables');
+  assert.deepEqual(Object.keys(ctx).filter(k => k === 'ZP' || k === '__zp_internal'), [], 'runtime tables must be non-enumerable');
 });

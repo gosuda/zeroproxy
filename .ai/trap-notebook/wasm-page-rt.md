@@ -211,3 +211,11 @@ Background: [.ai/zp-page-rt-design.md](../zp-page-rt-design.md), [.ai/zp-page-rt
 - **Cause:** In `srcdoc` and `blob:` frames, the virtual `<base>` element resolved the root-relative `/__zp/zp_page_rt.wasm?v=...` fetch against the target origin. Even after switching to an absolute proxy URL, child realms pre-instrumented by the parent had already wrapped `Native.fetch`, which re-mapped the request to the target server.
 - **Fix and security:** Built the WASM URL from `proxyOrigin + '/__zp/...'` and skipped `zp-page-rt` boot entirely in realms where `typeof root.__zp_get === 'function'` at prelude start, falling back to JS classification rather than risking proxy build-ID exposure to target servers.
 - **Evidence and status:** Matched 9 leaked `/__zp/zp_page_rt.wasm` requests on the fixture server to the 9 pre-instrumented child frames. Do not assume `captureNative` holds unwrapped native functions when a parent frame has already initialized the child realm.
+
+<a id="bulk-handle-width-2026-11-01"></a>
+## 2026-11-01: Bulk results truncated handles to 16 bits, and a hash collision shadowed an entry
+
+- **Cause:** `bulk_intern_and_classify` packed each result as `(class << 16) | (handle & 0xFFFF)`. A page that interned more than 65 535 distinct URLs got handles that wrapped, so two URLs shared an id and `viewURL` returned the wrong text. Separately, `UrlPool::intern` replaced the `by_hash` entry when two URLs collided on all 64 bits, so the older URL could never be found again and was appended twice.
+- **Fix and rule:** Results are `(class & 0xF) << 28 | (handle & 0x0FFF_FFFF)`; the class needs 4 bits (`UrlClass` has 11 values) and the pool stops issuing handles at `0x0FFF_FFFF` instead of truncating. Colliding entries are chained through `UrlEntry::next_same_hash` and compared byte by byte. JS decodes with `batchClass(p) = p >>> 28` and `batchHandle(p) = p & 0x0FFFFFFF` (`batchHandleLow` is gone). Never narrow the handle field again without lowering the pool's issue limit with it.
+- **Evidence and status:** [crates/zp-page-rt/src/pool.rs](../../crates/zp-page-rt/src/pool.rs) host tests (`bulk_result_keeps_handles_above_16_bits_distinct`, `hash_collision_keeps_both_urls_resolvable`); a smoke run interned 76 801 distinct URLs through the built `zp-rt.wasm` with every handle distinct and `viewURL` exact.
+

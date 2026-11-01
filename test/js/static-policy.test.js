@@ -32,7 +32,7 @@ test('fixedCSP options.challengeCompat adds CF host only to four directives', ()
   sandbox.self = sandbox;
   sandbox.globalThis = sandbox;
   vm.createContext(sandbox);
-  vm.runInContext(code + '\n;this.__zp = self.ZP;', sandbox);
+  vm.runInContext(code + '\n;this.__zp = self.__zp_internal;', sandbox);
   const ZP = sandbox.__zp;
 
   const off = ZP.fixedCSP([]);
@@ -157,7 +157,7 @@ test('proxied-document CSP is controlled from zp-shared (single golden, JS side)
   new Function('globalThis', 'location', 'crypto', 'URL', 'URLSearchParams', 'TextEncoder', 'TextDecoder',
     core)(sandbox, sandbox.location, sandbox.crypto, URL, URLSearchParams, TextEncoder, TextDecoder);
 
-  assert.equal(sandbox.ZP.fixedCSP(), golden,
+  assert.equal(sandbox.__zp_internal.fixedCSP(), golden,
     'ZP.fixedCSP drifted from crates/zp-shared/testdata/csp_proxied.golden — edit csp.rs, regenerate the golden, and update zp-core together');
 
   for (const invariant of ["default-src 'none'", "object-src 'none'", "base-uri 'none'", "form-action 'self'"]) {
@@ -206,10 +206,9 @@ test('classify: proxy-origin subresources from runtime CSS map to the target onl
   assert.equal(classifyWith(null)(req, at('/img/bg.png'), '').kind, 'UNKNOWN',
     'guessing target without ctx leaks across tabs');
 
-  for (const p of ['/__zp/zp_page_rt.wasm?v=abc', '/zp/zp-core.js', '/zp/runtime-prelude.js']) {
+  for (const p of ['/zp/zp-rt.wasm?v=abc', '/zp/zp-core.js', '/zp/runtime-prelude.js']) {
     assert.equal(classifyWith(ctx)(req, at(p), 'client-1').kind, 'INTERNAL_ASSET', p + ' must stay internal');
   }
-  assert.equal(classifyWith(ctx)(req, at('/zp/api/fetch?url=x'), 'client-1').kind, 'RUNTIME_API');
   assert.equal(classifyWith(ctx)(req, at('/zp/api/v2/fetch?url=x'), 'client-1').kind, 'RUNTIME_API');
 });
 
@@ -219,7 +218,7 @@ test('v2 fetch envelope codec: [u32le head][raw body] round-trip without wire ex
   const sandbox = { URL, TextEncoder, TextDecoder, Set, Map, crypto: { getRandomValues: () => new Uint8Array(12) }, console };
   sandbox.self = sandbox; sandbox.globalThis = sandbox;
   vm.createContext(sandbox);
-  vm.runInContext(code + '\n;this.__zp = self.ZP;', sandbox);
+  vm.runInContext(code + '\n;this.__zp = self.__zp_internal;', sandbox);
   const ZP = sandbox.__zp;
   const head = { tabId: 't', url: 'https://t.example/x', init: { method: 'POST', body: null } };
   const body = new Uint8Array([0, 159, 146, 150, 255, 60, 0]);
@@ -246,16 +245,16 @@ test('rewriteCSSText: rewrites only absolute cross-origin url() tokens and leave
   const rewriteCSSText = new Function(
     'proxyOrigin', 'subresourceProxyPath',
     grab('cssProxyURL') + '\n' + grab('rewriteCSSText') + '\nreturn rewriteCSSText;'
-  )('http://proxy.localhost:18080', (u) => '/zp/api/fetch?url=' + encodeURIComponent(u));
+  )('http://proxy.localhost:18080', (u) => '/zp/api/v2/fetch?url=' + encodeURIComponent(u));
 
-  assert.match(rewriteCSSText('#a{background:url(https://cdn.example.com/x.png)}'), /url\("\/zp\/api\/fetch\?url=https%3A%2F%2Fcdn/);
-  assert.match(rewriteCSSText("@import 'https://cdn.example.com/a.css';"), /@import '\/zp\/api\/fetch/);
-  assert.match(rewriteCSSText('@import url("https://cdn.example.com/a.css");'), /@import url\("\/zp\/api\/fetch/);
+  assert.match(rewriteCSSText('#a{background:url(https://cdn.example.com/x.png)}'), /url\("\/zp\/api\/v2\/fetch\?url=https%3A%2F%2Fcdn/);
+  assert.match(rewriteCSSText("@import 'https://cdn.example.com/a.css';"), /@import '\/zp\/api\/v2\/fetch/);
+  assert.match(rewriteCSSText('@import url("https://cdn.example.com/a.css");'), /@import url\("\/zp\/api\/v2\/fetch/);
 
   // Relative URLs resolve against the document share path and are mapped by the SW.
   assert.equal(rewriteCSSText('#a{background:url(/img/x.png)}'), '#a{background:url(/img/x.png)}');
   assert.equal(rewriteCSSText('#a{background:url("./x.png")}'), '#a{background:url("./x.png")}');
-  const mine = '#a{background:url(http://proxy.localhost:18080/zp/api/fetch?url=x)}';
+  const mine = '#a{background:url(http://proxy.localhost:18080/zp/api/v2/fetch?url=x)}';
   assert.equal(rewriteCSSText(mine), mine);
 
   const comment = '/* url(https://cdn.example.com/x.png) */#a{color:red}';
@@ -273,16 +272,16 @@ test('containStyleDeclaration: rewrites property assignments and preserves metho
   const contain = new Function(
     'styleDeclProxies', 'styleDeclMethods', 'rewriteCSSText', 'deproxyURL', 'maskNativeFunction',
     src + '\nreturn containStyleDeclaration;'
-  )(new WeakMap(), new WeakMap(), (v) => String(v).replace('https://cdn.example.com', '/zp/api/fetch'),
-    (v) => String(v).replace('/zp/api/fetch', 'https://cdn.example.com'), () => {});
+  )(new WeakMap(), new WeakMap(), (v) => String(v).replace('https://cdn.example.com', '/zp/api/v2/fetch'),
+    (v) => String(v).replace('/zp/api/v2/fetch', 'https://cdn.example.com'), () => {});
 
   // CSS properties on CSSStyleDeclaration are own data properties on the instance.
   const decl = { backgroundImage: '', setProperty(p, v) { this[p] = v; }, getPropertyValue(p) { return this[p]; } };
   const p = contain(decl);
   p.backgroundImage = 'url(https://cdn.example.com/x.png)';
-  assert.equal(decl.backgroundImage, 'url(/zp/api/fetch/x.png)', 'property assignment bypassed CSS rewriter');
+  assert.equal(decl.backgroundImage, 'url(/zp/api/v2/fetch/x.png)', 'property assignment bypassed CSS rewriter');
   p.setProperty('mask-image', 'url(https://cdn.example.com/m.png)');
-  assert.equal(decl['mask-image'], 'url(/zp/api/fetch/m.png)', 'setProperty bypassed CSS rewriter');
+  assert.equal(decl['mask-image'], 'url(/zp/api/v2/fetch/m.png)', 'setProperty bypassed CSS rewriter');
 
   assert.equal(contain(decl), p, 'returning a distinct proxy for the same declaration breaks identity checks');
   assert.equal(p.getPropertyValue, p.getPropertyValue, 'method identity is not stable across accesses');
@@ -388,7 +387,7 @@ test('classifyTape: response followed by failed still counts as a leak', () => {
 test('classifyTape: proxy-routed requests are not counted as direct target attempts', () => {
   const v = classifyTape({
     network: [
-      { kind: 'request', request_id: '1', url: 'http://proxy.localhost:18080/zp/api/fetch?url=http%3A%2F%2F127.0.0.1%3A18098%2Fimg%2Fx1-case__cross.png' },
+      { kind: 'request', request_id: '1', url: 'http://proxy.localhost:18080/zp/api/v2/fetch?url=http%3A%2F%2F127.0.0.1%3A18098%2Fimg%2Fx1-case__cross.png' },
       { kind: 'response', request_id: '1', status: 200 },
     ],
   }, CASE_ID);
@@ -450,7 +449,7 @@ test('shared URL acceptance policy: JS implementation matches the shared fixture
   const mismatches = [];
   for (const c of cases) {
     let ok = true;
-    try { sandbox.ZP.canonicalTargetURL(c.input); } catch { ok = false; }
+    try { sandbox.__zp_internal.canonicalTargetURL(c.input); } catch { ok = false; }
     const want = INTENDED.has(c.input) ? INTENDED.get(c.input) : c.ok;
     if (ok !== want) mismatches.push(`${JSON.stringify(c.input)}: expected ok=${want}, got JS ok=${ok}`);
   }
@@ -506,7 +505,7 @@ test('deproxyURL: unified table handles all three caller modes', () => {
   const enc = encodeURIComponent(T);
 
   for (const opts of [{ fallback: 'any' }, { fallback: 'share' }, { scan: true }]) {
-    assert.equal(f(PROXY + '/zp/api/fetch?url=' + enc + '&tab=x', opts), T,
+    assert.equal(f(PROXY + '/zp/api/v2/fetch?url=' + enc + '&tab=x', opts), T,
       JSON.stringify(opts) + ': failed to unwrap ?url=');
     assert.equal(f(PROXY + '/zp/api/script?kind=classic&u=' + enc, opts), T,
       JSON.stringify(opts) + ': failed to unwrap &u=');
@@ -521,7 +520,7 @@ test('deproxyURL: unified table handles all three caller modes', () => {
   assert.equal(f(PROXY + '/zp/p/tok', { fallback: 'share' }), VIRT, 'timing mode: share path falls back to document target');
   assert.equal(f(unknown, { scan: true }), unknown, 'serialization mode: unknown URL is preserved');
 
-  const two = 'url("' + PROXY + '/zp/api/fetch?url=' + enc + '"), url(\'' + PROXY + '/zp/api/fetch?url=' + encodeURIComponent('https://t.example/b.png') + '\')';
+  const two = 'url("' + PROXY + '/zp/api/v2/fetch?url=' + enc + '"), url(\'' + PROXY + '/zp/api/v2/fetch?url=' + encodeURIComponent('https://t.example/b.png') + '\')';
   assert.equal(f(two, { scan: true }), 'url("' + T + '"), url(\'https://t.example/b.png\')');
   assert.equal(f(two, { fallback: 'share' }), two, 'must not scan inside composite strings without scan: true');
 });
@@ -1013,15 +1012,15 @@ test('CSS: rewritten URLs are deproxied across all style read paths', () => {
 });
 
 // Page-realm Wasm loads on every navigation, so its size is capped separately from SW bundles.
-test('E3 size guard: zp_page_bundle_bg.wasm is at most 540 KB', (t) => {
-  const wasmPath = 'dist/web/__zp/zp_page_bundle_bg.wasm';
+test('E3 size guard: zp-page-bundle-wbg.wasm is at most 540 KB', (t) => {
+  const wasmPath = 'dist/web/Asset/zp-page-bundle-wbg.wasm';
   if (!fs.existsSync(wasmPath)) {
     t.skip('dist missing: run `npm run build` first');
     return;
   }
   const size = fs.statSync(wasmPath).size;
   assert.ok(size <= 540 * 1024,
-    'zp_page_bundle_bg.wasm = ' + size + ' bytes (' + (size / 1024).toFixed(1) + ' KB) > 540 KB');
+    'zp-page-bundle-wbg.wasm = ' + size + ' bytes (' + (size / 1024).toFixed(1) + ' KB) > 540 KB');
 });
 
 // Function.prototype.toString masking only registers functions installed through
@@ -1591,7 +1590,7 @@ test('getHTML string scrub restores literal attribute text and drops our stash',
     f('<a href="http://p/zp/?via=x" data-zp-target-url="http://t/x" data-zp-lit-href="/x">t</a>'),
     '<a href="/x">t</a>');
   assert.equal(
-    f('<img data-zp-lit-src="i.png?a=1&amp;b=2" alt="k" src="http://p/zp/api/fetch?url=u">'),
+    f('<img data-zp-lit-src="i.png?a=1&amp;b=2" alt="k" src="http://p/zp/api/v2/fetch?url=u">'),
     '<img alt="k" src="i.png?a=1&amp;b=2">');
   assert.equal(
     f('<image href="http://p/x" data-zp-lit-xlink:href="/svg.png"></image>'),

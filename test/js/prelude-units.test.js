@@ -5,8 +5,10 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const { preludeSource } = require('./_prelude.cjs');
-// zp-core installs globalThis.ZP so free-variable references like ZP.filterMetaCSP resolve to the real implementation.
+// zp-core publishes the runtime table as globalThis.__zp_internal. The membrane normally captures it into a closure
+// binding named ZP; units cut out of it run in global scope, so bind the same table to a global ZP here.
 require('../../web/zp-core.js');
+Object.defineProperty(globalThis, 'ZP', { value: globalThis.__zp_internal, configurable: true });
 
 const SRC = preludeSource().split('\r\n').join('\n');
 
@@ -532,7 +534,7 @@ test('WebTransport gateway request moves target pins to the gateway', () => {
   const hash = new Uint8Array(32).fill(7);
   const gwPin = ZP.bytesToBase64Url(new Uint8Array(32).fill(9));
   const { url, options } = ZP.webTransportGatewayRequest(
-    'https://proxy.localhost:18443/__zp/wt', 'https://t.example:4433/echo', 'tab1',
+    'https://proxy.localhost:18443/zp/wt', 'https://t.example:4433/echo', 'tab1',
     { serverCertificateHashes: [{ algorithm: 'SHA-256', value: hash.buffer }, { algorithm: 'md5', value: new Uint8Array(16) }], congestionControl: 'throughput', bogus: 1 },
     [gwPin]);
   const u = new URL(url);
@@ -559,7 +561,7 @@ test('WebTransport gateway request moves target pins to the gateway', () => {
 test('proxied CSP admits the WebTransport gateway only when one is configured', () => {
   const connect = csp => csp.match(/connect-src [^;]*/)[0];
   assert.equal(connect(ZP.fixedCSP([])).includes('18443'), false);
-  assert.equal(connect(ZP.fixedCSP([], { extraConnect: ['https://proxy.localhost:18443/__zp/wt'] })).includes(' https://proxy.localhost:18443 '), true);
+  assert.equal(connect(ZP.fixedCSP([], { extraConnect: ['https://proxy.localhost:18443/zp/wt'] })).includes(' https://proxy.localhost:18443 '), true);
 });
 
 // Proxied RTCPeerConnection configuration forces relay-only ICE transport.
@@ -1245,16 +1247,21 @@ test('embedding bridge API: ZP.configureBridge, ctx.setBridge, and ctx.dispose m
   const initialSent = [];
   let initialDisposed = 0;
   let inboundListener = null;
-  globalThis.ZP.configureBridge(root, {
-    send(msg) { initialSent.push(msg); return Promise.resolve({ ok: true }); },
-    onMessage(fn) { inboundListener = fn; },
-    dispose() { initialDisposed++; },
+  let factoryArg = null;
+  globalThis.ZP.configureBridge(root, (realm) => {
+    factoryArg = realm;
+    return {
+      send(msg) { initialSent.push(msg); return Promise.resolve({ ok: true }); },
+      onMessage(fn) { inboundListener = fn; },
+      dispose() { initialDisposed++; },
+    };
   });
   assert.equal(typeof root.__zp_bridge_factory, 'function');
   assert.throws(() => globalThis.ZP.configureBridge(null, { send() {} }), TypeError);
   assert.throws(() => globalThis.ZP.configureBridge(root, {}), TypeError);
 
   const ctx = {};
+  const realmHandle = Object.freeze({ marker: 'realm-handle' });
   const clearedIntervals = [];
   const disconnected = [];
   const activeObservers = new Set([
@@ -1273,6 +1280,7 @@ test('embedding bridge API: ZP.configureBridge, ctx.setBridge, and ctx.dispose m
       root,
       ctx,
       postMessageToSW: () => Promise.resolve({ ok: false }),
+      realmHandle,
       Native: {
         clearInterval: (id) => { clearedIntervals.push(id); },
       },
@@ -1284,6 +1292,7 @@ test('embedding bridge API: ZP.configureBridge, ctx.setBridge, and ctx.dispose m
   );
 
   assert.equal(typeof env.ctx.bridge.send, 'function');
+  assert.equal(factoryArg, realmHandle, 'a bridge factory receives the frozen realm handle, not the mutable context');
   assert.equal(typeof inboundListener, 'function');
   inboundListener({ type: globalThis.ZP.MSG.COOKIE_CHANGE, changes: ['c=1'] });
   assert.deepEqual(appliedCookies, [['c=1']]);

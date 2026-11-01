@@ -12,7 +12,6 @@ fn opts() -> RewriteOpts {
     RewriteOpts {
         kind: ScriptKind::Classic,
         target_url: "https://example.com/".into(),
-        strict: true,
         proxy_origin: "http://proxy.localhost:18080".into(),
     }
 }
@@ -338,7 +337,6 @@ fn eval_caller_scope_descriptor() {
         &RewriteOpts {
             kind: ScriptKind::Module,
             target_url: "https://example.com/".into(),
-            strict: true,
             proxy_origin: "http://proxy.localhost:18080".into(),
         },
     )
@@ -365,7 +363,6 @@ fn eval_var_decl_hoists_to_caller_varenv() {
         &RewriteOpts {
             kind: ScriptKind::Module,
             target_url: "https://example.com/".into(),
-            strict: true,
             proxy_origin: "http://proxy.localhost:18080".into(),
         },
     )
@@ -388,7 +385,6 @@ fn eval_var_decl_hoists_to_caller_varenv() {
         &RewriteOpts {
             kind: ScriptKind::Classic,
             target_url: "https://example.com/".into(),
-            strict: false,
             proxy_origin: "http://proxy.localhost:18080".into(),
         },
     )
@@ -404,7 +400,6 @@ fn eval_var_decl_hoists_to_caller_varenv() {
         &RewriteOpts {
             kind: ScriptKind::Classic,
             target_url: "https://example.com/".into(),
-            strict: false,
             proxy_origin: "http://proxy.localhost:18080".into(),
         },
     )
@@ -416,7 +411,6 @@ fn eval_var_decl_hoists_to_caller_varenv() {
         &RewriteOpts {
             kind: ScriptKind::Classic,
             target_url: "https://example.com/".into(),
-            strict: false,
             proxy_origin: "http://proxy.localhost:18080".into(),
         },
     )
@@ -430,7 +424,6 @@ fn eval_var_decl_hoists_to_caller_varenv() {
         &RewriteOpts {
             kind: ScriptKind::Classic,
             target_url: "https://example.com/".into(),
-            strict: false,
             proxy_origin: "http://proxy.localhost:18080".into(),
         },
     )
@@ -484,7 +477,6 @@ var _d=document; function sj_pt(){}");
     let m = rewrite_script("var a=1; function f(){}", &RewriteOpts {
         kind: ScriptKind::Module,
         target_url: "https://example.com/".into(),
-        strict: true,
         proxy_origin: "http://proxy.localhost:18080".into(),
     })
     .expect("module rewrite");
@@ -520,7 +512,6 @@ fn lex_registry_for_classic_toplevel() {
     let clean = rewrite_script("foo();", &RewriteOpts {
         kind: ScriptKind::Classic,
         target_url: "https://example.com/".into(),
-        strict: false,
         proxy_origin: "http://proxy.localhost:18080".into(),
     })
     .expect("rewrite");
@@ -529,7 +520,6 @@ fn lex_registry_for_classic_toplevel() {
     let m = rewrite_script("let x=1;", &RewriteOpts {
         kind: ScriptKind::Module,
         target_url: "https://example.com/".into(),
-        strict: true,
         proxy_origin: "http://proxy.localhost:18080".into(),
     })
     .expect("module rewrite");
@@ -538,7 +528,6 @@ fn lex_registry_for_classic_toplevel() {
     let s = rewrite_script("'use strict'; let y=1;", &RewriteOpts {
         kind: ScriptKind::Classic,
         target_url: "https://example.com/".into(),
-        strict: false,
         proxy_origin: "http://proxy.localhost:18080".into(),
     })
     .expect("strict rewrite");
@@ -551,7 +540,6 @@ fn lex_registry_for_classic_toplevel() {
     let f = rewrite_script("function g(){ let inner=1; }", &RewriteOpts {
         kind: ScriptKind::Classic,
         target_url: "https://example.com/".into(),
-        strict: false,
         proxy_origin: "http://proxy.localhost:18080".into(),
     })
     .expect("fn rewrite");
@@ -561,7 +549,6 @@ fn lex_registry_for_classic_toplevel() {
     let b = rewrite_script("{ let blk=1; } for(let i=0;;i++){}", &RewriteOpts {
         kind: ScriptKind::Classic,
         target_url: "https://example.com/".into(),
-        strict: false,
         proxy_origin: "http://proxy.localhost:18080".into(),
     })
     .expect("block rewrite");
@@ -740,7 +727,6 @@ fn var_function_shadowing_neutralized() {
     let m = rewrite_script("function location(){} location.href = 'u';", &RewriteOpts {
         kind: ScriptKind::Module,
         target_url: "https://example.com/".into(),
-        strict: true,
         proxy_origin: "http://proxy.localhost:18080".into(),
     })
     .expect("module rewrite");

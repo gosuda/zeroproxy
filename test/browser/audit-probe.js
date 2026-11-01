@@ -53,7 +53,7 @@ return (() => {
         try {
           [...d.images].forEach(im => {
             const a = String(im.getAttribute('src') || '');
-            if (a.indexOf('/zp/api/fetch') >= 0) swlessUnhandled++;
+            if (a.indexOf('/zp/api/v2/fetch') >= 0) swlessUnhandled++;
           });
         } catch (e) {}
       }

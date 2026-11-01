@@ -28,21 +28,19 @@ func main() {
 	flag.StringVar(&tlsKey, "tls-key", "", "path to TLS private key PEM")
 	flag.StringVar(&cfg.WebDir, "web", "dist/web", "built static web asset directory")
 	flag.StringVar(&cfg.SocksAddr, "socks", "127.0.0.1:9050", "Tor SOCKS5 address, 'direct' for public-only direct dialer, or 'internal' for local test SOCKS5 dialer")
-	flag.BoolVar(&cfg.DisallowPrivateTargets, "disallow-private-targets", false, "reject private/loopback target IPs in internal/direct mode and gateways")
+	var disallowPrivate bool
+	flag.BoolVar(&disallowPrivate, "disallow-private-targets", false, "reject private/loopback target IPs in internal/direct mode and gateways")
 	flag.BoolVar(&cfg.TrustProxyHeaders, "trust-proxy-headers", false, "trust X-Forwarded-Proto from non-loopback peers")
 	flag.StringVar(&wtAddr, "wt-addr", "", "WebTransport (HTTP/3) gateway UDP listen address (e.g. ':18443'); empty disables D4")
 	flag.StringVar(&wtCert, "wt-cert", "", "WebTransport listener TLS cert path (optional, falls back to in-memory self-signed dev cert)")
 	flag.StringVar(&wtKey, "wt-key", "", "WebTransport listener TLS key path")
-	flag.StringVar(&wtPath, "wt-path", "/__zp/wt", "WebTransport CONNECT request path")
-	flag.StringVar(&cfg.WtGatewayURL, "wt-public-url", "", "Public URL of the WebTransport gateway (e.g. 'https://proxy.localhost:18443/__zp/wt'); empty hides the gateway from the page-side virtual class")
+	flag.StringVar(&wtPath, "wt-path", "/zp/wt", "WebTransport CONNECT request path")
+	flag.StringVar(&cfg.WtGatewayURL, "wt-public-url", "", "Public URL of the WebTransport gateway (e.g. 'https://proxy.localhost:18443/zp/wt'); empty hides the gateway from the page-side virtual class")
 	var wtPageHosts string
 	flag.StringVar(&wtPageHosts, "wt-page-hosts", "", "Comma-separated hostnames whose pages may open WebTransport sessions on the gateway (Origin check, any port). Default: the -wt-public-url hostname")
 	var rtcEnabled bool
-	var rtcDeprecatedURL, rtcDeprecatedIPs string
 	var rtcTurnAddr, rtcTurnPublicAddr, rtcTurnExternalIP, rtcTurnRealm, rtcTurnSecret string
 	flag.BoolVar(&rtcEnabled, "rtc-enable", false, "Enable D5 WebRTC: relay-only through the embedded TURN server (requires -rtc-turn-addr)")
-	flag.StringVar(&rtcDeprecatedURL, "rtc-public-url", "", "Deprecated, ignored: the signaling bridge was removed (WebRTC is relay-only through -rtc-turn-addr)")
-	flag.StringVar(&rtcDeprecatedIPs, "rtc-allowed-ips", "", "Deprecated, ignored: see -rtc-public-url")
 	flag.StringVar(&rtcTurnAddr, "rtc-turn-addr", "", "UDP listener for the embedded TURN server (e.g. '0.0.0.0:3478'); required by -rtc-enable. Must be routable: Chrome ignores TURN servers on loopback")
 	flag.StringVar(&rtcTurnPublicAddr, "rtc-turn-public-addr", "", "host:port clients reach the TURN server at (covers NAT / port-forwarding). Defaults to -rtc-turn-addr.")
 	flag.StringVar(&rtcTurnExternalIP, "rtc-turn-external-ip", "", "Relay address IP pion advertises in TURN allocation responses. For a port-forwarded box, the public IP. Defaults to listener IP.")
@@ -53,11 +51,13 @@ func main() {
 	if (tlsCert != "") != (tlsKey != "") {
 		log.Fatalf("both -tls-cert and -tls-key must be provided together")
 	}
-	allowPrivate := strings.EqualFold(strings.TrimSpace(cfg.SocksAddr), "internal") && !cfg.DisallowPrivateTargets
-
-	if rtcDeprecatedURL != "" || rtcDeprecatedIPs != "" {
-		log.Printf("rtcgw: -rtc-public-url / -rtc-allowed-ips are ignored; WebRTC runs relay-only through -rtc-turn-addr")
+	if disallowPrivate {
+		cfg.TargetPolicy = httphost.TargetPolicyBlockPrivate
 	}
+	// The gateways dial directly, so they may reach private targets only where
+	// the HTTP path does: the local test relay, unless private targets are disallowed.
+	allowPrivate := strings.EqualFold(strings.TrimSpace(cfg.SocksAddr), "internal") && cfg.TargetPolicy != httphost.TargetPolicyBlockPrivate
+
 	if rtcEnabled {
 		if rtcTurnAddr == "" {
 			log.Fatalf("rtcgw: -rtc-enable requires -rtc-turn-addr; WebRTC runs relay-only through the embedded TURN server")

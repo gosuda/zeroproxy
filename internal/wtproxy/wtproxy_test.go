@@ -28,7 +28,7 @@ import (
 // that advertises WT_UNSUPPORTED when a WebTransport path is hit over TCP.
 func TestHandlerReturns501WithErrorCode(t *testing.T) {
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest("GET", "/__zp/wt", nil)
+	req := httptest.NewRequest("GET", "/zp/wt", nil)
 	Handler().ServeHTTP(rec, req)
 	if rec.Code != 501 {
 		t.Fatalf("expected 501, got %d", rec.Code)
@@ -49,7 +49,7 @@ func TestListenerRejectsMissingTargetHeader(t *testing.T) {
 	gwAddr := freeUDPAddr(t)
 	gw, err := New(Config{
 		Addr:                 gwAddr,
-		Path:                 "/__zp/wt",
+		Path:                 "/zp/wt",
 		AllowInsecureDevCert: true,
 	})
 	if err != nil {
@@ -82,7 +82,7 @@ func TestListenerRejectsMissingTargetHeader(t *testing.T) {
 	}
 	defer dialer.Close()
 
-	gwURL := (&url.URL{Scheme: "https", Host: gwAddr, Path: "/__zp/wt"}).String()
+	gwURL := (&url.URL{Scheme: "https", Host: gwAddr, Path: "/zp/wt"}).String()
 	dialCtx, dialCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer dialCancel()
 
@@ -97,7 +97,7 @@ func TestListenerRejectsMissingTargetHeader(t *testing.T) {
 
 	// Verify the `?target=...` query-string fallback used by browser
 	// `new WebTransport(...)` calls, which cannot set custom headers.
-	gwURLWithQuery := (&url.URL{Scheme: "https", Host: gwAddr, Path: "/__zp/wt", RawQuery: "target=https%3A%2F%2F127.0.0.1%3A1%2Fecho"}).String()
+	gwURLWithQuery := (&url.URL{Scheme: "https", Host: gwAddr, Path: "/zp/wt", RawQuery: "target=https%3A%2F%2F127.0.0.1%3A1%2Fecho"}).String()
 	dialCtx2, dialCancel2 := context.WithTimeout(context.Background(), 8*time.Second)
 	defer dialCancel2()
 	resp2, _, _ := dialer.Dial(dialCtx2, gwURLWithQuery, nil)
@@ -169,7 +169,7 @@ func TestGatewayBridgesToRealTarget(t *testing.T) {
 
 	gwAddr := freeUDPAddr(t)
 	// The target is on loopback, permitted when AllowPrivateTargets is set.
-	gw, err := New(Config{Addr: gwAddr, Path: "/__zp/wt", AllowInsecureDevCert: true, AllowPrivateTargets: true})
+	gw, err := New(Config{Addr: gwAddr, Path: "/zp/wt", AllowInsecureDevCert: true, AllowPrivateTargets: true})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -189,7 +189,7 @@ func TestGatewayBridgesToRealTarget(t *testing.T) {
 	defer dialer.Close()
 	// The self-signed target is reachable only through the page's pin, the
 	// way a browser reaches it with `serverCertificateHashes`.
-	gwURL := "https://" + gwAddr + "/__zp/wt?target=" + url.QueryEscape("https://"+targetAddr+"/echo") +
+	gwURL := "https://" + gwAddr + "/zp/wt?target=" + url.QueryEscape("https://"+targetAddr+"/echo") +
 		"&certhash=" + certHash(targetCert)
 	_, sess, err := dialer.Dial(ctx, gwURL, nil)
 	if err != nil {
@@ -322,7 +322,7 @@ func TestGatewayFailsConnectOnUnreachableTarget(t *testing.T) {
 	}
 	defer dialer.Close()
 	// Loopback without AllowPrivateTargets: refused before any dial.
-	resp, _, err := dialer.Dial(ctx, "https://"+gwAddr+"/__zp/wt?target="+url.QueryEscape("https://127.0.0.1:9/x"), nil)
+	resp, _, err := dialer.Dial(ctx, "https://"+gwAddr+"/zp/wt?target="+url.QueryEscape("https://127.0.0.1:9/x"), nil)
 	if err == nil || resp == nil || resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("private target: want 403, got resp=%v err=%v", resp, err)
 	}
@@ -336,7 +336,7 @@ func TestGatewayFailsConnectOnUnreachableTarget(t *testing.T) {
 	}
 	go func() { _ = gw2.Run(ctx) }()
 	time.Sleep(200 * time.Millisecond)
-	resp, sess, err := dialer.Dial(ctx, "https://"+gw2Addr+"/__zp/wt?target="+url.QueryEscape("https://"+freeUDPAddr(t)+"/x"), nil)
+	resp, sess, err := dialer.Dial(ctx, "https://"+gw2Addr+"/zp/wt?target="+url.QueryEscape("https://"+freeUDPAddr(t)+"/x"), nil)
 	if err == nil || sess != nil || resp == nil || resp.StatusCode != http.StatusBadGateway {
 		t.Fatalf("unreachable target: want 502 and no session, got resp=%v sess=%v err=%v", resp, sess, err)
 	}
@@ -372,7 +372,7 @@ func TestGatewayAdmitsOnlyProxyPageOrigins(t *testing.T) {
 		"http://proxy.localhost.evil":  false,
 		"null":                         false,
 	} {
-		r := httptest.NewRequest(http.MethodConnect, "https://proxy.localhost:18443/__zp/wt", nil)
+		r := httptest.NewRequest(http.MethodConnect, "https://proxy.localhost:18443/zp/wt", nil)
 		if origin != "" {
 			r.Header.Set("Origin", origin)
 		}
@@ -385,13 +385,13 @@ func TestGatewayAdmitsOnlyProxyPageOrigins(t *testing.T) {
 func TestGatewayRequireOriginRejectsEmptyOrigin(t *testing.T) {
 	for _, hosts := range [][]string{nil, {"proxy.localhost"}} {
 		l := &Listener{cfg: Config{PageHosts: hosts, RequireOrigin: true}}
-		r := httptest.NewRequest(http.MethodConnect, "https://proxy.localhost:18443/__zp/wt", nil)
+		r := httptest.NewRequest(http.MethodConnect, "https://proxy.localhost:18443/zp/wt", nil)
 		if l.pageOriginAllowed(r) {
 			t.Fatalf("empty Origin accepted with RequireOrigin=true and PageHosts=%v", hosts)
 		}
 	}
 	l := &Listener{cfg: Config{PageHosts: []string{"proxy.localhost"}, RequireOrigin: true}}
-	r := httptest.NewRequest(http.MethodConnect, "https://proxy.localhost:18443/__zp/wt", nil)
+	r := httptest.NewRequest(http.MethodConnect, "https://proxy.localhost:18443/zp/wt", nil)
 	r.Header.Set("Origin", "https://proxy.localhost:8443")
 	if !l.pageOriginAllowed(r) {
 		t.Fatal("matching Origin rejected with RequireOrigin=true")

@@ -12,10 +12,9 @@
     try { Object.defineProperty(proto, key, { value: fn, writable: d.writable, enumerable: d.enumerable, configurable: d.configurable }); } catch {}
   }
 
-  // Expose the realm context on `__zp_realm` for host inspection; scrubbed from
-  // enumeration by `ZP_HIDDEN_RE`.
+  // Publish the frozen control handle on `__zp_realm`; scrubbed from enumeration by `ZP_HIDDEN_RE`.
   try {
-    Object.defineProperty(root, '__zp_realm', { value: ctx, enumerable: false, configurable: true, writable: false });
+    Object.defineProperty(root, '__zp_realm', { value: realmHandle, enumerable: false, configurable: true, writable: false });
   } catch {}
   // Remove injected prelude `<script>` elements now that they have executed so
   // `head.children`, `firstElementChild`, and `childNodes` match the target's DOM.

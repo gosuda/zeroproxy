@@ -99,7 +99,7 @@ pub fn build_csp_with(ws_origin: &str, opts: &CspOptions) -> String {
 /// - `img-src` / `style-src` / `font-src` / `media-src` allow `blob:`/`data:`
 ///   on top of `'self'` because target pages legitimately produce those and
 ///   they cannot reach the network. Passive subresource URLs emit
-///   `/zp/api/fetch?url=...` from `zp-htmltx` for initial HTML and from the
+///   `/zp/api/v2/fetch?url=...` from `zp-htmltx` for initial HTML and from the
 ///   prelude for DOM writes (including `img.src =` property writes), so
 ///   `'self'` is enforced: a missed rewrite fails loudly and lands in
 ///   `__zp_refusals()` instead of relying on the SW to catch it.
@@ -187,9 +187,13 @@ pub fn build_proxied_csp_with(ws_origin: &str, extra_connect: &[&str], opts: &Cs
 ///   proxied document: `sandbox` (sandboxes the whole document),
 ///   `report-uri`/`report-to` (reports directly to target endpoints),
 ///   `frame-ancestors` (ignored in `<meta>` anyway),
-///   `require-trusted-types-for`/`trusted-types` (breaks DOM write paths),
 ///   `upgrade-insecure-requests`/`block-all-mixed-content` (breaks proxy-origin
 ///   schemes), `navigate-to`, and any unrecognized directive.
+/// - **TRUSTED TYPES** (`require-trusted-types-for`, `trusted-types`): Kept, not
+///   dropped, through [`trusted_types_directives`]. The membrane routes its own
+///   string sinks through a Trusted Types policy, so a document may enforce the
+///   target's policy; `trusted-types` gains the membrane's policy name so that
+///   policy stays creatable. They head the output, before the other categories.
 /// - **INFRA directives** (script/connect/worker/child/frame/style families and
 ///   `default-src`): Union the target sources with our minimum required
 ///   plumbing sources. Stricter host or scheme restrictions from the `<meta>`
@@ -421,7 +425,7 @@ mod tests {
             );
             assert!(
                 !proxied.contains(&format!("{} *", directive)),
-                "proxied surface must not wildcard {}; passive URLs are rewritten to /zp/api/fetch now",
+                "proxied surface must not wildcard {}; passive URLs are rewritten to /zp/api/v2/fetch now",
                 directive
             );
         }

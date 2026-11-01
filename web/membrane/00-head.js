@@ -71,9 +71,10 @@
   // Capture ZeroProxy runtime helpers into closure bindings and delete the
   // global properties so Object.getOwnPropertyNames(window) cannot enumerate
   // them.
-  const ZP = globalThis.ZP;
+  const ZP = globalThis.__zp_internal;
   const ZeroProxyRTGlobal = globalThis.ZeroProxyRT;
   try { delete globalThis.ZP; } catch {}
+  try { delete globalThis.__zp_internal; } catch {}
   try { delete globalThis.ZeroProxyRT; } catch {}
 
   // Rewritten code emits bare calls to __zp_* and __ZP_* helpers, so those
@@ -257,7 +258,7 @@
     try {
       // Fetch the raw WASM bytes via Native.fetch and pass the buffer to
       // ZeroProxyRTGlobal.load so the glue does not call the membrane-wrapped global fetch.
-      Native.fetch(proxyOrigin + '/__zp/zp_page_rt.wasm?v=__ZP_BUILD_ID__')
+      Native.fetch(proxyOrigin + '/zp/Asset/zp-rt.wasm?v=__ZP_BUILD_ID__')
         .then(r => r.arrayBuffer())
         .then(buf => ZeroProxyRTGlobal.load(buf))
         .then(instance => { rt = instance; })
@@ -287,8 +288,8 @@
   const activeObservers = newSet();
   let realmDisposed = false;
   let __zpHeartbeatTimer = null;
-  // Live view of realm state exposed via root.__zp_realm for embedder inspection
-  // and bridge attachment.
+  // Mutable realm state shared by the membrane's own modules. It never leaves this closure: embedders get
+  // `realmHandle` below.
   const ctx = {
     get boot() { return boot; },
     get runtimeToken() { return runtimeToken; },
@@ -306,6 +307,17 @@
     get documentCookie() { return documentCookie; }, set documentCookie(v) { documentCookie = v; },
     get disposed() { return realmDisposed; },
   };
+  // The only object published to the page realm (`window.__zp_realm`, see `zp-core.d.ts`): read-only identifiers and
+  // URLs plus the two lifecycle controls. It forwards to `ctx` lazily because `setBridge` and `dispose` are attached
+  // once the bridge exists.
+  const realmHandle = Object.freeze({
+    get tabId() { return boot.tabId; },
+    get entryId() { return activeEntryId; },
+    getVirtualURL() { return virtualURL.href; },
+    getBaseURL() { return String(baseURL); },
+    setBridge(bridge) { ctx.setBridge(bridge); },
+    dispose() { ctx.dispose(); },
+  });
   initDocumentCookieRecords(documentCookie);
   const urlMeta = newWeakMap();
   // Preserve author-written attribute strings for getAttribute parity after the

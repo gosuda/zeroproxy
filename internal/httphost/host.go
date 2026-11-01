@@ -1,8 +1,8 @@
 // Package httphost implements the ZeroProxy HTTP host: static asset serving,
 // /zp/* routing, the WebSocket byte-pipe bridge (ws-pipe over yamux to SOCKS5),
 // the synchronous XHR hub, and CSP violation reporting.
-// Callers mount NewHandler(Config) on their own HTTP listener or mux and
-// manage optional WebTransport and TURN gateway listeners separately.
+// Callers mount the Server from NewServer on their own HTTP listener or mux
+// and manage optional WebTransport and TURN gateway listeners separately.
 package httphost
 
 import (
@@ -36,21 +36,41 @@ type TransportMode uint8
 
 const (
 	// TransportAuto infers the transport mode from Config.SocksAddr: "internal"
-	// dials directly (permitting private targets unless DisallowPrivateTargets
-	// is set), "direct" dials directly (blocking private targets unless
-	// AllowPrivateTargets is set), and a host:port address dials an upstream
-	// SOCKS5 proxy.
+	// dials directly, "direct" dials directly, and a host:port address dials an
+	// upstream SOCKS5 proxy. Config.TargetPolicy decides whether direct dials
+	// may reach private targets.
 	TransportAuto TransportMode = iota
 	// TransportSOCKS5 bridges yamux streams to an upstream SOCKS5 proxy at
 	// Config.SocksAddr (such as a Tor client listener).
 	TransportSOCKS5
 	// TransportDirect terminates the inner SOCKS5 handshake in-process and
 	// dials resolved target addresses directly over TCP. Non-public target IPs
-	// are rejected unless Config.AllowPrivateTargets is true.
+	// are rejected unless Config.TargetPolicy permits them.
 	TransportDirect
 )
 
-// Config holds the parameters for NewServer and NewHandler.
+// TargetPolicy decides whether direct egress may reach private targets.
+type TargetPolicy uint8
+
+const (
+	// TargetPolicyDefault follows the transport: "internal" mode (a local test
+	// relay) permits private targets, while TransportDirect and "direct" mode
+	// block them.
+	TargetPolicyDefault TargetPolicy = iota
+	// TargetPolicyAllowPrivate permits loopback and RFC 1918 private target
+	// IPs. Link-local and unspecified addresses remain blocked.
+	TargetPolicyAllowPrivate
+	// TargetPolicyBlockPrivate rejects private, loopback, and non-public
+	// target IPs in every direct mode, including "internal".
+	TargetPolicyBlockPrivate
+)
+
+// ICEServerSource issues short-lived TURN credentials for proxied pages.
+type ICEServerSource interface {
+	IssueICEServerCreds(userLabel string) (rtcgw.ICEServerCred, error)
+}
+
+// Config holds the parameters for NewServer.
 type Config struct {
 	WebDir string // built static web asset directory (dist/web)
 	// Transport selects the outbound relay mode. When left at TransportAuto,
@@ -62,15 +82,10 @@ type Config struct {
 	// (base64url SHA-256). Nil for an operator certificate that the browser
 	// validates normally.
 	WtGatewayCertHashes []string
-	// RtcTURN is the embedded TURN server for relay-only WebRTC.
-	RtcTURN *rtcgw.TURNServer
-	// AllowPrivateTargets permits loopback and RFC 1918 private target IPs when
-	// dialing directly (TransportDirect). Link-local and unspecified addresses
-	// remain blocked regardless of this setting.
-	AllowPrivateTargets bool
-	// DisallowPrivateTargets rejects private, loopback, and non-public target
-	// IPs even when SocksAddr is set to the legacy "internal" mode.
-	DisallowPrivateTargets bool
+	// RtcTURN issues the TURN credentials for relay-only WebRTC; nil disables it.
+	RtcTURN ICEServerSource
+	// TargetPolicy decides whether direct egress may reach private targets.
+	TargetPolicy TargetPolicy
 	// TrustProxyHeaders trusts X-Forwarded-Proto from non-loopback peers.
 	TrustProxyHeaders bool
 }
@@ -79,17 +94,16 @@ type Config struct {
 // and the synchronous XHR hub. Callers should invoke Close on shutdown to
 // terminate open yamux sessions and unblock parked sync-fetch requests.
 type Server struct {
-	webDir                 string
-	transport              TransportMode
-	socksAddr              string
-	wtGatewayURL           string
-	wtCertHashes           []string
-	rtcTURN                *rtcgw.TURNServer
-	allowPrivateTargets    bool
-	disallowPrivateTargets bool
-	trustProxyHeaders      bool
-	syncHub                *syncFetchHub
-	handler                http.Handler
+	webDir            string
+	transport         TransportMode
+	socksAddr         string
+	wtGatewayURL      string
+	wtCertHashes      []string
+	rtcTURN           ICEServerSource
+	targetPolicy      TargetPolicy
+	trustProxyHeaders bool
+	syncHub           *syncFetchHub
+	handler           http.Handler
 
 	mu        sync.Mutex
 	sessions  map[*yamuxconn.Session]struct{}
@@ -104,7 +118,7 @@ func NewServer(cfg Config) (*Server, error) {
 	if err := validateConfig(cfg); err != nil {
 		return nil, err
 	}
-	return newUncheckedServer(cfg), nil
+	return buildServer(cfg), nil
 }
 
 func validateConfig(cfg Config) error {
@@ -130,36 +144,32 @@ func validateConfig(cfg Config) error {
 	default:
 		return fmt.Errorf("httphost: unknown TransportMode %d", cfg.Transport)
 	}
+	switch cfg.TargetPolicy {
+	case TargetPolicyDefault, TargetPolicyAllowPrivate, TargetPolicyBlockPrivate:
+	default:
+		return fmt.Errorf("httphost: unknown TargetPolicy %d", cfg.TargetPolicy)
+	}
 	return nil
 }
 
-func newUncheckedServer(cfg Config) *Server {
+func buildServer(cfg Config) *Server {
 	s := &Server{
-		webDir:                 cfg.WebDir,
-		transport:              cfg.Transport,
-		socksAddr:              cfg.SocksAddr,
-		wtGatewayURL:           cfg.WtGatewayURL,
-		wtCertHashes:           cfg.WtGatewayCertHashes,
-		rtcTURN:                cfg.RtcTURN,
-		allowPrivateTargets:    cfg.AllowPrivateTargets,
-		disallowPrivateTargets: cfg.DisallowPrivateTargets,
-		trustProxyHeaders:      cfg.TrustProxyHeaders,
-		syncHub:                newSyncFetchHub(),
-		sessions:               make(map[*yamuxconn.Session]struct{}),
-		closed:                 make(chan struct{}),
+		webDir:            cfg.WebDir,
+		transport:         cfg.Transport,
+		socksAddr:         cfg.SocksAddr,
+		wtGatewayURL:      cfg.WtGatewayURL,
+		wtCertHashes:      cfg.WtGatewayCertHashes,
+		rtcTURN:           cfg.RtcTURN,
+		targetPolicy:      cfg.TargetPolicy,
+		trustProxyHeaders: cfg.TrustProxyHeaders,
+		syncHub:           newSyncFetchHub(),
+		sessions:          make(map[*yamuxconn.Session]struct{}),
+		closed:            make(chan struct{}),
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.handle)
 	s.handler = s.securityHeaders(mux)
 	return s
-}
-
-// NewHandler builds the ZeroProxy HTTP handler: static assets, /zp/*
-// routes, ws-pipe bridge, sync-fetch hub, and CSP report wrapped in the
-// security-headers middleware. The returned http.Handler is a *Server and
-// also implements io.Closer.
-func NewHandler(cfg Config) http.Handler {
-	return newUncheckedServer(cfg)
 }
 
 // ServeHTTP dispatches requests through the security-headers middleware and
@@ -208,15 +218,22 @@ const (
 
 const (
 	controlPrefix = "/zp/"
-	assetPrefix   = controlPrefix + "assets/"
+	assetPrefix   = controlPrefix + "Asset/"
+)
+
+// Runtime assets served under assetPrefix. Scripts live next to index.html in
+// the web directory; the wasm-bindgen glue and wasm modules live in its Asset
+// subdirectory. Anything not listed is refused, so the prefix cannot be used to
+// read other files.
+var (
+	webAssets  = map[string]struct{}{"zp-core.js": {}, "runtime-prelude.js": {}, "worker-prelude.js": {}, "zp-page-bundle.js": {}, "favicon.ico": {}, "manifest.webmanifest": {}}
+	wasmAssets = map[string]struct{}{"zp-bundle.js": {}, "zp-bundle.wasm": {}, "zp-kernel.js": {}, "zp-kernel.wasm": {}, "zp-rt.wasm": {}}
 )
 
 func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Path
 	switch {
 	case path == "/":
-		http.Redirect(w, r, controlPrefix, http.StatusFound)
-	case path == "/index.html":
 		http.Redirect(w, r, controlPrefix, http.StatusFound)
 	case path == controlPrefix || path == controlPrefix+"index.html":
 		s.serveWeb(w, r, "index.html")
@@ -254,63 +271,19 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 		// pin, and fresh TURN credentials. The Service Worker reads this per
 		// navigation and passes it into the page realm boot JSON.
 		s.serveConfig(w, r)
-	case path == controlPrefix+"api/rtc/signal":
+	case path == controlPrefix+"rtc/offer":
 		// WebRTC runs relay-only through the embedded TURN server without
 		// custom signaling; this route returns 501 RTC_GATEWAY_UNAVAILABLE.
 		rtcgw.Handler().ServeHTTP(w, r)
-	case strings.HasPrefix(r.URL.Path, "/__zp/__zp/"):
-		// Defensive: in case build pipeline emits a double-prefixed path.
-		s.safeError(w, r, "MALFORMED_ROUTE", http.StatusBadRequest)
-	case r.URL.Path == "/__zp/zp_bundle_sw.js" || r.URL.Path == "/__zp/zp_bundle_sw_bg.wasm" ||
-		r.URL.Path == "/__zp/zp_kernel_sw.js" || r.URL.Path == "/__zp/zp_kernel_sw_bg.wasm" ||
-		r.URL.Path == "/__zp/zp_page_bundle.js" || r.URL.Path == "/__zp/zp_page_bundle_bg.wasm" ||
-		r.URL.Path == "/__zp/zp_page_rt.wasm":
-		// Rust zp-bundle artifacts produced by wasm-bindgen (web/ + no-modules
-		// flavors). The build copies them under dist/web/__zp/ but the runtime
-		// fetches them from /__zp/<name>; serve from that nested path.
-		s.serveFile(w, r, filepath.Join(s.webDir, "__zp", filepath.Base(r.URL.Path)), mime.TypeByExtension(filepath.Ext(r.URL.Path)))
-	case strings.HasPrefix(r.URL.Path, "/__zp/wt"):
+	case path == controlPrefix+"rtc/turn-credentials":
+		s.serveTURNCredentials(w, r)
+	case path == controlPrefix+"wt":
 		// The WebTransport gateway listens on a separate UDP port (-wt-addr)
-		// speaking HTTP/3. Any /__zp/wt request arriving on this TCP listener
+		// speaking HTTP/3. Any /zp/wt request arriving on this TCP listener
 		// receives 501 WT_UNSUPPORTED.
 		wtproxy.Handler().ServeHTTP(w, r)
-	case strings.HasPrefix(r.URL.Path, "/__zp/rtc/"):
-		rtcgw.Handler().ServeHTTP(w, r)
-	case strings.HasPrefix(path, "/p/"):
-		redirectLegacy(w, r, controlPrefix+"p/"+strings.TrimPrefix(path, "/p/"))
-	case strings.HasPrefix(path, "/__zp/"):
-		s.legacyZP(w, r)
-	case path == "/sw.js":
-		redirectLegacy(w, r, controlPrefix+"sw.js")
 	default:
 		s.safeError(w, r, "POLICY_BLOCKED", http.StatusForbidden)
-	}
-}
-
-func redirectLegacy(w http.ResponseWriter, r *http.Request, nextPath string) {
-	u := *r.URL
-	u.Path = nextPath
-	http.Redirect(w, r, u.String(), http.StatusTemporaryRedirect)
-}
-
-func (s *server) legacyZP(w http.ResponseWriter, r *http.Request) {
-	switch r.URL.Path {
-	case "/__zp/ws-pipe":
-		redirectLegacy(w, r, controlPrefix+"ws-pipe")
-	case "/__zp/worker-bootstrap.js":
-		redirectLegacy(w, r, controlPrefix+"worker-bootstrap.js")
-	default:
-		if strings.HasPrefix(r.URL.Path, "/__zp/error/") {
-			redirectLegacy(w, r, controlPrefix+"error/"+strings.TrimPrefix(r.URL.Path, "/__zp/error/"))
-			return
-		}
-		name := strings.TrimPrefix(r.URL.Path, "/__zp/")
-		switch name {
-		case "zp-core.js", "runtime-prelude.js", "worker-prelude.js", "zp-page-bundle.js":
-			redirectLegacy(w, r, assetPrefix+name)
-		default:
-			s.safeError(w, r, "POLICY_BLOCKED", http.StatusForbidden)
-		}
 	}
 }
 
@@ -319,12 +292,15 @@ func (s *server) serveWeb(w http.ResponseWriter, r *http.Request, name string) {
 }
 
 func (s *server) serveAsset(w http.ResponseWriter, r *http.Request, name string) {
-	switch name {
-	case "zp-core.js", "runtime-prelude.js", "worker-prelude.js", "zp-page-bundle.js", "favicon.ico", "manifest.webmanifest":
+	if _, ok := webAssets[name]; ok {
 		s.serveWeb(w, r, name)
-	default:
-		s.safeError(w, r, "POLICY_BLOCKED", http.StatusForbidden)
+		return
 	}
+	if _, ok := wasmAssets[name]; ok {
+		s.serveWeb(w, r, filepath.Join("Asset", name))
+		return
+	}
+	s.safeError(w, r, "POLICY_BLOCKED", http.StatusForbidden)
 }
 
 func (s *server) serveFile(w http.ResponseWriter, r *http.Request, path, contentType string) {
@@ -362,10 +338,36 @@ func (s *server) serveFile(w http.ResponseWriter, r *http.Request, path, content
 }
 
 func (s *server) workerBootstrap(w http.ResponseWriter, r *http.Request) {
-	body := "const __zp_worker_params=new URLSearchParams(self.location.hash.slice(1));self.__ZP_WORKER_TARGET=__zp_worker_params.get('u')||'about:blank';self.__ZP_WORKER_TAB_ID=__zp_worker_params.get('tab')||'';self.__ZP_WORKER_SERVERS=__zp_worker_params.getAll('server');importScripts('/zp/assets/worker-prelude.js');importScripts('/zp/api/worker-script?tab=' + encodeURIComponent(self.__ZP_WORKER_TAB_ID) + '&u=' + encodeURIComponent(self.__ZP_WORKER_TARGET));"
+	body := "const __zp_worker_params=new URLSearchParams(self.location.hash.slice(1));self.__ZP_WORKER_TARGET=__zp_worker_params.get('u')||'about:blank';self.__ZP_WORKER_TAB_ID=__zp_worker_params.get('tab')||'';self.__ZP_WORKER_SERVERS=__zp_worker_params.getAll('server');importScripts('/zp/Asset/worker-prelude.js');importScripts('/zp/api/worker-script?tab=' + encodeURIComponent(self.__ZP_WORKER_TAB_ID) + '&u=' + encodeURIComponent(self.__ZP_WORKER_TARGET));"
 	w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	_, _ = io.WriteString(w, body)
+}
+
+// serveTURNCredentials issues one short-lived TURN credential tuple for the
+// page's RTCPeerConnection. It answers 501 RTC_GATEWAY_UNAVAILABLE when no
+// embedded TURN server is configured.
+func (s *server) serveTURNCredentials(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.isAllowedOrigin(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	if s.rtcTURN == nil {
+		rtcgw.Handler().ServeHTTP(w, r)
+		return
+	}
+	cred, err := s.rtcTURN.IssueICEServerCreds("")
+	if err != nil {
+		http.Error(w, "credential issuance failed", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	_ = json.NewEncoder(w).Encode(cred)
 }
 
 // serveConfig emits the client-facing runtime config read by the Service Worker
@@ -613,10 +615,10 @@ func (s *server) isDirectTransport() bool {
 }
 
 func (s *server) disallowsPrivateTargets() bool {
-	if s.disallowPrivateTargets {
+	switch s.targetPolicy {
+	case TargetPolicyBlockPrivate:
 		return true
-	}
-	if s.allowPrivateTargets {
+	case TargetPolicyAllowPrivate:
 		return false
 	}
 	return s.transport == TransportDirect || strings.EqualFold(strings.TrimSpace(s.socksAddr), directSOCKSMode)

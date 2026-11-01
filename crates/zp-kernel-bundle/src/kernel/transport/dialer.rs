@@ -10,15 +10,12 @@
 //! TLS and HTTP layering above the returned byte stream are unchanged;
 //! a Dialer only decides where raw bytes terminate.
 //!
-//! The kernel is `wasm32`-only and single-threaded, so the trait uses
-//! `LocalBoxFuture` + `Rc` rather than `Send`/`BoxFuture`.
+//! The trait, address, and error types live in `crate::dial` so they compile
+//! on host targets; this module adds the wasm-only `RelayDialer` default.
 
-use std::cell::RefCell;
-use std::fmt;
 use std::rc::Rc;
 
 use futures_util::future::LocalBoxFuture;
-use futures_util::io::{AsyncRead, AsyncWrite};
 use wasm_bindgen::JsValue;
 
 use super::fetch::jserr;
@@ -26,77 +23,14 @@ use super::pool;
 use super::socks5::{self, Auth};
 use super::yamux;
 
-/// Byte stream produced by a [`Dialer`]. Marker trait so
-/// `Box<dyn AsyncIo>` can flow through `TlsStream`/`http1`/`http2`, which
-/// only require `AsyncRead + AsyncWrite + Unpin`.
-pub trait AsyncIo: AsyncRead + AsyncWrite + Unpin {}
-impl<T: AsyncRead + AsyncWrite + Unpin> AsyncIo for T {}
-
-/// TCP-level endpoint the dialer must reach.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TargetAddr {
-    pub host: String,
-    pub port: u16,
-    pub isolation_key: Option<String>,
-}
-
-/// Structured error returned by [`Dialer::connect`]. Converts into the wire
-/// `TARGET_CONNECT_FAILED:*` `JsValue` format at the JS boundary.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DialError {
-    /// Failed to establish or open a multiplexed stream on the relay session.
-    RelaySession {
-        stage: &'static str,
-        detail: String,
-    },
-    /// Upstream SOCKS5 or target TCP connect failed.
-    TargetConnect {
-        stage: &'static str,
-        detail: String,
-    },
-    /// Custom embedder-supplied dial failure.
-    Custom {
-        code: &'static str,
-        detail: String,
-    },
-}
+pub use crate::dial::{
+    clear_dialer, injected_dialer, set_dialer, AsyncIo, DialError, Dialer, TargetAddr,
+};
 
 impl DialError {
-    pub fn code(&self) -> &'static str {
-        match self {
-            DialError::RelaySession { stage, .. } | DialError::TargetConnect { stage, .. } => stage,
-            DialError::Custom { code, .. } => code,
-        }
-    }
-
-    pub fn detail(&self) -> &str {
-        match self {
-            DialError::RelaySession { detail, .. }
-            | DialError::TargetConnect { detail, .. }
-            | DialError::Custom { detail, .. } => detail,
-        }
-    }
-
     pub fn into_js_error(self) -> JsValue {
         jserr(self.code(), &self.detail())
     }
-}
-
-impl fmt::Display for DialError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}: {}", self.code(), self.detail())
-    }
-}
-
-impl std::error::Error for DialError {}
-
-/// Pluggable raw-byte-connection factory.
-pub trait Dialer {
-    fn connect<'a>(
-        &'a self,
-        target: &'a TargetAddr,
-        relay_url: &'a str,
-    ) -> LocalBoxFuture<'a, Result<Box<dyn AsyncIo>, DialError>>;
 }
 
 fn now_ms() -> f64 {
@@ -203,21 +137,7 @@ impl Dialer for RelayDialer {
     }
 }
 
-thread_local! {
-    /// Host-injected dialer. `None` means the default relay pipeline.
-    static CURRENT: RefCell<Option<Rc<dyn Dialer>>> = RefCell::new(None);
-}
-
 /// Active dialer: the injected one, or a fresh `RelayDialer`.
 pub fn dialer() -> Rc<dyn Dialer> {
-    CURRENT
-        .with(|c| c.borrow().clone())
-        .unwrap_or_else(|| Rc::new(RelayDialer))
-}
-
-/// Embedder hook: install a custom `Dialer` before the first fetch.
-/// Deliberately not a `#[wasm_bindgen]` export: wasm hosts implement the
-/// trait in Rust and link it; the JS-side transport contract is unchanged.
-pub fn set_dialer(d: Rc<dyn Dialer>) {
-    CURRENT.with(|c| *c.borrow_mut() = Some(d));
+    injected_dialer().unwrap_or_else(|| Rc::new(RelayDialer))
 }

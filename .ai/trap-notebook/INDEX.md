@@ -6,6 +6,7 @@ Keep each summary to a single line under 160 characters and point every detail l
 
 | Date | Category | Summary | Detail |
 |---|---|---|---|
+| 2026-11-01 | wasm / page-rt | Bulk URL results truncated handles to 16 bits and a 64-bit hash collision shadowed an entry; 28-bit handles and collision chains now. | wasm-page-rt.md#bulk-handle-width-2026-11-01 |
 | 2026-10-27 | dependencies / CSS | Dependabot lexical 6 is pinned by every swc_css_parser; replaced by a parse-only stand-in, which also ends a panic on :nth-child(99999999999n). | build-deploy.md#lexical-standin-2026-10-27 |
 | 2026-10-27 | membrane / cookies | Notion: the cookieStore facade refused EventTarget methods a page took from the prototype chain (Sentry over airgap); answered for the facade. | rewriter.md#cookie-store-event-methods-2026-10-27 |
 | 2026-10-27 | rewriter / membrane | Notion: Error.prepareStackTrace read through an alias of Error returned the membrane sanitizer; such reads are routed now. | rewriter.md#stack-hook-alias-2026-10-27 |

@@ -37,7 +37,6 @@ pub fn rewrite_script_js(
     let opts = RewriteOpts {
         kind,
         target_url: target_url.to_string(),
-        strict: true,
         proxy_origin: proxy_origin.to_string(),
     };
     REWRITER.with(|r| {

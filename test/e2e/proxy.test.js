@@ -6161,7 +6161,7 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
   if (!prebuilt) run('node', ['scripts/build.mjs', '--out', buildOut]);
   const serverPath = path.join(buildOut, process.platform === 'win32' ? 'zeroproxy-server.exe' : 'zeroproxy-server');
   const webPath = path.join(buildOut, 'web');
-  for (const file of [serverPath, ...['index.html', 'sw.js', 'runtime-prelude.js', 'worker-prelude.js', 'zp-page-bundle.js', '__zp/zp_bundle_sw.js', '__zp/zp_bundle_sw_bg.wasm', '__zp/zp_kernel_sw.js', '__zp/zp_kernel_sw_bg.wasm', '__zp/zp_page_rt.wasm'].map(name => path.join(webPath, name))]) {
+  for (const file of [serverPath, ...['index.html', 'sw.js', 'runtime-prelude.js', 'worker-prelude.js', 'zp-page-bundle.js', 'Asset/zp-bundle.js', 'Asset/zp-bundle.wasm', 'Asset/zp-kernel.js', 'Asset/zp-kernel.wasm', 'Asset/zp-rt.wasm'].map(name => path.join(webPath, name))]) {
     assert.ok(fs.existsSync(file) && fs.statSync(file).size > 0, `required built artifact missing: ${file}; prebuilt mode never rebuilds`);
   }
 

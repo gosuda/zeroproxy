@@ -47,7 +47,6 @@ impl<'a> DocCtx<'a> {
         RewriteOpts {
             kind,
             target_url: self.target_url.to_string(),
-            strict: true,
             proxy_origin: self.proxy_origin.to_string(),
         }
     }
@@ -55,8 +54,6 @@ impl<'a> DocCtx<'a> {
     fn transform_options(&self) -> zp_htmltx::TransformOptions {
         zp_htmltx::TransformOptions {
             target_url: self.target_url.to_string(),
-            strict: true,
-            pending_gate: true,
             proxy_origin: self.proxy_origin.to_string(),
         }
     }
@@ -69,7 +66,7 @@ pub enum EngineError {
     UnknownScriptKind(String),
     Rewrite(zp_rewriter::RewriteError),
     Html(zp_htmltx::TransformError),
-    Css(String),
+    Css(zp_css::CssError),
 }
 
 impl fmt::Display for EngineError {
@@ -78,7 +75,7 @@ impl fmt::Display for EngineError {
             EngineError::UnknownScriptKind(k) => write!(f, "unknown script kind: {k}"),
             EngineError::Rewrite(e) => fmt::Display::fmt(e, f),
             EngineError::Html(e) => fmt::Display::fmt(e, f),
-            EngineError::Css(e) => f.write_str(e),
+            EngineError::Css(e) => fmt::Display::fmt(e, f),
         }
     }
 }
@@ -88,6 +85,12 @@ impl std::error::Error for EngineError {}
 impl From<zp_rewriter::RewriteError> for EngineError {
     fn from(e: zp_rewriter::RewriteError) -> Self {
         EngineError::Rewrite(e)
+    }
+}
+
+impl From<zp_css::CssError> for EngineError {
+    fn from(e: zp_css::CssError) -> Self {
+        EngineError::Css(e)
     }
 }
 
@@ -173,8 +176,8 @@ impl TransformEngine {
         zp_shared::TRANSFORMER_VERSION
     }
 
-    /// Strict-mode script rewrite using a typed [`ScriptKind`].
-    pub fn rewrite_script_kind(
+    /// Script rewrite for a typed [`ScriptKind`]; a script that fails to parse is an error (fail closed).
+    pub fn rewrite_script(
         &mut self,
         source: &str,
         kind: ScriptKind,
@@ -187,20 +190,9 @@ impl TransformEngine {
             .map_err(EngineError::from)
     }
 
-    /// Strict-mode script rewrite. Returns the rewritten source.
-    pub fn rewrite_script(
-        &mut self,
-        source: &str,
-        kind: &str,
-        ctx: &DocCtx,
-    ) -> Result<String, EngineError> {
-        let kind = parse_script_kind(kind)?;
-        self.rewrite_script_kind(source, kind, ctx)
-    }
-
-    /// Patch-mode emit using a typed [`ScriptKind`], reusing the persistent OXC
+    /// Patch-mode emit: the flat patch JSON envelope (`patches_to_json`) without reconstructing the output source, reusing the persistent OXC
     /// arena on [`RewriterInstance`].
-    pub fn rewrite_script_patches_json_kind(
+    pub fn rewrite_script_patches_json(
         &mut self,
         source: &str,
         kind: ScriptKind,
@@ -211,21 +203,8 @@ impl TransformEngine {
         Ok(patches_to_json(source.len(), &result.patches))
     }
 
-    /// Patch-mode emit: returns the flat patch JSON envelope
-    /// (`patches_to_json`) without reconstructing the output source.
-    pub fn rewrite_script_patches_json(
-        &mut self,
-        source: &str,
-        kind: &str,
-        ctx: &DocCtx,
-    ) -> Result<String, EngineError> {
-        let kind = parse_script_kind(kind)?;
-        self.rewrite_script_patches_json_kind(source, kind, ctx)
-    }
-
-    /// Source Map v3 mapping rewritten positions back to the original using a
-    /// typed [`ScriptKind`].
-    pub fn compose_source_map_kind(
+    /// Source Map v3 mapping rewritten positions back to the original.
+    pub fn compose_source_map(
         &mut self,
         source: &str,
         kind: ScriptKind,
@@ -236,20 +215,8 @@ impl TransformEngine {
         Ok(zp_rewriter::compose_source_map(source, &opts, source_url)?)
     }
 
-    /// Source Map v3 mapping rewritten positions back to the original.
-    pub fn compose_source_map(
-        &mut self,
-        source: &str,
-        kind: &str,
-        ctx: &DocCtx,
-        source_url: &str,
-    ) -> Result<String, EngineError> {
-        let kind = parse_script_kind(kind)?;
-        self.compose_source_map_kind(source, kind, ctx, source_url)
-    }
-
-    /// `compose_source_map_kind` + chain with the target site's original map.
-    pub fn compose_source_map_chained_kind(
+    /// `compose_source_map` + chain with the target site's original map.
+    pub fn compose_source_map_chained(
         &mut self,
         source: &str,
         kind: ScriptKind,
@@ -266,20 +233,7 @@ impl TransformEngine {
         )?)
     }
 
-    /// `compose_source_map` + chain with the target site's original map.
-    pub fn compose_source_map_chained(
-        &mut self,
-        source: &str,
-        kind: &str,
-        ctx: &DocCtx,
-        source_url: &str,
-        original_map_json: &str,
-    ) -> Result<String, EngineError> {
-        let kind = parse_script_kind(kind)?;
-        self.compose_source_map_chained_kind(source, kind, ctx, source_url, original_map_json)
-    }
-
-    /// One-shot HTML transform (strict mode + pending gate).
+    /// One-shot HTML transform (fail closed: unparsable scripts are replaced).
     pub fn transform_html(&mut self, html: &str, ctx: &DocCtx) -> Result<String, EngineError> {
         let opts = ctx.transform_options();
         zp_htmltx::transform(html, &opts)
@@ -306,7 +260,7 @@ impl TransformEngine {
 
     /// CSS rewrite. `base_url` is the CSS file's absolute URL;
     /// `control_prefix` is typically `/zp/`; `ctx.proxy_origin` makes the
-    /// emitted `/zp/api/fetch?url=…` references absolute (empty keeps
+    /// emitted `/zp/api/v2/fetch?url=…` references absolute (empty keeps
     /// legacy root-relative output).
     pub fn rewrite_css(
         &mut self,
@@ -315,12 +269,8 @@ impl TransformEngine {
         control_prefix: &str,
         ctx: &DocCtx,
     ) -> Result<String, EngineError> {
-        let out = zp_css::rewrite_css(source, base_url, control_prefix, ctx.proxy_origin);
-        if out.ok {
-            Ok(out.code)
-        } else {
-            Err(EngineError::Css(out.error))
-        }
+        let out = zp_css::rewrite_css(source, base_url, control_prefix, ctx.proxy_origin)?;
+        Ok(out.code)
     }
 
     /// Strict CSP for a proxy WebSocket origin.
@@ -350,26 +300,39 @@ impl TransformEngine {
 mod tests {
     use super::*;
 
-    #[test]
-    fn typed_and_string_rewrites_share_arena_and_match() {
-        let mut engine = TransformEngine::new();
-        let ctx = DocCtx::new("https://example.com/app.js", "http://proxy.localhost:8080");
-        let src = "var f = eval; f('return globalThis');";
-        let by_str = engine.rewrite_script(src, "classic", &ctx).unwrap();
-        let by_kind = engine
-            .rewrite_script_kind(src, ScriptKind::Classic, &ctx)
-            .unwrap();
-        assert_eq!(by_str, by_kind);
-        assert!(by_kind.contains("__zp_get"));
+    fn ctx() -> DocCtx<'static> {
+        DocCtx::new("https://example.com/app.js", "http://proxy.localhost:8080")
+    }
 
-        let patches_str = engine
-            .rewrite_script_patches_json(src, "classic", &ctx)
+    #[test]
+    fn rewrite_and_patch_modes_agree_on_the_same_script() {
+        let mut engine = TransformEngine::new();
+        let src = "var f = eval; f('return globalThis');";
+        let full = engine.rewrite_script(src, ScriptKind::Classic, &ctx()).unwrap();
+        assert!(full.contains("__zp_get"), "{full}");
+        let patches = engine
+            .rewrite_script_patches_json(src, ScriptKind::Classic, &ctx())
             .unwrap();
-        let patches_kind = engine
-            .rewrite_script_patches_json_kind(src, ScriptKind::Classic, &ctx)
-            .unwrap();
-        assert_eq!(patches_str, patches_kind);
-        assert!(patches_kind.contains("eval"));
+        assert!(patches.starts_with(&format!("{{\"len\":{}", src.len())), "{patches}");
+        assert!(patches.contains("eval"), "{patches}");
+    }
+
+    #[test]
+    fn script_kind_names_are_parsed_at_the_boundary() {
+        assert!(matches!(parse_script_kind("module"), Ok(ScriptKind::Module)));
+        match parse_script_kind("bogus") {
+            Err(EngineError::UnknownScriptKind(k)) => assert_eq!(k, "bogus"),
+            other => panic!("expected UnknownScriptKind, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unparsable_script_is_an_error_not_passthrough() {
+        let mut engine = TransformEngine::new();
+        let err = engine
+            .rewrite_script("function (", ScriptKind::Classic, &ctx())
+            .unwrap_err();
+        assert!(matches!(err, EngineError::Rewrite(_)), "{err}");
     }
 
     #[test]
@@ -381,6 +344,6 @@ mod tests {
         let out = engine
             .rewrite_css_with_ctx(css, "https://example.com/style.css", &ctx)
             .unwrap();
-        assert!(out.contains("http://proxy.localhost:8080/custom-zp/api/fetch?url="));
+        assert!(out.contains("http://proxy.localhost:8080/custom-zp/api/v2/fetch?url="));
     }
 }

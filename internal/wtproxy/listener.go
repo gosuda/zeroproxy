@@ -3,7 +3,7 @@
 // Routes a virtual `new WebTransport(target_url)` session from a proxied page
 // to the target server:
 //   - The page realm opens a WebTransport CONNECT request to this listener on
-//     `-wt-path` (default `/__zp/wt`).
+//     `-wt-path` (default `/zp/wt`).
 //   - The target URL is passed via the `X-ZP-WT-Target` request header or the
 //     `?target=` query parameter, preserving standard QUIC ALPN and
 //     WebTransport negotiation.
@@ -47,7 +47,7 @@ type Config struct {
 	// (e.g. ":18443"). The listener is disabled when Addr is empty.
 	Addr string
 	// Path is the URL path on which clients send the WebTransport
-	// CONNECT request. Defaults to "/__zp/wt".
+	// CONNECT request. Defaults to "/zp/wt".
 	Path string
 	// CertFile and KeyFile are the TLS cert/key paths. If both are empty,
 	// the listener falls back to a self-signed in-memory dev cert
@@ -96,7 +96,7 @@ type Listener struct {
 // New builds a Listener without binding the socket; call Run() to start serving.
 func New(cfg Config) (*Listener, error) {
 	if cfg.Path == "" {
-		cfg.Path = "/__zp/wt"
+		cfg.Path = "/zp/wt"
 	}
 	logger := cfg.Logger
 	if logger == nil {

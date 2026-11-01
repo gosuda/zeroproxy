@@ -4,7 +4,7 @@ A frame that belongs to another site than the top document runs in its own brows
 
 ## Why
 
-Every proxied frame is served from one real origin, so the browser puts a frame and its embedder in the same process and lets them share a main thread. Natively, a frame of another site is isolated (an out-of-process frame). Pages can tell: a verification widget such as Cloudflare Turnstile fails when it shares its embedder's process, even with no membrane involved (a native page whose widget frame was forced into its embedder's process fails 4 of 4; see the ERRATA Glassdoor row). Observable differences include the postMessage round trip (about 0.4 ms across processes, 0.03 ms inside one), `performance.memory` bucketing, long-task and long-animation-frame attribution, and the `measureUserAgentSpecificMemory` breakdown.
+Every proxied frame is served from one real origin, so the browser puts a frame and its embedder in the same process and lets them share a main thread. Natively, a frame of another site is isolated (an out-of-process frame). Pages can tell: a verification widget such as Cloudflare Turnstile fails when it shares its embedder's process, even with no membrane involved (a native page whose widget frame was forced into its embedder's process fails 4 of 4; see the Glassdoor row in docs/errata.md). Observable differences include the postMessage round trip (about 0.4 ms across processes, 0.03 ms inside one), `performance.memory` bucketing, long-task and long-animation-frame attribution, and the `measureUserAgentSpecificMemory` breakdown.
 
 ## Where it applies
 

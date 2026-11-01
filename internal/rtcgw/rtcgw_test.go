@@ -13,7 +13,7 @@ import (
 
 func TestHandlerReturns501WithErrorCode(t *testing.T) {
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest("POST", "/__zp/rtc/signal", nil)
+	req := httptest.NewRequest("POST", "/zp/rtc/offer", nil)
 	Handler().ServeHTTP(rec, req)
 	if rec.Code != 501 {
 		t.Fatalf("expected 501, got %d", rec.Code)

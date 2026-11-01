@@ -108,7 +108,7 @@ test('WebTransport through the D4 gateway matches native (page and worker)', { t
   const gwPort = await freeUDP();
   const proxy = childProcess.spawn(serverPath, [
     '-addr', `127.0.0.1:${proxyPort}`, '-web', path.join(dist, 'web'), '-socks', 'internal',
-    '-wt-addr', `127.0.0.1:${gwPort}`, '-wt-public-url', `https://proxy.localhost:${gwPort}/__zp/wt`,
+    '-wt-addr', `127.0.0.1:${gwPort}`, '-wt-public-url', `https://proxy.localhost:${gwPort}/zp/wt`,
   ], { stdio: ['ignore', 'ignore', 'pipe'] });
   procs.push(proxy);
   proxy.stderr.on('data', d => { gatewayLog += d; });

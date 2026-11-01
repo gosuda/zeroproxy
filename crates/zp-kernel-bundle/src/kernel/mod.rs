@@ -6,8 +6,6 @@
 //! the [`transport`] submodule. The WASM kernel speaks SOCKS5 + TLS + HTTP
 //! itself so the relay only sees encrypted bytes.
 
-#![cfg(target_arch = "wasm32")]
-
 pub mod transport;
 
 use js_sys::{Array, ArrayBuffer, Function, Promise, Reflect, Uint8Array};
@@ -20,19 +18,6 @@ use wasm_bindgen_futures::JsFuture;
 #[wasm_bindgen(js_name = kernelVersion)]
 pub fn kernel_version() -> String {
     zp_shared::TRANSFORMER_VERSION.to_string()
-}
-
-/// Diagnostic: synchronous probe to verify the basic JsValue ABI works
-/// for this crate's wasm-bindgen surface.
-#[wasm_bindgen(js_name = kernelEchoSync)]
-pub fn kernel_echo_sync(arg: JsValue) -> JsValue {
-    push_trace(&format!(
-        "echo_sync:is_undef={} is_obj={} as_str={:?}",
-        arg.is_undefined(),
-        arg.is_object(),
-        arg.as_string()
-    ));
-    arg
 }
 
 /// Initialize the Rust kernel.
@@ -92,16 +77,6 @@ pub fn kernel_set_captured_spec(b64_json: &str) {
         spec.named_groups.len()
     ));
     rustls::ja3::set_captured_spec(spec);
-}
-
-/// Diagnostic: read the named_groups dump set inside
-/// apply_chrome_ja3_shape. Returns "default=...;captured=..." so the SW's
-/// `/zp/api/diag/trace` (or any caller) can include it in the
-/// diagnostic report.
-#[wasm_bindgen(js_name = kernelLastNamedGroups)]
-pub fn kernel_last_named_groups() -> String {
-    let (def, cap) = rustls::ja3::last_named_groups_dump();
-    format!("default={:?};captured={:?}", def, cap)
 }
 
 /// Converts the JSON envelope from `/zp/api/fp` into a rustls
@@ -318,16 +293,6 @@ pub async fn kernel_fetch(request_js: JsValue) -> Result<JsValue, JsValue> {
         "kernel_fetch:hdr-promoted count={}",
         headers_owned.len()
     ));
-    if url.contains("nid.naver.com") || url.contains("github.com") {
-        let names: Vec<String> = headers_owned
-            .iter()
-            .map(|(k, v)| format!("{}={}", k, v.chars().take(40).collect::<String>()))
-            .collect();
-        push_trace(&format!(
-            "kernel_fetch:hdr-final url={} hdrs={:?}",
-            url, names
-        ));
-    }
 
     if url.is_empty() {
         push_trace("kernel_fetch:empty-url");
@@ -401,13 +366,6 @@ pub fn kernel_stream(arg: JsValue) -> js_sys::Promise {
         let headers = [("Origin", origin.as_str()), ("User-Agent", user_agent.as_str()), ("Cookie", cookie.as_str())];
         transport::ws_client::open(&url, &protocols, &headers, isolation_key.as_deref()).await
     })
-}
-
-/// Cookie jar bridge stub. Real implementation will mirror document.cookie
-/// from the SW into a per-tab cookie store before sending each request.
-#[wasm_bindgen(js_name = kernelCookieSet)]
-pub fn kernel_cookie_set(_payload: &str) -> bool {
-    false
 }
 
 // JS request decoders (shared by `kernel_fetch` and any future entry points)

@@ -133,7 +133,7 @@ test('Fetch responses retain native identity, filtered metadata, clone and opaqu
     for (const key of ['url', 'redirected', 'type', 'clone']) Object.defineProperty(Response.prototype, key, descriptors[key]);
   });
   const worker = loadWorker(async () => response(200));
-  const decode = worker.ZP.createFetchResponseAdapter(Response, Headers);
+  const decode = worker.__zp_internal.createFetchResponseAdapter(Response, Headers);
   const adapted = decode(new Response('hello', { headers: {
     'X-ZP-Fetch-Meta': JSON.stringify({ url: 'https://site.example/final', redirected: true, type: 'basic' }),
     'X-ZP-Set-Cookie': 'secret=value',

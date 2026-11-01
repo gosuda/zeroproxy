@@ -4,9 +4,6 @@ Most web proxies force an uncomfortable trade-off. Server-side proxies decrypt y
 
 ZeroProxy takes a different path. Open a normal browser tab, point it at the ZeroProxy launcher, and browse any website inside a self-contained virtual environment. You do not need to install an extension or configure system-wide network settings. Every page runs inside a client-side JavaScript membrane that isolates cookies, storage, and DOM access per target site, while a WebAssembly transport kernel inside the Service Worker handles TLS encryption and HTTP framing directly in your browser. The Go server only forwards encrypted byte streams to your chosen transport, such as Tor with per-tab stream isolation or a local development connection.
 
-> [!NOTE]
-> Website compatibility refactoring is in progress; this repository is a working prototype rather than a finished production release. Current scope, known limitations, and active engineering tracks live in the [website compatibility refactor plan](.ai/design/website-compat-refactor.md).
-
 ## How It Works
 
 When you open a website through ZeroProxy, your browser and the local relay divide responsibilities so that page state and TLS sessions stay on the client.
@@ -56,10 +53,10 @@ This step compiles the Go server binary and the WebAssembly bundles into `dist/`
 ```text
 dist/zeroproxy-server                  Go relay server (.exe on Windows)
 dist/web/                              Built browser assets served to clients
-dist/web/__zp/zp_bundle_sw_bg.wasm     Service Worker HTML/CSS/JS rewrite bundle
-dist/web/__zp/zp_kernel_sw_bg.wasm     Lazily loaded transport kernel (yamux, SOCKS5, rustls, HTTP)
-dist/web/__zp/zp_page_bundle_bg.wasm   Page-realm dynamic script rewriter
-dist/web/__zp/zp_page_rt.wasm          Raw WASM runtime for synchronous URL policy checks
+dist/web/Asset/zp-bundle.wasm          Service Worker HTML/CSS/JS rewrite bundle
+dist/web/Asset/zp-kernel.wasm          Lazily loaded transport kernel (yamux, SOCKS5, rustls, HTTP)
+dist/web/zp-page-bundle.js             Page-realm dynamic script rewriter (the WASM is inlined)
+dist/web/Asset/zp-rt.wasm              Raw WASM runtime for synchronous URL policy checks
 ```
 
 ### 2. Start the Relay Server
@@ -149,11 +146,11 @@ Use the documents below to explore ZeroProxy's architecture, security status, op
 | :--- | :--- |
 | [`CLAUDE.md`](CLAUDE.md) | Architecture overview, crate responsibilities, build and test commands, and contributor workflow rules. |
 | [`AGENTS.md`](AGENTS.md) | Code quality and documentation standards for contributors and automated agents. |
-| [`PRODUCTION_ROLLOUT.md`](PRODUCTION_ROLLOUT.md) | Operator dogfood checklist, runtime monitoring signals, and rollback procedure. |
-| [`REFACTOR.md`](REFACTOR.md) | Component boundaries and embedding interfaces (`zp-engine`, `Dialer`, membrane bridge, and `internal/httphost`). |
-| [`PHASE2_STATUS.md`](PHASE2_STATUS.md) | Subsystem verification matrix, security gate evidence, and intentional compatibility trade-offs. |
-| [`ERRATA.md`](ERRATA.md) | Catalog of resolved containment and compatibility defects alongside open residuals. |
-| [`HANDOFF.md`](HANDOFF.md) | Current engineering scope, real-site compatibility status, and browser diagnostic workflows. |
+| [`docs/architecture.md`](docs/architecture.md) | Layers, component boundaries, the `/zp/*` wire contract, the rewriter and WebAssembly ABIs, and embedding interfaces. |
+| [`docs/containment-gates.md`](docs/containment-gates.md) | Verification baseline, containment gate evidence, and intentional divergences from native browsers. |
+| [`docs/errata.md`](docs/errata.md) | Containment and compatibility risk inventory: what is closed and the residuals that remain. |
+| [`docs/engineering-guide.md`](docs/engineering-guide.md) | Engineering scope, real-site survey status, and browser diagnostic workflows. |
+| [`docs/rollout.md`](docs/rollout.md) | Operator dogfood checklist, runtime monitoring signals, and rollback procedure. |
 | [`.ai/design/website-compat-refactor.md`](.ai/design/website-compat-refactor.md) | Website compatibility design, responsibility boundaries, and active refactor tracks. |
 | [`.ai/trap-notebook/README.md`](.ai/trap-notebook/README.md) & [`.ai/trap-notebook/INDEX.md`](.ai/trap-notebook/INDEX.md) | Indexed reference of subtle browser, AST rewriter, Service Worker, and TLS traps. |
 | [`test/browser/README.md`](test/browser/README.md) | Cross-site browser diagnostic probes covering isolation, fidelity, console noise, and prototype shapes. |

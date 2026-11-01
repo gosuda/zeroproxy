@@ -424,8 +424,8 @@
       try { u = new Native.URL(m); } catch { return m; }
       if (u.origin !== proxyOrigin) return m;
       const p = u.pathname;
-      if (p === ZP.apiPath('fetch') || p === ZP.apiPath('v2/fetch')) return u.searchParams.get('url') || m;
-      if (p === ZP.apiPath('script') || p === ZP.apiPath('worker-script') || p === ZP.apiPath('sourcemap')) return u.searchParams.get('u') || m;
+      if (p === ZP.apiPath('v2/fetch')) return u.searchParams.get('url') || m;
+      if (p === ZP.apiPath('script') || p === ZP.apiPath('worker-script') || p === ZP.apiPath('sourcemaps')) return u.searchParams.get('u') || m;
       const via = u.searchParams.get('via');
       if (via) return via;
       if (fallback === 'any') return virtualURL.href;

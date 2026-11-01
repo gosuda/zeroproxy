@@ -637,7 +637,7 @@
   function enforceSrcsetAttribute(el, key, raw) {
     rememberSrcset(el, key, raw);
     const out = mapSrcsetCandidates(raw, url => {
-      if (url.indexOf(ZP.apiPath('fetch')) >= 0 || url.indexOf(ZP.apiPath('v2/fetch')) >= 0) return null;
+      if (url.indexOf(ZP.apiPath('v2/fetch')) >= 0) return null;
       const t = targetURLIfHTTP(url);
       return t ? subresourceProxyPath(t) : null;
     });

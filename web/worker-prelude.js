@@ -54,7 +54,11 @@
   const realProxyOrigin = realLocation.origin;
   const isModuleWorker = new URLSearchParams(realLocation.hash.slice(1)).get('mod') === '1';
   // A worker that enforces Trusted Types takes `importScripts` URLs only as `TrustedScriptURL`: the bootstrap made the policy to load them with.
-  if (!isModuleWorker) { const early = self.__ZP_WORKER_TP; importScripts(early ? early.createScriptURL('/zp/assets/zp-core.js') : '/zp/assets/zp-core.js'); }
+  if (!isModuleWorker) { const early = self.__ZP_WORKER_TP; importScripts(early ? early.createScriptURL('/zp/Asset/zp-core.js') : '/zp/Asset/zp-core.js'); }
+  // Capture the runtime table, then remove both globals so worker scripts cannot enumerate them.
+  const ZP = self.__zp_internal;
+  try { delete self.ZP; } catch {}
+  try { delete self.__zp_internal; } catch {}
   const nativeFetch = self.fetch.bind(self);
   // Capture the native URL constructor before replacing `self.URL` with the virtualizing wrapper.
   const NativeURLCtor = self.URL;
@@ -630,8 +634,7 @@
   function blocked(){ try { throw new DOMException('Blocked by ZeroProxy policy','NotSupportedError'); } catch(e) { throw e; } }
   const NativeRequest = self.Request;
   const decodeFetchResponse = ZP.createFetchResponseAdapter(self.Response, self.Headers);
-  // Prefer the binary `/zp/api/v2/fetch` envelope and fall back to JSON `/zp/api/fetch` on 404.
-  let v2FetchOK = true;
+  // Runtime fetches travel as binary envelopes ([u32 head length][JSON head][raw body]) to the Service Worker.
   self.fetch = async (input, init = {}) => {
     const raw = input && typeof input.url === 'string' ? input.url : String(input);
     if (/^(?:blob|data):/i.test(raw.trim())) return nativeFetch(input, init);
@@ -643,22 +646,10 @@
       credentials: req.credentials, mode: req.mode, referrer: req.referrer,
       referrerPolicy: req.referrerPolicy, redirect: req.redirect,
     } };
-    if (v2FetchOK) {
-      try {
-        const r = await nativeFetch('/zp/api/v2/fetch', {
-          method: 'POST', headers: { 'Content-Type': ZP.ENVELOPE_MIME }, signal: req.signal,
-          body: ZP.encodeEnvelope(payload, bodyBytes),
-        });
-        if (r.status === 404 && !r.headers.get('X-ZP-Fetch-Meta')) { v2FetchOK = false; try { r.arrayBuffer().catch(() => {}); } catch {} }
-        else return decodeFetchResponse(r);
-      } catch (e) {}
-    }
-    payload.init.body = bodyBytes ? ZP.bytesToBase64Url(bodyBytes) : null;
-    const response = await nativeFetch('/zp/api/fetch', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: req.signal,
-      body: JSON.stringify(payload),
+    const response = await nativeFetch('/zp/api/v2/fetch', {
+      method: 'POST', headers: { 'Content-Type': ZP.ENVELOPE_MIME }, signal: req.signal,
+      body: ZP.encodeEnvelope(payload, bodyBytes),
     });
-    v2FetchOK = false;
     return decodeFetchResponse(response);
   };
   // Worker XMLHttpRequest shim backed by proxied `self.fetch` for async requests and `/zp/api/sync-fetch` for synchronous requests.
@@ -1397,7 +1388,7 @@
       try { internal = new NativeURLCtor(String(raw), realLocation.href); } catch {}
       if (internal && internal.origin === realProxyOrigin &&
           (internal.pathname === '/zp/api/worker-script' || internal.pathname === '/zp/api/script' ||
-           internal.pathname.startsWith('/zp/assets/') || internal.pathname.startsWith('/__zp/'))) {
+           internal.pathname.startsWith('/zp/Asset/'))) {
         nativeImportScripts(ttScriptURL(internal.pathname + internal.search + internal.hash));
         continue;
       }
@@ -1540,7 +1531,7 @@
         if (n.lastIndexOf('blob:' + realProxyOrigin, 0) === 0) return null;
         if (n.lastIndexOf(realProxyOrigin, 0) !== 0) return n;
         let u; try { u = new NativeURLCtor(n); } catch { return null; }
-        if (u.pathname === '/zp/api/fetch' || u.pathname === '/zp/api/v2/fetch') return u.searchParams.get('url') || null;
+        if (u.pathname === '/zp/api/v2/fetch') return u.searchParams.get('url') || null;
         if (u.pathname === '/zp/api/script') return u.searchParams.get('u') || null;
         return null;
       };

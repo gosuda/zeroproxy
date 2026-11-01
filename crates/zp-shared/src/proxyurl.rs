@@ -1,4 +1,4 @@
-//! Single source of truth for building `/zp/api/fetch?url=...` subresource URLs.
+//! Single source of truth for building `/zp/api/v2/fetch?url=...` subresource URLs.
 //!
 //! Shared across `zp-htmltx` (document parsing), `zp-css` (stylesheets), the
 //! page-realm prelude (`subresourceProxyPath`), and SW relay rewriting.
@@ -22,7 +22,7 @@ pub const URL_PARAM_ENCODE: &AsciiSet = &NON_ALPHANUMERIC
 /// resolving relative references against the appropriate base (the target URL
 /// for documents, or the stylesheet URL for CSS).
 ///
-/// When `proxy_origin` is empty, a root-relative path (`/zp/api/fetch?url=...`)
+/// When `proxy_origin` is empty, a root-relative path (`/zp/api/v2/fetch?url=...`)
 /// is returned. Callers that know the proxy origin must pass it: because the
 /// membrane virtualizes the document base to the target origin, a root-relative
 /// path resolves against the target host and results in a 404.
@@ -42,7 +42,7 @@ pub fn subresource_proxy_url(
     if !out.ends_with('/') {
         out.push('/');
     }
-    out.push_str("api/fetch?url=");
+    out.push_str("api/v2/fetch?url=");
     for chunk in utf8_percent_encode(head, URL_PARAM_ENCODE) {
         out.push_str(chunk);
     }
@@ -96,7 +96,7 @@ mod tests {
     fn absolute_url_becomes_fetch_param() {
         assert_eq!(
             build("https://t.example/a.png"),
-            "http://proxy.example/zp/api/fetch?url=https%3A%2F%2Ft.example%2Fa.png"
+            "http://proxy.example/zp/api/v2/fetch?url=https%3A%2F%2Ft.example%2Fa.png"
         );
     }
 
@@ -112,7 +112,7 @@ mod tests {
     #[test]
     fn tab_comes_before_the_fragment() {
         let out = subresource_proxy_url("https://t.example/s.svg#i", "http://p", "/zp/", Some("t7"));
-        assert_eq!(out, "http://p/zp/api/fetch?url=https%3A%2F%2Ft.example%2Fs.svg&tab=t7#i");
+        assert_eq!(out, "http://p/zp/api/v2/fetch?url=https%3A%2F%2Ft.example%2Fs.svg&tab=t7#i");
     }
 
     #[test]
@@ -130,6 +130,6 @@ mod tests {
     #[test]
     fn trailing_slash_on_origin_does_not_double() {
         assert!(subresource_proxy_url("https://t/a", "http://p/", "/zp/", None)
-            .starts_with("http://p/zp/api/fetch?url="));
+            .starts_with("http://p/zp/api/v2/fetch?url="));
     }
 }

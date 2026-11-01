@@ -3628,6 +3628,7 @@ dependencies = [
  "swc_css_ast",
  "swc_css_parser",
  "swc_css_visit",
+ "thiserror",
  "url",
  "zp-shared",
 ]

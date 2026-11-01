@@ -214,7 +214,7 @@
     const path = qi < 0 ? local : local.slice(0, qi);
     const params = qi < 0 ? null : new URLSearchParams(local.slice(qi + 1));
     // Subresource fetch wrapper carrying the target URL in `?url=`.
-    if ((path === ZP.apiPath('fetch') || path === ZP.apiPath('v2/fetch')) && params && params.get('url')) return params.get('url');
+    if (path === ZP.apiPath('v2/fetch') && params && params.get('url')) return params.get('url');
     // Navigation launcher carrying the target URL in `?via=`.
     if (path === ZP.controlPath('') && params && params.get('via')) return params.get('via');
     // Encrypted share path.

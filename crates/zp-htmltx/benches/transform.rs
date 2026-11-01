@@ -65,8 +65,6 @@ fn make_page_with_inline(
 fn opts() -> TransformOptions {
     TransformOptions {
         target_url: TARGET_URL.into(),
-        strict: true,
-        pending_gate: false,
         proxy_origin: PROXY_ORIGIN.into(),
     }
 }

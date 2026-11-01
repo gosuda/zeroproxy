@@ -11,9 +11,9 @@ import (
 // TransportMode and graceful Close lifecycle.
 func ExampleNewServer() {
 	zpServer, err := httphost.NewServer(httphost.Config{
-		WebDir:              "../../dist/web",
-		Transport:           httphost.TransportDirect,
-		AllowPrivateTargets: true,
+		WebDir:       "../../dist/web",
+		Transport:    httphost.TransportDirect,
+		TargetPolicy: httphost.TargetPolicyAllowPrivate,
 	})
 	if err != nil {
 		panic(err)
@@ -33,25 +33,3 @@ func ExampleNewServer() {
 		panic("server returned 5xx error")
 	}
 }
-
-// ExampleNewHandler demonstrates mounting the http.Handler returned by
-// NewHandler on an HTTP server.
-func ExampleNewHandler() {
-	handler := httphost.NewHandler(httphost.Config{
-		WebDir:    "../../dist/web",
-		SocksAddr: "internal",
-	})
-
-	srv := httptest.NewServer(handler)
-	defer srv.Close()
-
-	resp, err := http.Get(srv.URL + "/zp/")
-	if err != nil {
-		panic(err)
-	}
-	resp.Body.Close()
-	if resp.StatusCode >= 500 {
-		panic("handler returned server error")
-	}
-}
-

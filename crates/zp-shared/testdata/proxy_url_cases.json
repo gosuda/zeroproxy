@@ -1,6 +1,6 @@
 {
   "__doc": [
-    "Parity fixture for the `/zp/api/fetch?url=...` builder.",
+    "Parity fixture for the `/zp/api/v2/fetch?url=...` builder.",
     "",
     "Rust `zp_shared::subresource_proxy_url` and page-realm `subresourceProxyPath`",
     "must produce byte-for-byte identical output for the same inputs.",
@@ -15,67 +15,67 @@
       "id": "plain",
       "url": "https://t.example/a.png",
       "tab": null,
-      "want": "http://proxy.example/zp/api/fetch?url=https%3A%2F%2Ft.example%2Fa.png"
+      "want": "http://proxy.example/zp/api/v2/fetch?url=https%3A%2F%2Ft.example%2Fa.png"
     },
     {
       "id": "with-tab",
       "url": "https://t.example/a.png",
       "tab": "t7",
-      "want": "http://proxy.example/zp/api/fetch?url=https%3A%2F%2Ft.example%2Fa.png&tab=t7"
+      "want": "http://proxy.example/zp/api/v2/fetch?url=https%3A%2F%2Ft.example%2Fa.png&tab=t7"
     },
     {
       "id": "fragment-outside",
       "url": "https://t.example/sprite.svg#icon",
       "tab": null,
-      "want": "http://proxy.example/zp/api/fetch?url=https%3A%2F%2Ft.example%2Fsprite.svg#icon"
+      "want": "http://proxy.example/zp/api/v2/fetch?url=https%3A%2F%2Ft.example%2Fsprite.svg#icon"
     },
     {
       "id": "fragment-after-tab",
       "url": "https://t.example/sprite.svg#icon",
       "tab": "t7",
-      "want": "http://proxy.example/zp/api/fetch?url=https%3A%2F%2Ft.example%2Fsprite.svg&tab=t7#icon"
+      "want": "http://proxy.example/zp/api/v2/fetch?url=https%3A%2F%2Ft.example%2Fsprite.svg&tab=t7#icon"
     },
     {
       "id": "query-preserved",
       "url": "https://t.example/a?x=1&y=2",
       "tab": null,
-      "want": "http://proxy.example/zp/api/fetch?url=https%3A%2F%2Ft.example%2Fa%3Fx%3D1%26y%3D2"
+      "want": "http://proxy.example/zp/api/v2/fetch?url=https%3A%2F%2Ft.example%2Fa%3Fx%3D1%26y%3D2"
     },
     {
       "id": "space-is-percent-twenty",
       "url": "https://t.example/a b.png",
       "tab": null,
-      "want": "http://proxy.example/zp/api/fetch?url=https%3A%2F%2Ft.example%2Fa%20b.png"
+      "want": "http://proxy.example/zp/api/v2/fetch?url=https%3A%2F%2Ft.example%2Fa%20b.png"
     },
     {
       "id": "plus-is-encoded",
       "url": "https://t.example/a+b.png",
       "tab": null,
-      "want": "http://proxy.example/zp/api/fetch?url=https%3A%2F%2Ft.example%2Fa%2Bb.png"
+      "want": "http://proxy.example/zp/api/v2/fetch?url=https%3A%2F%2Ft.example%2Fa%2Bb.png"
     },
     {
       "id": "sub-delims-encoded",
       "url": "https://t.example/a!'()*.png",
       "tab": null,
-      "want": "http://proxy.example/zp/api/fetch?url=https%3A%2F%2Ft.example%2Fa%21%27%28%29%2A.png"
+      "want": "http://proxy.example/zp/api/v2/fetch?url=https%3A%2F%2Ft.example%2Fa%21%27%28%29%2A.png"
     },
     {
       "id": "unreserved-kept",
       "url": "https://t.example/a-b_c.d~e",
       "tab": null,
-      "want": "http://proxy.example/zp/api/fetch?url=https%3A%2F%2Ft.example%2Fa-b_c.d~e"
+      "want": "http://proxy.example/zp/api/v2/fetch?url=https%3A%2F%2Ft.example%2Fa-b_c.d~e"
     },
     {
       "id": "non-ascii",
       "url": "https://t.example/\uD55C\uAE00.png",
       "tab": null,
-      "want": "http://proxy.example/zp/api/fetch?url=https%3A%2F%2Ft.example%2F%ED%95%9C%EA%B8%80.png"
+      "want": "http://proxy.example/zp/api/v2/fetch?url=https%3A%2F%2Ft.example%2F%ED%95%9C%EA%B8%80.png"
     },
     {
       "id": "empty-tab-not-emitted",
       "url": "https://t.example/a.png",
       "tab": "",
-      "want": "http://proxy.example/zp/api/fetch?url=https%3A%2F%2Ft.example%2Fa.png"
+      "want": "http://proxy.example/zp/api/v2/fetch?url=https%3A%2F%2Ft.example%2Fa.png"
     }
   ]
 }

@@ -88,7 +88,7 @@
     function isMembraneFrame(f) {
       try {
         const file = String(f.getFileName() || '');
-        return /\/zp\/assets\/(?:runtime-prelude|worker-prelude|zp-core|zp-page-bundle)\.js/.test(file);
+        return /\/zp\/Asset\/(?:runtime-prelude|worker-prelude|zp-core|zp-page-bundle)\.js/.test(file);
       } catch { return false; }
     }
     // Inline scripts execute via global eval with a sourceURL, which causes V8

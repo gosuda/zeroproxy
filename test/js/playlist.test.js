@@ -28,7 +28,7 @@ function loadWorker() {
 
 const worker = loadWorker();
 const tab = { tabId: 'tab1' };
-const route = url => 'https://proxy.example/zp/api/fetch?url=' + encodeURIComponent(url) + '&tab=tab1';
+const route = url => 'https://proxy.example/zp/api/v2/fetch?url=' + encodeURIComponent(url) + '&tab=tab1';
 
 test('playlist URIs — relative, absolute and attributes — become proxy routes for their absolute targets', () => {
   const base = 'https://cdn.example/video/hls/master.m3u8?token=abc';
@@ -62,7 +62,7 @@ test('playlist rewriting keeps line endings, leaves non-http URIs and comments, 
   const base = 'https://cdn.example/a/b.m3u8';
   const text = '﻿#EXTM3U\r\n# a comment with seg.ts in it\r\ndata:text/plain,x\r\nseg.ts\r\n';
   const out = worker.rewritePlaylistText(text, base, null);
-  assert.equal(out, `#EXTM3U\r\n# a comment with seg.ts in it\r\ndata:text/plain,x\r\n${'https://proxy.example/zp/api/fetch?url=' + encodeURIComponent('https://cdn.example/a/seg.ts')}\r\n`);
+  assert.equal(out, `#EXTM3U\r\n# a comment with seg.ts in it\r\ndata:text/plain,x\r\n${'https://proxy.example/zp/api/v2/fetch?url=' + encodeURIComponent('https://cdn.example/a/seg.ts')}\r\n`);
 });
 
 test('a playlist is recognised by its type, or by its path when the type says nothing', () => {
@@ -83,7 +83,7 @@ test('a ranged request for a playlist is answered from the rewritten bytes', asy
   const upstream = () => new Response(body, { status: 200, headers: { 'Content-Type': 'application/vnd.apple.mpegurl', 'Content-Length': String(body.length), ETag: '"x"' } });
   const rewritten = worker.rewritePlaylistText(body, target, tab);
   const total = new TextEncoder().encode(rewritten).length;
-  const ask = range => new Request('https://proxy.example/zp/api/fetch?url=x', range ? { headers: { Range: range } } : {});
+  const ask = range => new Request('https://proxy.example/zp/api/v2/fetch?url=x', range ? { headers: { Range: range } } : {});
 
   const whole = await worker.rewritePlaylistResponse(ask(), upstream(), { targetUrl: target, tab });
   assert.equal(whole.status, 200);
@@ -114,7 +114,7 @@ test('an upstream partial playlist is fetched again whole before it is rewritten
   const target = 'https://cdn.example/a/p.m3u8';
   const partial = new Response('#EXTM', { status: 206, headers: { 'Content-Type': 'application/vnd.apple.mpegurl', 'Content-Range': 'bytes 0-4/15' } });
   let refetched = 0;
-  const out = await worker.rewritePlaylistResponse(new Request('https://proxy.example/zp/api/fetch?url=x'), partial, {
+  const out = await worker.rewritePlaylistResponse(new Request('https://proxy.example/zp/api/v2/fetch?url=x'), partial, {
     targetUrl: target, tab,
     refetch: async () => { refetched++; return new Response(body, { status: 200, headers: { 'Content-Type': 'application/vnd.apple.mpegurl' } }); },
   });
@@ -125,7 +125,7 @@ test('an upstream partial playlist is fetched again whole before it is rewritten
 
 test('a body that is not a playlist passes through unchanged', async () => {
   const resp = new Response('<html>not a playlist</html>', { status: 200, headers: { 'Content-Type': 'application/vnd.apple.mpegurl' } });
-  const out = await worker.rewritePlaylistResponse(new Request('https://proxy.example/zp/api/fetch?url=x'), resp, { targetUrl: 'https://cdn.example/x.m3u8', tab });
+  const out = await worker.rewritePlaylistResponse(new Request('https://proxy.example/zp/api/v2/fetch?url=x'), resp, { targetUrl: 'https://cdn.example/x.m3u8', tab });
   assert.equal(await out.text(), '<html>not a playlist</html>');
 });
 
@@ -140,7 +140,7 @@ test('the transport leaves Range off a request that asked for it not to travel, 
     tabId: 'tab', activeEntryId: entry.entryId, entries: new Map([[entry.entryId, entry]]), servers: [],
     cookieJar: { cookieHeader: () => '', setCookieLine: () => {} },
   };
-  const req = () => new Request('https://proxy.example/zp/api/fetch?url=x', { headers: { Range: 'bytes=0-', 'If-Range': '"e"' } });
+  const req = () => new Request('https://proxy.example/zp/api/v2/fetch?url=x', { headers: { Range: 'bytes=0-', 'If-Range': '"e"' } });
   await w.transportFetch('https://cdn.example/a/index.m3u8', { tab: t, request: req(), noRange: true });
   await w.transportFetch('https://cdn.example/a/movie.mp4', { tab: t, request: req() });
   assert.deepEqual(seen, [null, 'bytes=0-']);

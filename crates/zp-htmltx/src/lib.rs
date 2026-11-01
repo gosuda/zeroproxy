@@ -6,9 +6,9 @@
 //!   by the `<script type="module">` attribute)
 //! - rewrite inline `on*` event handler attribute bodies via `zp-rewriter`
 //!   with `ScriptKind::EventHandler`
-//! - in strict mode, fail-closed: a script that fails to parse is replaced
-//!   with a safe `throw new DOMException(...)` (callable from the original
-//!   call sites), and event handler attributes are removed.
+//! - fail closed: a script that fails to parse is replaced with a safe
+//!   `throw new DOMException(...)` (callable from the original call sites),
+//!   and event handler attributes are removed.
 
 use lol_html::{doc_text, element, end, html_content::ContentType, text, HtmlRewriter, Settings};
 use std::cell::RefCell;
@@ -27,10 +27,6 @@ fn tokenizer_err(e: impl std::fmt::Display) -> TransformError {
 #[derive(Debug, Clone)]
 pub struct TransformOptions {
     pub target_url: String,
-    pub strict: bool,
-    /// Emit target scripts as `text/zp-pending` so prelude can execute them
-    /// post-OXC-init. Currently unused (scripts execute inline after rewrite).
-    pub pending_gate: bool,
     /// Proxy origin (e.g. `http://proxy.localhost:18080`) used to build
     /// absolute SW-routable URLs for subresources. Empty falls back to a
     /// root-relative path, which only works when the page's virtual baseURI
@@ -62,7 +58,6 @@ const BLOCKED_SCRIPT: &str =
 fn attr_settings(
     target: String,
     proxy_origin: String,
-    strict: bool,
     diagnostics: Rc<RefCell<Vec<String>>>,
 ) -> Settings<'static, 'static> {
     let diags_for_attr = diagnostics;
@@ -161,7 +156,7 @@ fn attr_settings(
                         let _ = el.remove_attribute("srcdoc");
                     }
                     // Move `iframe`/`frame` `src` to `data-zp-frame-src`. Rewriting frame `src`
-                    // to `/zp/api/fetch?url=` would bypass the document pipeline and create a
+                    // to `/zp/api/v2/fetch?url=` would bypass the document pipeline and create a
                     // frame without the prelude membrane. The page realm activates the frame
                     // through the share route using its session state.
                     if tag == "iframe" || tag == "frame" {
@@ -328,7 +323,7 @@ fn attr_settings(
                                         "/zp/",
                                         &proxy_origin,
                                     );
-                                    if res.ok {
+                                    if let Ok(res) = res {
                                         if let Some(inner) = res
                                             .code
                                             .strip_prefix("a{")
@@ -453,7 +448,6 @@ fn attr_settings(
                             let opts = RewriteOpts {
                                 kind: ScriptKind::EventHandler,
                                 target_url: target_for_attr.clone(),
-                                strict,
                                 proxy_origin: proxy_origin.clone(),
                             };
                             match rewrite_script(&body, &opts) {
@@ -488,7 +482,6 @@ fn attr_settings(
                         let opts = RewriteOpts {
                             kind: ScriptKind::EventHandler,
                             target_url: target_for_attr.clone(),
-                            strict,
                                 proxy_origin: proxy_origin.clone(),
                         };
                         match rewrite_script(&value, &opts) {
@@ -499,11 +492,7 @@ fn attr_settings(
                                 diags_for_attr
                                     .borrow_mut()
                                     .push(format!("event handler {} rewrite failed: {}", name, e));
-                                if strict {
-                                    el.remove_attribute(&name);
-                                } else {
-                                    let _ = el.set_attribute(&name, BLOCKED_SCRIPT);
-                                }
+                                el.remove_attribute(&name);
                             }
                         }
                     }
@@ -515,7 +504,7 @@ fn attr_settings(
 }
 
 /// Transform target HTML: rewrites inline scripts and `on*` event handlers
-/// through `zp-rewriter`. In strict mode failures become safe placeholders.
+/// through `zp-rewriter`. Failures become safe placeholders (fail closed).
 ///
 /// Thin wrapper over the streaming [`HtmlTxn`]: it feeds the whole document as a
 /// single chunk, so the buffered and streaming paths share one implementation.
@@ -539,7 +528,6 @@ pub fn transform(html: &str, opts: &TransformOptions) -> Result<TransformResult,
 fn script_settings(
     target_url: String,
     proxy_origin: String,
-    strict: bool,
     diagnostics: Rc<RefCell<Vec<String>>>,
     prelude: String,
 ) -> Settings<'static, 'static> {
@@ -592,10 +580,12 @@ fn script_settings(
                     if chunk.last_in_text_node() {
                         let css = style_buf_for_text.borrow().clone();
                         style_buf_for_text.borrow_mut().clear();
-                        // If CSS parsing fails, `rewrite_css` returns the original CSS
+                        // If CSS parsing fails the original CSS is kept
                         // (fail-open, matching external stylesheet handling).
-                        let res = zp_css::rewrite_css(&css, &style_target, "/zp/", &style_origin);
-                        let rewritten = if res.ok { res.code } else { css };
+                        let rewritten = match zp_css::rewrite_css(&css, &style_target, "/zp/", &style_origin) {
+                            Ok(out) => out.code,
+                            Err(_) => css,
+                        };
                         // Emit with `ContentType::Html` (raw passthrough) because `<style>` is raw
                         // text in HTML and does not entity-decode its contents; `ContentType::Text`
                         // would escape `>` child combinators and `<` media-query range operators into
@@ -637,7 +627,6 @@ fn script_settings(
                             let opts = RewriteOpts {
                                 kind,
                                 target_url: target_for_end.clone(),
-                                strict,
                                 proxy_origin: origin_for_end.clone(),
                             };
                             // Inline scripts up to `MAX_PAGE_REWRITE_INLINE_BYTES` are wrapped with
@@ -666,11 +655,7 @@ fn script_settings(
                                     diags_for_end
                                         .borrow_mut()
                                         .push(format!("inline script rewrite failed: {}", e));
-                                    if strict {
-                                        BLOCKED_SCRIPT.to_string()
-                                    } else {
-                                        src
-                                    }
+                                    BLOCKED_SCRIPT.to_string()
                                 }
                             } };
                             // Use `ContentType::Html` for raw passthrough without HTML escaping;
@@ -758,13 +743,11 @@ impl HtmlTxn {
         let attr = attr_settings(
             opts.target_url.clone(),
             opts.proxy_origin.clone(),
-            opts.strict,
             diagnostics.clone(),
         );
         let script = script_settings(
             opts.target_url.clone(),
             opts.proxy_origin.clone(),
-            opts.strict,
             diagnostics.clone(),
             prelude,
         );
@@ -1063,7 +1046,7 @@ fn rewrite_importmap_json(raw: &str, target_url: &str, proxy_origin: &str) -> Op
 }
 
 /// Rewrite `<script type="speculationrules">` JSON: `prefetch` `urls` lists are
-/// rewritten to `/zp/api/fetch?url=...`, and `prerender` `urls` lists are
+/// rewritten to `/zp/api/v2/fetch?url=...`, and `prerender` `urls` lists are
 /// rewritten to the `?via=` navigation launcher route. Rules with `"source": "document"`
 /// carry no URL list to rewrite.
 fn rewrite_speculationrules_json(raw: &str, target_url: &str, proxy_origin: &str) -> Option<String> {
@@ -1227,7 +1210,7 @@ fn is_icon_link_rel(rel: &str) -> bool {
     })
 }
 
-/// Convert a subresource URL to the SW-routable `/zp/api/fetch?url=<encoded>`
+/// Convert a subresource URL to the SW-routable `/zp/api/v2/fetch?url=<encoded>`
 /// form after resolving relative URLs against `target_url`. Returns `None` for
 /// fragment-only references and inert schemes (`data:`, `blob:`, `about:`, `mailto:`).
 fn proxied_subresource_url(
@@ -1428,8 +1411,6 @@ mod tests {
     pub(crate) fn opts() -> TransformOptions {
         TransformOptions {
             target_url: "https://example.com/".into(),
-            strict: true,
-            pending_gate: false,
             proxy_origin: "http://proxy.localhost:18080".into(),
         }
     }
@@ -1480,7 +1461,7 @@ mod tests {
                 r.html
             );
             assert!(
-                r.html.contains("/zp/api/fetch?url="),
+                r.html.contains("/zp/api/v2/fetch?url="),
                 "{name}: was not rewritten to proxy path: {}",
                 r.html
             );
@@ -1497,7 +1478,7 @@ mod tests {
         )
         .unwrap();
         assert!(
-            r.html.contains("api/fetch?url=http%3A%2F%2Ft.example%2Fs.svg#icon"),
+            r.html.contains("api/v2/fetch?url=http%3A%2F%2Ft.example%2Fs.svg#icon"),
             "fragment must remain outside the proxy URL: {}",
             r.html
         );
@@ -1514,7 +1495,7 @@ mod tests {
             r.html
         );
         assert!(
-            r.html.contains("/zp/api/fetch?url="),
+            r.html.contains("/zp/api/v2/fetch?url="),
             "was not rewritten to proxy path: {}",
             r.html
         );
@@ -1598,7 +1579,7 @@ mod tests {
         );
         let r = transform(html, &opts()).unwrap();
         assert!(
-            r.html.contains("/zp/api/fetch?url="),
+            r.html.contains("/zp/api/v2/fetch?url="),
             "prefetch URL did not route to fetch endpoint: {}",
             r.html
         );
@@ -1789,7 +1770,7 @@ mod tests {
         let html = String::from_utf8(out).unwrap();
 
         assert!(!strip_lit(&html).contains("url(https://cdn.test/bg.png)"), "style attr url raw: {html}");
-        assert!(html.contains("/zp/api/fetch?url="), "no proxied url emitted: {html}");
+        assert!(html.contains("/zp/api/v2/fetch?url="), "no proxied url emitted: {html}");
         assert!(html.contains("position:absolute"), "sibling declaration lost: {html}");
         assert!(html.contains("color: red"), "unrelated style attr mangled: {html}");
         assert!(html.contains("data:image/gif;base64,"), "data: url touched: {html}");
@@ -1812,7 +1793,7 @@ mod tests {
 
         assert!(!html.contains("https://cdn.test/probe.woff2"), "@font-face url raw: {html}");
         assert!(!html.contains("https://cdn.test/bg.png"), "background url raw: {html}");
-        assert!(html.contains("/zp/api/fetch?url="), "no proxied url emitted: {html}");
+        assert!(html.contains("/zp/api/v2/fetch?url="), "no proxied url emitted: {html}");
         assert!(html.contains("@font-face"), "@font-face dropped: {html}");
         assert!(html.contains("format("), "declaration mangled: {html}");
         assert!(html.contains("data:image/gif;base64,"), "data: url touched: {html}");
@@ -2029,7 +2010,7 @@ mod tests {
         let html = "<script src=\"https://example.com/runtime.js\"></script>";
         let r = transform(html, &opts()).unwrap();
         assert!(
-            r.html.contains("/zp/api/fetch?url="),
+            r.html.contains("/zp/api/v2/fetch?url="),
             "src must route through SW: {}",
             r.html
         );
@@ -2068,8 +2049,8 @@ mod tests {
     }
 
     #[test]
-    fn malformed_handler_in_strict_removed() {
-        // The body `function {` is a parse error; strict mode removes the attribute.
+    fn malformed_handler_is_removed() {
+        // The body `function {` is a parse error; the attribute is removed (fail closed).
         let html = "<a onclick=\"function {\">x</a>";
         let r = transform(html, &opts()).unwrap();
         assert!(
@@ -2286,8 +2267,6 @@ mod tests {
         );
         let opts = TransformOptions {
             target_url: "https://www.naver.com/".into(),
-            strict: true,
-            pending_gate: false,
             proxy_origin: "http://proxy.localhost:18080".into(),
         };
         let r = transform(html, &opts).unwrap();
@@ -2362,7 +2341,7 @@ mod tests {
         let html = "<link rel=\"stylesheet\" href=\"https://cdn.example.com/load.php?lang=en&amp;modules=site.styles\">";
         let r = transform(html, &opts()).unwrap();
         assert!(
-            r.html.contains("/zp/api/fetch?url="),
+            r.html.contains("/zp/api/v2/fetch?url="),
             "link href must route through SW: {}",
             r.html
         );
@@ -2385,7 +2364,7 @@ mod tests {
         let html = "<link rel=\"stylesheet\" href=\"https://cdn.example.com/main.css\">";
         let r = transform(html, &opts()).unwrap();
         assert!(
-            r.html.contains("/zp/api/fetch?url="),
+            r.html.contains("/zp/api/v2/fetch?url="),
             "link href must route through SW: {}",
             r.html
         );
@@ -2412,13 +2391,13 @@ mod tests {
             let html = format!("<link rel=\"{rel}\" href=\"/site-icon.png\">");
             let r = transform(&html, &opts()).unwrap();
             assert!(r.html.contains("href=\"data:application/x-zeroproxy-icon,1\""), "{rel}: {}", r.html);
-            assert!(!r.html.contains("/zp/api/fetch"), "{rel}: no fetchable URL: {}", r.html);
+            assert!(!r.html.contains("/zp/api/v2/fetch"), "{rel}: no fetchable URL: {}", r.html);
             assert!(r.html.contains("data-zp-lit-href=\"/site-icon.png\""), "{rel}: literal stash: {}", r.html);
             assert!(r.html.contains("data-zp-target-url=\"https://"), "{rel}: target stash: {}", r.html);
         }
-        // Non-icon `<link>` elements continue to route through `/zp/api/fetch`.
+        // Non-icon `<link>` elements continue to route through `/zp/api/v2/fetch`.
         let r = transform("<link rel=\"preload\" as=\"image\" href=\"/site-icon.png\">", &opts()).unwrap();
-        assert!(r.html.contains("/zp/api/fetch?url="), "{}", r.html);
+        assert!(r.html.contains("/zp/api/v2/fetch?url="), "{}", r.html);
     }
 
     #[test]
@@ -2428,8 +2407,6 @@ mod tests {
         let html = "<img src=\"/_next/image?url=%2Fpng%2Ferror.png&w=1920&q=75\">";
         let opts = TransformOptions {
             target_url: "https://shopsquare.naver.com/".into(),
-            strict: true,
-            pending_gate: false,
             proxy_origin: "http://proxy.localhost:18080".into(),
         };
         let r = transform(html, &opts).unwrap();
@@ -2457,7 +2434,7 @@ mod tests {
         let html = "<script src=\"https://cdn.example.com/app.js\"></script>";
         let r = transform(html, &opts()).unwrap();
         assert!(
-            r.html.contains("/zp/api/fetch?url="),
+            r.html.contains("/zp/api/v2/fetch?url="),
             "script src must route through SW: {}",
             r.html
         );
@@ -2471,7 +2448,7 @@ mod tests {
         let r = transform(html, &opts()).unwrap();
         assert!(
             r.html
-                .contains("http://proxy.localhost:18080/zp/api/fetch?url="),
+                .contains("http://proxy.localhost:18080/zp/api/v2/fetch?url="),
             "script src must include proxy_origin: {}",
             r.html
         );
@@ -2492,14 +2469,13 @@ mod tests {
         let out = r.html.replace("&amp;", "&");
         let m = "http://proxy.localhost:18080/zp/api/script?u=https%3A%2F%2Fexample.com%2Fassets%2Fm.js&kind=module";
         assert_eq!(out.matches(m).count(), 2, "modulepreload and module script must share canonical form: {out}");
-        assert_eq!(out.matches("/zp/api/fetch?url=").count(), 2, "classic script and preload as=script must use fetch route: {out}");
+        assert_eq!(out.matches("/zp/api/v2/fetch?url=").count(), 2, "classic script and preload as=script must use fetch route: {out}");
         // Must match the exact URL emitted by static `import` specifier rewriting.
         let imported = rewrite_script(
             "import './assets/m.js';",
             &RewriteOpts {
                 kind: ScriptKind::Module,
                 target_url: "https://example.com/".into(),
-                strict: true,
                 proxy_origin: "http://proxy.localhost:18080".into(),
             },
         )
@@ -2529,7 +2505,7 @@ mod tests {
         let html = "<img src=\"https://cdn.example.com/p.png\">";
         let r = transform(html, &opts()).unwrap();
         assert!(
-            r.html.contains("/zp/api/fetch?url="),
+            r.html.contains("/zp/api/v2/fetch?url="),
             "img src must route through SW: {}",
             r.html
         );
@@ -2577,13 +2553,13 @@ mod tests {
         let r = transform(html, &opts()).unwrap();
         assert!(r.html.contains("data:image/png"), "{}", r.html);
         assert!(r.html.contains("blob:http://x/abc"), "{}", r.html);
-        assert!(!r.html.contains("/zp/api/fetch"), "{}", r.html);
+        assert!(!r.html.contains("/zp/api/v2/fetch"), "{}", r.html);
     }
 
     #[test]
     fn iframe_src_still_left_alone() {
         // `iframe[src]` is moved to `data-zp-frame-src` rather than rewritten to
-        // `/zp/api/fetch` or `?via=` so the runtime-prelude `installNetworkContainment`
+        // `/zp/api/v2/fetch` or `?via=` so the runtime-prelude `installNetworkContainment`
         // hook can route the frame through the document pipeline.
         let html = "<iframe src=\"https://other.example/f\"></iframe>";
         let r = transform(html, &opts()).unwrap();
@@ -2592,66 +2568,12 @@ mod tests {
             "iframe src must not be rewritten in htmltx: {}",
             r.html
         );
-        assert!(!r.html.contains("/zp/api/fetch"), "{}", r.html);
+        assert!(!r.html.contains("/zp/api/v2/fetch"), "{}", r.html);
         assert!(
             !r.html.contains("?via="),
             "iframe src must not get the anchor ?via= treatment: {}",
             r.html
         );
-    }
-}
-
-#[cfg(test)]
-mod naver_perf {
-    use super::*;
-    // Benchmark `transform()` on a real NAVER document when `ZP_NAVER_HTML` is set.
-    #[test]
-    #[ignore]
-    fn time_naver_document() {
-        let path = std::env::var("ZP_NAVER_HTML").expect("set ZP_NAVER_HTML");
-        let html = std::fs::read_to_string(path).unwrap();
-        let o = TransformOptions {
-            target_url: "https://www.naver.com/".into(),
-            strict: true,
-            pending_gate: false,
-            proxy_origin: "http://proxy.localhost:18080".into(),
-        };
-        let t = std::time::Instant::now();
-        let r = transform(&html, &o);
-        let ms = t.elapsed().as_millis();
-        println!("NAVER transform: {} ms, ok={}, in={}B", ms, r.is_ok(), html.len());
-        assert!(r.is_ok());
-    }
-}
-
-#[cfg(test)]
-mod naver_stream_perf {
-    use super::*;
-    // Benchmark streaming `HtmlTxn::write` across chunk sizes when `ZP_NAVER_HTML` is set.
-    #[test]
-    #[ignore]
-    fn time_naver_streaming() {
-        let path = std::env::var("ZP_NAVER_HTML").expect("set ZP_NAVER_HTML");
-        let html = std::fs::read_to_string(path).unwrap();
-        let o = TransformOptions {
-            target_url: "https://www.naver.com/".into(),
-            strict: true,
-            pending_gate: false,
-            proxy_origin: "http://proxy.localhost:18080".into(),
-        };
-        for &cs in &[65536usize, 16384, 8192, 4096, 1024] {
-            let t = std::time::Instant::now();
-            let mut txn = HtmlTxn::new(&o, String::new());
-            let mut out = 0usize;
-            let mut chunks = 0usize;
-            for c in html.as_bytes().chunks(cs) {
-                out += txn.write(c).unwrap().len();
-                chunks += 1;
-            }
-            let (tail, _d) = txn.end().unwrap();
-            out += tail.len();
-            println!("chunk={:>6}B chunks={:>4} -> {:>7} ms out={}B", cs, chunks, t.elapsed().as_millis(), out);
-        }
     }
 }
 
@@ -2831,7 +2753,7 @@ mod surface_fixture {
             "data: candidate must remain untouched: {out}"
         );
         assert!(
-            out.contains("/zp/api/fetch?url=https%3A%2F%2Ft.example%2Fb.png"),
+            out.contains("/zp/api/v2/fetch?url=https%3A%2F%2Ft.example%2Fb.png"),
             "neighbour candidate must be rewritten to proxy path: {out}"
         );
     }
@@ -2857,7 +2779,7 @@ mod surface_fixture {
             checked += 1;
             match kind {
                 "rewrite" | "srcset" => assert!(
-                    out.contains("/zp/api/fetch?url="),
+                    out.contains("/zp/api/v2/fetch?url="),
                     "{pair}: was not rewritten to proxy path (kind={kind})\n  in : {html}\n  out: {out}"
                 ),
                 "navigation" => assert!(
@@ -2865,11 +2787,11 @@ mod surface_fixture {
                     "{pair}: was not rewritten to navigation path\n  in : {html}\n  out: {out}"
                 ),
                 "deliberate" => assert!(
-                    !out.contains("/zp/api/fetch?url="),
+                    !out.contains("/zp/api/v2/fetch?url="),
                     "{pair}: marked deliberate but was rewritten\n  out: {out}"
                 ),
                 "known-gap" => assert!(
-                    !out.contains("/zp/api/fetch?url="),
+                    !out.contains("/zp/api/v2/fetch?url="),
                     "{pair}: now rewritten; update fixture from known-gap to rewrite\n  out: {out}"
                 ),
                 "special" => assert!(
