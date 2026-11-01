@@ -88,7 +88,12 @@ pub fn bundle_version() -> String {
 
 /// Rewrite a JS source. Strict mode. Returns code or throws.
 #[wasm_bindgen(js_name = rewriteScript)]
-pub fn rewrite_script_js(source: &str, kind: &str, target_url: &str, proxy_origin: &str) -> Result<String, JsError> {
+pub fn rewrite_script_js(
+    source: &str,
+    kind: &str,
+    target_url: &str,
+    proxy_origin: &str,
+) -> Result<String, JsError> {
     let ctx = DocCtx::new(target_url, proxy_origin);
     with_engine(|e| e.rewrite_script(source, parse_script_kind(kind)?, &ctx))
 }
@@ -142,7 +147,13 @@ pub fn compose_source_map_chained_js(
 ) -> Result<String, JsError> {
     let ctx = DocCtx::new(target_url, proxy_origin);
     with_engine(|e| {
-        e.compose_source_map_chained(source, parse_script_kind(kind)?, &ctx, target_url, original_map_json)
+        e.compose_source_map_chained(
+            source,
+            parse_script_kind(kind)?,
+            &ctx,
+            target_url,
+            original_map_json,
+        )
     })
 }
 

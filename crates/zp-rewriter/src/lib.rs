@@ -5181,7 +5181,7 @@ mod tests {
         let r = rewrite_script(src, &opts()).unwrap();
         assert!(
             r.code.contains("__zp_get(globalThis,\"location\")"),
-            "strict block fn must NOT hoist — outer ref stays virtual: {}",
+            "strict block fn must NOT hoist; outer ref stays virtual: {}",
             r.code,
         );
     }
@@ -5231,7 +5231,7 @@ mod tests {
         let r = rewrite_script(src, &o).unwrap();
         assert!(
             r.code.contains("__zp_get(globalThis,\"location\")"),
-            "module is strict — no Annex B hoisting: {}",
+            "module is strict; no Annex B hoisting: {}",
             r.code,
         );
     }
@@ -5243,7 +5243,7 @@ mod tests {
         let r = rewrite_script(src, &opts()).unwrap();
         assert!(
             r.code.contains("__zp_get(globalThis,\"location\")"),
-            "class method body is strict — outer ref must virtualize: {}",
+            "class method body is strict; outer ref must virtualize: {}",
             r.code,
         );
     }
@@ -6358,7 +6358,7 @@ import * as c from \"data:text/javascript,export default 2\";";
 
     #[test]
     fn reflect_shadowed_does_not_rewrite() {
-        // If `Reflect` is locally bound, do not rewrite — it's not the native.
+        // If `Reflect` is locally bound, do not rewrite; it is not the native global.
         let src = "function f(Reflect){ return Reflect.get(window, 'location'); }";
         let r = rewrite_script(src, &opts()).unwrap();
         // The Reflect.get(...) wrapper should NOT be applied (shadowed).
@@ -6372,7 +6372,7 @@ import * as c from \"data:text/javascript,export default 2\";";
     #[test]
     fn get_own_property_descriptor_dangerous_mediated() {
         // The descriptor path used to emit only a diagnostic and pass the
-        // native accessor through — a real escape. Now it routes through the
+        // native accessor through. Now it routes through the
         // membrane helper that wraps location descriptors.
         let src = "Object.getOwnPropertyDescriptor(window, 'location');";
         let r = rewrite_script(src, &opts()).unwrap();
@@ -6386,7 +6386,7 @@ import * as c from \"data:text/javascript,export default 2\";";
     #[test]
     fn with_statement_resolves_object_first() {
         // `with(obj)` identifier reads must prefer obj's own properties and
-        // fall back to the membrane — not statically pin to the global.
+        // fall back to the membrane rather than statically pinning to the global.
         let src = "with (obj) { use(location); }";
         let r = rewrite_script(src, &opts()).unwrap();
         assert!(
@@ -6429,7 +6429,7 @@ import * as c from \"data:text/javascript,export default 2\";";
             "destructuring RHS not rewritten: {}",
             r.code
         );
-        // The destructured `location` is locally bound → no further rewrite needed.
+        // The destructured `location` is locally bound, so no further rewrite is needed.
     }
 
     #[test]
@@ -6439,7 +6439,7 @@ import * as c from \"data:text/javascript,export default 2\";";
         // The outer `.replace(cf,"")` METHOD_CALL replacement consumes the
         // leading `(` of `("string"==typeof e?e:""+e)`. Without leading paren
         // in our emitted replacement, the result becomes `return__zp_call(...)`
-        // which JS parses as a single identifier → ReferenceError.
+        // which JS parses as a single identifier and throws a ReferenceError.
         let src = "function ch(e){return(\"string\"==typeof e?e:\"\"+e).replace(cd,\"\\n\").replace(cf,\"\")}";
         let r = rewrite_script(src, &opts()).unwrap();
         assert!(
@@ -6455,7 +6455,7 @@ import * as c from \"data:text/javascript,export default 2\";";
         // `new globalThis.Request("https://empty.invalid", {body:...})`.
         // Without parentheses around our globalThis patch, `new` would bind to
         // `__zp_get(globalThis,"globalThis")` (consuming those arguments) and
-        // `.Request(args)` would degenerate to a function call →
+        // `.Request(args)` would degenerate to a function call, throwing
         // `Failed to construct 'Request': Please use the 'new' operator`.
         let src = r#"new globalThis.Request("https://empty.invalid", {body:null});"#;
         let r = rewrite_script(src, &opts()).unwrap();
@@ -6477,8 +6477,8 @@ import * as c from \"data:text/javascript,export default 2\";";
         // surface (`fetch(...)`) is captured by the service worker.
         let src = "window.frames;";
         let r = rewrite_script(src, &opts()).unwrap();
-        // `window` is dangerous global -> wrapped; `.frames` is also a
-        // dangerous member -> outer __zp_get wraps the wrapped window.
+        // `window` is a dangerous global (wrapped); `.frames` is also a
+        // dangerous member, so the outer __zp_get wraps the wrapped window.
         assert!(
             r.code
                 .contains("__zp_get(__zp_get(globalThis,\"window\"),\"frames\")"),
@@ -6549,7 +6549,7 @@ import * as c from \"data:text/javascript,export default 2\";";
 
     #[test]
     fn caps_bare_for_infinite_loop() {
-        // `for(;;) body` is the canonical anti-bot probe shape — it
+        // `for(;;) body` is the canonical anti-bot probe shape; it
         // wedges V8 if the loop body never breaks. Rewriter must inject
         // a counter so the loop terminates after a generous bound.
         let src = "function probe(){ for(;;) { a(); } }";
@@ -6569,7 +6569,7 @@ import * as c from \"data:text/javascript,export default 2\";";
             "expected iteration cap constant, got: {}",
             r.code
         );
-        // The body identifier `a()` must remain — only the header is
+        // The body identifier `a()` must remain; only the header is
         // rewritten.
         assert!(r.code.contains("a()"), "body lost: {}", r.code);
     }
@@ -6621,7 +6621,7 @@ import * as c from \"data:text/javascript,export default 2\";";
 
     #[test]
     fn does_not_cap_finite_loops() {
-        // A loop with a finite test condition must not be touched —
+        // A loop with a finite test condition must not be touched;
         // capping would change semantics for legitimate code.
         let src = "for (let i = 0; i < 5; i++) { sum += i }";
         let r = rewrite_script(src, &opts()).unwrap();

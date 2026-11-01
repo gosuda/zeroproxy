@@ -81,7 +81,10 @@ mod tests {
         let raw = include_str!("../testdata/proxy_url_cases.json");
         let doc: serde_json::Value = serde_json::from_str(raw).expect("parse proxy_url_cases.json");
         let cases = doc["cases"].as_array().expect("cases");
-        assert!(cases.len() >= 8, "fixture must stay populated for parity checks");
+        assert!(
+            cases.len() >= 8,
+            "fixture must stay populated for parity checks"
+        );
         for c in cases {
             let id = c["id"].as_str().unwrap_or("?");
             let url = c["url"].as_str().expect("url");
@@ -105,19 +108,31 @@ mod tests {
     #[test]
     fn fragment_stays_outside_the_param() {
         let out = build("https://t.example/sprite.svg#icon");
-        assert!(out.ends_with("#icon"), "fragment missing outside query parameter: {out}");
-        assert!(!out.contains("%23"), "fragment was percent-encoded into the parameter: {out}");
+        assert!(
+            out.ends_with("#icon"),
+            "fragment missing outside query parameter: {out}"
+        );
+        assert!(
+            !out.contains("%23"),
+            "fragment was percent-encoded into the parameter: {out}"
+        );
     }
 
     #[test]
     fn tab_comes_before_the_fragment() {
-        let out = subresource_proxy_url("https://t.example/s.svg#i", "http://p", "/zp/", Some("t7"));
-        assert_eq!(out, "http://p/zp/api/v2/fetch?url=https%3A%2F%2Ft.example%2Fs.svg&tab=t7#i");
+        let out =
+            subresource_proxy_url("https://t.example/s.svg#i", "http://p", "/zp/", Some("t7"));
+        assert_eq!(
+            out,
+            "http://p/zp/api/v2/fetch?url=https%3A%2F%2Ft.example%2Fs.svg&tab=t7#i"
+        );
     }
 
     #[test]
     fn empty_tab_is_not_emitted() {
-        assert!(!subresource_proxy_url("https://t/a", "http://p", "/zp/", Some("")).contains("tab="));
+        assert!(
+            !subresource_proxy_url("https://t/a", "http://p", "/zp/", Some("")).contains("tab=")
+        );
     }
 
     /// Spaces must encode as `%20`. `form_urlencoded` emits `+`, which remains a
@@ -129,7 +144,9 @@ mod tests {
 
     #[test]
     fn trailing_slash_on_origin_does_not_double() {
-        assert!(subresource_proxy_url("https://t/a", "http://p/", "/zp/", None)
-            .starts_with("http://p/zp/api/v2/fetch?url="));
+        assert!(
+            subresource_proxy_url("https://t/a", "http://p/", "/zp/", None)
+                .starts_with("http://p/zp/api/v2/fetch?url=")
+        );
     }
 }

@@ -34,20 +34,11 @@ pub struct TargetAddr {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DialError {
     /// Failed to establish or open a multiplexed stream on the relay session.
-    RelaySession {
-        stage: &'static str,
-        detail: String,
-    },
+    RelaySession { stage: &'static str, detail: String },
     /// Upstream SOCKS5 or target TCP connect failed.
-    TargetConnect {
-        stage: &'static str,
-        detail: String,
-    },
+    TargetConnect { stage: &'static str, detail: String },
     /// Custom embedder-supplied dial failure.
-    Custom {
-        code: &'static str,
-        detail: String,
-    },
+    Custom { code: &'static str, detail: String },
 }
 
 impl DialError {
@@ -145,7 +136,11 @@ mod tests {
     }
 
     fn addr(host: &str) -> TargetAddr {
-        TargetAddr { host: host.into(), port: 443, isolation_key: None }
+        TargetAddr {
+            host: host.into(),
+            port: 443,
+            isolation_key: None,
+        }
     }
 
     #[test]
@@ -167,17 +162,28 @@ mod tests {
         set_dialer(Rc::new(FixedBytes(Vec::new())));
         let d = injected_dialer().unwrap();
         let target = addr("refused.test");
-        let err = block_on(d.connect(&target, "")).err().expect("connect must fail");
+        let err = block_on(d.connect(&target, ""))
+            .err()
+            .expect("connect must fail");
         clear_dialer();
         assert_eq!(err.code(), "TARGET_CONNECT_FAILED:refused");
         assert_eq!(err.detail(), "refused.test:443");
-        assert_eq!(err.to_string(), "TARGET_CONNECT_FAILED:refused: refused.test:443");
+        assert_eq!(
+            err.to_string(),
+            "TARGET_CONNECT_FAILED:refused: refused.test:443"
+        );
     }
 
     #[test]
     fn relay_and_target_errors_report_their_stage_as_code() {
-        let relay = DialError::RelaySession { stage: "TARGET_CONNECT_FAILED:mux-open", detail: "x".into() };
-        let target = DialError::TargetConnect { stage: "TARGET_CONNECT_FAILED:socks5", detail: "y".into() };
+        let relay = DialError::RelaySession {
+            stage: "TARGET_CONNECT_FAILED:mux-open",
+            detail: "x".into(),
+        };
+        let target = DialError::TargetConnect {
+            stage: "TARGET_CONNECT_FAILED:socks5",
+            detail: "y".into(),
+        };
         assert_eq!(relay.code(), "TARGET_CONNECT_FAILED:mux-open");
         assert_eq!(target.code(), "TARGET_CONNECT_FAILED:socks5");
     }

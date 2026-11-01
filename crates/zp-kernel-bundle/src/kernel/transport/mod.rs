@@ -1,17 +1,14 @@
 //! Client-side transport stack for the Rust WASM kernel.
 //!
-//! The relay must not parse target HTTP, TLS, redirects, cookies, or HTML.
-//! This module implements the transport stack in Rust/WASM so the relay acts
-//! as a byte-pipe:
+//! The relay does not parse target HTTP, TLS, redirects, cookies, or HTML.
+//! This module implements the transport layers in Rust/WASM so the relay acts
+//! as an opaque byte pipe:
 //!
-//! ```text
-//! kernel_fetch(req)
-//!     ├─ ws_stream :: open WebSocket to /zp/ws-pipe, expose AsyncRead/Write
-//!     ├─ yamux     :: client session, one stream per target TCP connection
-//!     ├─ socks5    :: DOMAINNAME CONNECT with IsolateSOCKSAuth username
-//!     ├─ tls       :: rustls (rustls-rustcrypto provider) for HTTPS targets
-//!     └─ http      :: HTTP/2 (h2 crate) when ALPN selects h2, HTTP/1.1 else
-//! ```
+//! - `ws_stream`: opens a WebSocket to `/zp/ws-pipe` and adapts it to `AsyncRead` / `AsyncWrite`.
+//! - `yamux`: multiplexes one logical stream per target TCP connection over the WebSocket.
+//! - `socks5`: performs `DOMAINNAME` `CONNECT` with per-tab `IsolateSOCKSAuth` credentials.
+//! - `tls`: negotiates TLS via `rustls` (`rustls-rustcrypto` provider) for HTTPS targets.
+//! - `http1` and `http2`: speaks HTTP/2 when ALPN selects `h2`, or HTTP/1.1 otherwise.
 #![allow(dead_code)]
 
 pub(crate) mod decode;

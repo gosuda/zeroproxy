@@ -1,17 +1,13 @@
-//! Embedding seam: pluggable raw-connection factory.
+//! Pluggable raw-connection factory for the browser transport stack.
 //!
-//! ```text
-//! open_fresh(fetch.rs)
-//!   └─ Dialer::connect(target, relay_url)
-//!        ├─ RelayDialer (default): yamux session + SOCKS5 CONNECT
-//!        └─ host-injected Dialer: direct/Tor/CONNECT/in-process
-//! ```
+//! `open_fresh` in `fetch.rs` calls [`Dialer::connect`] with the target address
+//! and relay URL. By default, [`RelayDialer`] opens a stream on the shared
+//! `yamux` session and runs a SOCKS5 `CONNECT` handshake through the relay;
+//! host embedders can override this via [`set_dialer`].
 //!
-//! TLS and HTTP layering above the returned byte stream are unchanged;
-//! a Dialer only decides where raw bytes terminate.
-//!
-//! The trait, address, and error types live in `crate::dial` so they compile
-//! on host targets; this module adds the wasm-only `RelayDialer` default.
+//! TLS and HTTP framing run on top of the returned byte stream. The trait,
+//! address, and error types live in [`crate::dial`] so they compile on host
+//! targets; this module adds the `wasm32`-only [`RelayDialer`] default.
 
 use std::rc::Rc;
 

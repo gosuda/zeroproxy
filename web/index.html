@@ -71,7 +71,7 @@
   .dot{width:8px;height:8px;border-radius:50%;background:var(--accent);
     box-shadow:0 0 10px var(--accent);animation:beat 2.2s ease-in-out infinite}
   #status{margin:0;font-family:var(--mono);font-size:13px;line-height:1.5;color:var(--fg);min-height:1.5em;transition:color .2s}
-  #status:empty::after{content:"— awaiting boot";color:var(--soft);opacity:.7}
+  #status:empty::after{content:"awaiting boot";color:var(--soft);opacity:.7}
   #status.err{color:var(--warn)}
   #status.err ~ b{display:none}
   .stat:has(#status.err) .dot{background:var(--warn);box-shadow:0 0 10px var(--warn);animation:none}
@@ -89,7 +89,7 @@
 </style>
 
 <div class="bar">
-  <span class="lbl">ZeroProxy — Isolation Transport</span>
+  <span class="lbl">ZeroProxy / Isolation Transport</span>
   <span class="lbl live">Fig. 00 / Launcher</span>
 </div>
 
@@ -101,10 +101,10 @@
     </h1>
     <div class="strap">
       <p>
-        Every script the target serves is rewritten through a Rust→WASM AST pass before it
-        reaches you. It runs against a virtual <code>window</code>, <code>location</code>,
-        and <code>document.cookie</code> — origin-confused, fingerprint-blind, unable to
-        see out of the room it's loaded into.
+        Every target script is rewritten through the OXC AST rewriter in WebAssembly before
+        execution. It runs against a virtual <code>window</code>, <code>location</code>,
+        and <code>document.cookie</code> while the Service Worker kernel terminates TLS and
+        isolates storage per virtual origin.
       </p>
       <div class="idx">fully proxied browsing</div>
     </div>
@@ -112,7 +112,7 @@
 
   <div class="console">
     <div class="field">
-      <span class="lbl">01 — Target URL · HTTP / HTTPS</span>
+      <span class="lbl">01 / Target URL · HTTP / HTTPS</span>
       <form id="open">
         <span class="caret" aria-hidden="true">›</span>
         <input id="url" type="url" autocomplete="url" spellcheck="false" placeholder="https://example.com" required>
@@ -122,14 +122,14 @@
       <label class="opt"><input id="site-frames" type="checkbox" checked> <span class="lbl">Site-isolated frames (loopback relay only)</span></label>
     </div>
     <div class="stat">
-      <span class="lbl"><span class="dot" aria-hidden="true"></span>02 — Status</span>
+      <span class="lbl"><span class="dot" aria-hidden="true"></span>02 / Status</span>
       <p id="status" role="status"></p>
     </div>
   </div>
 </main>
 
 <footer class="lbl">
-  <span>Rust→WASM AST rewrite / OXC</span>
+  <span>Rust / WASM AST rewrite / OXC</span>
   <span>Service Worker intercepts all subresources</span>
 </footer>
 
@@ -216,7 +216,7 @@
     if (slowLane) {
       setStatus(
         slowLane.label + ' delays first-time visits to this subdomain by ~' +
-        slowLane.expectedSec + ' s (IP-reputation gate). Loading now — '
+        slowLane.expectedSec + ' s (IP-reputation gate). Loading now; '
         + 'follow-up links in this session will be instant.',
         false
       );
@@ -238,7 +238,7 @@
       if (slowLane) {
         setStatus(
           slowLane.label + ' delays first-time visits to this subdomain by ~' +
-          slowLane.expectedSec + ' s (IP-reputation gate). Loading now — '
+          slowLane.expectedSec + ' s (IP-reputation gate). Loading now; '
           + 'follow-up links in this session will be instant.',
           false
         );
@@ -289,7 +289,7 @@
   openForm.addEventListener('submit', async ev => {
     ev.preventDefault();
     if (!runtimeReady) {
-      setStatus('Runtime is still loading — please wait.', true);
+      setStatus('Runtime is still loading, please wait.', true);
       return;
     }
     try { setStatus('Opening through ZeroProxy…'); await openTarget(urlInput.value); }
@@ -315,7 +315,7 @@
     tick = setInterval(() => {
       if (runtimeReady) { clearInterval(tick); return; }
       const secs = Math.round((Date.now() - t0) / 1000);
-      setStatus('Loading ZeroProxy runtime — ' + secs + 's…');
+      setStatus('Loading ZeroProxy runtime (' + secs + 's)…');
     }, 500);
     try {
       for (let i = 0; i < 60; i++) {

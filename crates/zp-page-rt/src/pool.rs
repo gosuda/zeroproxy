@@ -144,7 +144,6 @@ fn eq_ci(a: &[u8], b_lower: &[u8]) -> bool {
         .all(|(x, y)| ascii_lower(*x) == *y)
 }
 
-
 // Bulk results pack `(class & 0xF) << 28 | (handle & MAX_HANDLE)` into one u32.
 // `UrlClass` needs 4 bits and a handle gets the remaining 28, so the pool stops
 // issuing handles at `MAX_HANDLE`; truncating a handle to fewer bits would make
@@ -253,7 +252,11 @@ impl UrlPool {
         let len = trimmed.len() as u32;
         self.bytes.extend_from_slice(trimmed);
         let cls = classify_scheme(trimmed);
-        self.entries.push(UrlEntry { offset, len, next_same_hash: head });
+        self.entries.push(UrlEntry {
+            offset,
+            len,
+            next_same_hash: head,
+        });
         self.class_cache.push(cls as u8);
         let handle = self.entries.len() as u32; // 1-based
         self.by_hash.insert(h, handle);
@@ -320,8 +323,10 @@ mod tests {
     fn intern_dedupes_and_trims() {
         let mut pool = UrlPool::new();
         let a = pool.intern(b"https://example.com/");
-        let b = pool.intern(b"  https://example.com/
-");
+        let b = pool.intern(
+            b"  https://example.com/
+",
+        );
         assert_ne!(a, 0);
         assert_eq!(a, b);
         assert_eq!(pool.len(), 1);
@@ -367,9 +372,18 @@ mod tests {
 
     #[test]
     fn schemes_classify_case_insensitively() {
-        assert_eq!(classify_scheme(b"JaVaScRiPt:alert(1)") as u32, UrlClass::JavaScript as u32);
-        assert_eq!(classify_scheme(b"about:blank") as u32, UrlClass::AboutBlank as u32);
-        assert_eq!(classify_scheme(b"/relative/path") as u32, UrlClass::Relative as u32);
+        assert_eq!(
+            classify_scheme(b"JaVaScRiPt:alert(1)") as u32,
+            UrlClass::JavaScript as u32
+        );
+        assert_eq!(
+            classify_scheme(b"about:blank") as u32,
+            UrlClass::AboutBlank as u32
+        );
+        assert_eq!(
+            classify_scheme(b"/relative/path") as u32,
+            UrlClass::Relative as u32
+        );
         assert_eq!(classify_scheme(b"wss://x") as u32, UrlClass::Ws as u32);
     }
 }

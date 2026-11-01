@@ -46,4 +46,3 @@ pub fn rewrite_script_js(
             .map_err(|e| JsError::new(&e.to_string()))
     })
 }
-

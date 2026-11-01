@@ -1,7 +1,9 @@
 //! SWC-based CSS rewriter: rewrites `url(...)`, `@import`, and `image-set(...)`
 //! references to route through the proxy's `/zp/api/v2/fetch?url=...` endpoint.
 
-use swc_css_ast::{DeclarationOrAtRule, ImportHref, ListOfComponentValues, Str, Stylesheet, UrlValue};
+use swc_css_ast::{
+    DeclarationOrAtRule, ImportHref, ListOfComponentValues, Str, Stylesheet, UrlValue,
+};
 use swc_css_visit::{Visit, VisitWith};
 
 /// A rewritten stylesheet.
@@ -25,9 +27,15 @@ pub fn rewrite_css(
     control_prefix: &str,
     proxy_origin: &str,
 ) -> Result<CssRewriteOutput, CssError> {
-    let control_prefix = if control_prefix.is_empty() { "/zp/" } else { control_prefix };
+    let control_prefix = if control_prefix.is_empty() {
+        "/zp/"
+    } else {
+        control_prefix
+    };
     let replacements = collect_css_replacements(source, base_url, control_prefix, proxy_origin)?;
-    Ok(CssRewriteOutput { code: apply_css_replacements(source, replacements) })
+    Ok(CssRewriteOutput {
+        code: apply_css_replacements(source, replacements),
+    })
 }
 
 fn proxied_css_url(
@@ -41,7 +49,12 @@ fn proxied_css_url(
         return None;
     }
     let lower = s.get(..s.len().min(32)).unwrap_or("").to_ascii_lowercase();
-    if lower.starts_with("data:") || lower.starts_with("blob:") || lower.starts_with("about:") || lower.starts_with("javascript:") || lower.starts_with("vbscript:") {
+    if lower.starts_with("data:")
+        || lower.starts_with("blob:")
+        || lower.starts_with("about:")
+        || lower.starts_with("javascript:")
+        || lower.starts_with("vbscript:")
+    {
         return None;
     }
     let base = url::Url::parse(base_url).ok()?;
@@ -80,7 +93,12 @@ struct CssReplacement {
     text: String,
 }
 
-fn collect_css_replacements(source: &str, base_url: &str, control_prefix: &str, proxy_origin: &str) -> Result<Vec<CssReplacement>, CssError> {
+fn collect_css_replacements(
+    source: &str,
+    base_url: &str,
+    control_prefix: &str,
+    proxy_origin: &str,
+) -> Result<Vec<CssReplacement>, CssError> {
     use swc_common::{sync::Lrc, FileName, SourceMap};
     use swc_css_parser::{parse_file, parser::ParserConfig};
 
@@ -89,17 +107,37 @@ fn collect_css_replacements(source: &str, base_url: &str, control_prefix: &str, 
     let start_pos = fm.start_pos.0;
 
     let mut stylesheet_errors = Vec::new();
-    if let Ok(stylesheet) = parse_file::<Stylesheet>(&fm, None, ParserConfig::default(), &mut stylesheet_errors) {
-        let mut collector = CssUrlCollector::new(base_url, control_prefix, proxy_origin, start_pos, source.len());
+    if let Ok(stylesheet) =
+        parse_file::<Stylesheet>(&fm, None, ParserConfig::default(), &mut stylesheet_errors)
+    {
+        let mut collector = CssUrlCollector::new(
+            base_url,
+            control_prefix,
+            proxy_origin,
+            start_pos,
+            source.len(),
+        );
         stylesheet.visit_with(&mut collector);
-        if !collector.replacements.is_empty() || source.contains('{') || source.contains("@import") {
+        if !collector.replacements.is_empty() || source.contains('{') || source.contains("@import")
+        {
             return Ok(collector.replacements);
         }
     }
 
     let mut declaration_errors = Vec::new();
-    if let Ok(declarations) = parse_file::<Vec<DeclarationOrAtRule>>(&fm, None, ParserConfig::default(), &mut declaration_errors) {
-        let mut collector = CssUrlCollector::new(base_url, control_prefix, proxy_origin, start_pos, source.len());
+    if let Ok(declarations) = parse_file::<Vec<DeclarationOrAtRule>>(
+        &fm,
+        None,
+        ParserConfig::default(),
+        &mut declaration_errors,
+    ) {
+        let mut collector = CssUrlCollector::new(
+            base_url,
+            control_prefix,
+            proxy_origin,
+            start_pos,
+            source.len(),
+        );
         for declaration in &declarations {
             declaration.visit_with(&mut collector);
         }
@@ -109,8 +147,16 @@ fn collect_css_replacements(source: &str, base_url: &str, control_prefix: &str, 
     }
 
     let mut value_errors = Vec::new();
-    if let Ok(values) = parse_file::<ListOfComponentValues>(&fm, None, ParserConfig::default(), &mut value_errors) {
-        let mut collector = CssUrlCollector::new(base_url, control_prefix, proxy_origin, start_pos, source.len());
+    if let Ok(values) =
+        parse_file::<ListOfComponentValues>(&fm, None, ParserConfig::default(), &mut value_errors)
+    {
+        let mut collector = CssUrlCollector::new(
+            base_url,
+            control_prefix,
+            proxy_origin,
+            start_pos,
+            source.len(),
+        );
         values.visit_with(&mut collector);
         return Ok(collector.replacements);
     }
@@ -120,7 +166,9 @@ fn collect_css_replacements(source: &str, base_url: &str, control_prefix: &str, 
 
 fn apply_css_replacements(source: &str, mut replacements: Vec<CssReplacement>) -> String {
     replacements.sort_by(|a, b| a.start.cmp(&b.start).then(b.end.cmp(&a.end)));
-    let mut out = String::with_capacity(source.len() + replacements.iter().map(|r| r.text.len()).sum::<usize>());
+    let mut out = String::with_capacity(
+        source.len() + replacements.iter().map(|r| r.text.len()).sum::<usize>(),
+    );
     let mut pos = 0usize;
     for r in replacements {
         if r.start < pos || r.start > r.end || r.end > source.len() {
@@ -144,19 +192,42 @@ struct CssUrlCollector<'a> {
 }
 
 impl<'a> CssUrlCollector<'a> {
-    fn new(base_url: &'a str, control_prefix: &'a str, proxy_origin: &'a str, start_pos: u32, source_len: usize) -> Self {
-        Self { base_url, control_prefix, proxy_origin, start_pos, source_len, replacements: Vec::new() }
+    fn new(
+        base_url: &'a str,
+        control_prefix: &'a str,
+        proxy_origin: &'a str,
+        start_pos: u32,
+        source_len: usize,
+    ) -> Self {
+        Self {
+            base_url,
+            control_prefix,
+            proxy_origin,
+            start_pos,
+            source_len,
+            replacements: Vec::new(),
+        }
     }
 
     fn span_offsets(&self, span: swc_common::Span) -> Option<(usize, usize)> {
         let start = span.lo.0.checked_sub(self.start_pos)? as usize;
         let end = span.hi.0.checked_sub(self.start_pos)? as usize;
-        if start < end && end <= self.source_len { Some((start, end)) } else { None }
+        if start < end && end <= self.source_len {
+            Some((start, end))
+        } else {
+            None
+        }
     }
 
     fn add_quoted_replacement(&mut self, span: swc_common::Span, raw: &str) {
-        let Some(next) = proxied_css_url(raw, self.base_url, self.control_prefix, self.proxy_origin) else { return; };
-        let Some((start, end)) = self.span_offsets(span) else { return; };
+        let Some(next) =
+            proxied_css_url(raw, self.base_url, self.control_prefix, self.proxy_origin)
+        else {
+            return;
+        };
+        let Some((start, end)) = self.span_offsets(span) else {
+            return;
+        };
         self.replacements.push(CssReplacement {
             start,
             end,
@@ -198,7 +269,9 @@ impl Visit for CssUrlCollector<'_> {
     }
 
     fn visit_url(&mut self, node: &swc_css_ast::Url) {
-        let Some(value) = node.value.as_ref() else { return; };
+        let Some(value) = node.value.as_ref() else {
+            return;
+        };
         match &**value {
             UrlValue::Str(s) => self.add_string_replacement(s),
             UrlValue::Raw(raw) => self.add_quoted_replacement(raw.span, &raw.value.to_string()),
@@ -219,7 +292,12 @@ mod tests {
         let (base, prefix) = opts();
         let css = "body { background: url(/img/bg.png); }";
         let out = rewrite_css(css, base, prefix, "").expect("rewrite failed");
-        assert!(out.code.contains("/zp/api/v2/fetch?url=https%3A%2F%2Fexample.com%2Fimg%2Fbg.png"), "got: {}", out.code);
+        assert!(
+            out.code
+                .contains("/zp/api/v2/fetch?url=https%3A%2F%2Fexample.com%2Fimg%2Fbg.png"),
+            "got: {}",
+            out.code
+        );
     }
 
     // `swc_css_parser` turns the text of a number and of an `An+B` offset into a value with `lexical::parse` and panics (`unreachable!`) when that fails. `lexical` is the
@@ -231,8 +309,17 @@ mod tests {
                    li:nth-last-child(-n-99999999999) { z-index: 99999999999999999999 }\n\
                    p { line-height: 1.5e+3; opacity: .5; top: -.5em; left: +7px }";
         let out = rewrite_css(css, base, prefix, "").expect("rewrite failed");
-        assert!(out.code.contains("/zp/api/v2/fetch?url=https%3A%2F%2Fexample.com%2Fa.png"), "got: {}", out.code);
-        assert!(out.code.contains("nth-child(99999999999n+99999999999)"), "the selector is kept as written: {}", out.code);
+        assert!(
+            out.code
+                .contains("/zp/api/v2/fetch?url=https%3A%2F%2Fexample.com%2Fa.png"),
+            "got: {}",
+            out.code
+        );
+        assert!(
+            out.code.contains("nth-child(99999999999n+99999999999)"),
+            "the selector is kept as written: {}",
+            out.code
+        );
     }
 
     #[test]
@@ -250,7 +337,9 @@ mod tests {
         let (base, prefix) = opts();
         let css = "@import \"/styles/reset.css\";";
         let out = rewrite_css(css, base, prefix, "").expect("rewrite failed");
-        assert!(out.code.contains("/zp/api/v2/fetch?url=https%3A%2F%2Fexample.com%2Fstyles%2Freset.css"));
+        assert!(out
+            .code
+            .contains("/zp/api/v2/fetch?url=https%3A%2F%2Fexample.com%2Fstyles%2Freset.css"));
     }
 
     // With a non-empty `proxy_origin`, emitted references must be absolute so
@@ -267,7 +356,8 @@ mod tests {
         ] {
             let out = rewrite_css(css, base, prefix, origin).expect("rewrite failed");
             assert!(
-                out.code.contains("http://proxy.localhost:18080/zp/api/v2/fetch?url="),
+                out.code
+                    .contains("http://proxy.localhost:18080/zp/api/v2/fetch?url="),
                 "expected absolute proxy URL, got: {}",
                 out.code
             );
@@ -284,8 +374,18 @@ mod tests {
     #[test]
     fn proxy_origin_trailing_slash_is_normalised() {
         let (base, prefix) = opts();
-        let out = rewrite_css("body { background: url(/img/bg.png); }", base, prefix, "https://p.example/").expect("rewrite failed");
-        assert!(out.code.contains("https://p.example/zp/api/v2/fetch?url="), "got: {}", out.code);
+        let out = rewrite_css(
+            "body { background: url(/img/bg.png); }",
+            base,
+            prefix,
+            "https://p.example/",
+        )
+        .expect("rewrite failed");
+        assert!(
+            out.code.contains("https://p.example/zp/api/v2/fetch?url="),
+            "got: {}",
+            out.code
+        );
         assert!(!out.code.contains("//zp/api"), "double slash: {}", out.code);
     }
 }
@@ -297,7 +397,8 @@ mod image_set_tests {
     #[test]
     fn image_set_bare_strings_rewritten() {
         let css = r#"#x{background-image:image-set("https://t.example/a.png" 1x, "https://t.example/a2.png" 2x)}"#;
-        let out = rewrite_css(css, "https://example.com/", "/zp/", "https://p.example").expect("rewrite failed");
+        let out = rewrite_css(css, "https://example.com/", "/zp/", "https://p.example")
+            .expect("rewrite failed");
         assert!(
             !out.code.contains("t.example/a.png"),
             "1x candidate was not rewritten: {}",
@@ -313,16 +414,34 @@ mod image_set_tests {
     #[test]
     fn webkit_image_set_also_rewritten() {
         let css = r#"#x{background-image:-webkit-image-set("https://t.example/a.png" 1x)}"#;
-        let out = rewrite_css(css, "https://example.com/", "/zp/", "https://p.example").expect("rewrite failed");
-        assert!(!out.code.contains("\"https://t.example"), "-webkit- prefixed form not rewritten: {}", out.code);
-        assert!(out.code.contains("api/v2/fetch?url="), "expected proxy path, got: {}", out.code);
+        let out = rewrite_css(css, "https://example.com/", "/zp/", "https://p.example")
+            .expect("rewrite failed");
+        assert!(
+            !out.code.contains("\"https://t.example"),
+            "-webkit- prefixed form not rewritten: {}",
+            out.code
+        );
+        assert!(
+            out.code.contains("api/v2/fetch?url="),
+            "expected proxy path, got: {}",
+            out.code
+        );
     }
 
     #[test]
     fn image_set_url_form_still_rewritten() {
         let css = r#"#x{background-image:image-set(url(https://t.example/a.png) 1x)}"#;
-        let out = rewrite_css(css, "https://example.com/", "/zp/", "https://p.example").expect("rewrite failed");
-        assert!(!out.code.contains("(https://t.example"), "url() form regression: {}", out.code);
-        assert!(out.code.contains("api/v2/fetch?url="), "expected proxy path, got: {}", out.code);
+        let out = rewrite_css(css, "https://example.com/", "/zp/", "https://p.example")
+            .expect("rewrite failed");
+        assert!(
+            !out.code.contains("(https://t.example"),
+            "url() form regression: {}",
+            out.code
+        );
+        assert!(
+            out.code.contains("api/v2/fetch?url="),
+            "expected proxy path, got: {}",
+            out.code
+        );
     }
 }

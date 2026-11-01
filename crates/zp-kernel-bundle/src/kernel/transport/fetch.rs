@@ -1,26 +1,23 @@
-//! Transport-stack entry point used by `kernel_fetch`. Drives the full
-//! browser-side path so the relay server only ever sees encrypted bytes.
+//! Transport-stack entry point used by `kernel_fetch`. Drives the client-side
+//! connection and HTTP pipeline so the relay server only forwards opaque bytes:
 //!
-//! ```text
-//! fetch(target_url, method, headers, body)
-//!   ├─ parse target_url: host / port / scheme / path
-//!   ├─ pool::take((scheme,host,port))        (reuses warm TLS+HTTP conn)
-//!   │   │ MISS or stale:
-//!   │   └─ yamux::get_or_open(/zp/ws-pipe)    (shared WS, lazy)
-//!   │     ├─ session.open_stream()           (new yamux stream)
-//!   │     ├─ socks5::connect(host:port)      (relay-side dialer)
-//!   │     └─ if https: TlsStream::connect()  (rustls handshake)
-//!   ├─ http1::send_request()                 (HTTP/1.1 origin-form)
-//!   └─ build_js_response()                   (buffered or pull-driven body)
-//! ```
+//! 1. Parse `target_url` into scheme, host, port, and request path.
+//! 2. Reuse a live HTTP/2 client or pooled HTTP/1.1 connection for
+//!    `(scheme, host, port, isolation_key)` when available.
+//! 3. On a pool miss, dial a fresh byte stream through [`super::dialer::dialer`]
+//!    (defaulting to a `yamux` stream over `/zp/ws-pipe` plus SOCKS5 `CONNECT`),
+//!    and negotiate `rustls` with ALPN (`h2`, `http/1.1`) for `https` targets.
+//! 4. Send the request over HTTP/2 or HTTP/1.1 and wrap the buffered or
+//!    streaming response in a `web_sys::Response`.
 //!
 //! ## Response contract
 //!
-//! * No redirect follow: surfaces 3xx to the caller. `kernel_fetch`'s
-//!   higher layer handles redirects so the cookie jar and virtual URL
+//! * No redirect follow: surfaces 3xx responses to the caller. `kernel_fetch`
+//!   handles redirects at the outer layer so the cookie jar and virtual URL
 //!   state stay consistent.
-//! * H1 body consumption owns the connection; only complete framing and
-//!   successful decoding return it to the pool. Both HTTP versions stream.
+//! * HTTP/1.1 body consumption owns the connection; only complete framing and
+//!   successful decoding return it to the pool. Both HTTP versions support
+//!   streaming response bodies.
 
 use js_sys::Uint8Array;
 use wasm_bindgen::prelude::*;
@@ -121,7 +118,17 @@ pub(crate) async fn fetch(
             delta_ms(t0)
         ));
         let t_req = now_ms();
-        match http1::send_request(conn, key.clone(), method, &host_h, &parsed.path, headers, body).await {
+        match http1::send_request(
+            conn,
+            key.clone(),
+            method,
+            &host_h,
+            &parsed.path,
+            headers,
+            body,
+        )
+        .await
+        {
             Ok(resp) => {
                 crate::kernel::push_trace(&format!(
                     "tx:pool-reuse-ok host={} status={} http={}ms total={}ms",
@@ -218,17 +225,25 @@ async fn cold_request(
         }
         FreshConn::Http1(conn) => {
             let t_req = now_ms();
-            let resp = http1::send_request(conn, key.clone(), method, host_h, &parsed.path, headers, body)
-                .await
-                .map_err(|e| {
-                    crate::kernel::push_trace(&format!(
-                        "tx:http-err host={} err={} t={}ms",
-                        parsed.host,
-                        e,
-                        delta_ms(t0)
-                    ));
-                    jserr("TARGET_HTTP_FAILED", &e)
-                })?;
+            let resp = http1::send_request(
+                conn,
+                key.clone(),
+                method,
+                host_h,
+                &parsed.path,
+                headers,
+                body,
+            )
+            .await
+            .map_err(|e| {
+                crate::kernel::push_trace(&format!(
+                    "tx:http-err host={} err={} t={}ms",
+                    parsed.host,
+                    e,
+                    delta_ms(t0)
+                ));
+                jserr("TARGET_HTTP_FAILED", &e)
+            })?;
             crate::kernel::push_trace(&format!(
                 "tx:http-ok host={} status={} http={}ms total={}ms",
                 parsed.host,
@@ -598,9 +613,17 @@ fn build_streaming_js_response(
     ));
     let headers = build_response_headers(&resp.headers, final_url, armed_challenge_compat)?;
     headers.set("X-ZP-Body-Stream", "1")?;
-    let is_html = resp.headers.iter()
+    let is_html = resp
+        .headers
+        .iter()
         .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
-        .map(|(_, v)| v.split(';').next().unwrap_or("").trim().eq_ignore_ascii_case("text/html"))
+        .map(|(_, v)| {
+            v.split(';')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .eq_ignore_ascii_case("text/html")
+        })
         .unwrap_or(false);
     if is_html {
         headers.set("X-ZP-Stream", "1")?;

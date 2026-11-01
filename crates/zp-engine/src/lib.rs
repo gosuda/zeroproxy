@@ -308,18 +308,26 @@ mod tests {
     fn rewrite_and_patch_modes_agree_on_the_same_script() {
         let mut engine = TransformEngine::new();
         let src = "var f = eval; f('return globalThis');";
-        let full = engine.rewrite_script(src, ScriptKind::Classic, &ctx()).unwrap();
+        let full = engine
+            .rewrite_script(src, ScriptKind::Classic, &ctx())
+            .unwrap();
         assert!(full.contains("__zp_get"), "{full}");
         let patches = engine
             .rewrite_script_patches_json(src, ScriptKind::Classic, &ctx())
             .unwrap();
-        assert!(patches.starts_with(&format!("{{\"len\":{}", src.len())), "{patches}");
+        assert!(
+            patches.starts_with(&format!("{{\"len\":{}", src.len())),
+            "{patches}"
+        );
         assert!(patches.contains("eval"), "{patches}");
     }
 
     #[test]
     fn script_kind_names_are_parsed_at_the_boundary() {
-        assert!(matches!(parse_script_kind("module"), Ok(ScriptKind::Module)));
+        assert!(matches!(
+            parse_script_kind("module"),
+            Ok(ScriptKind::Module)
+        ));
         match parse_script_kind("bogus") {
             Err(EngineError::UnknownScriptKind(k)) => assert_eq!(k, "bogus"),
             other => panic!("expected UnknownScriptKind, got {other:?}"),
