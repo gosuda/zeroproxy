@@ -19,7 +19,7 @@ members = [
 exclude = ["third_party-rustls-fork", "third_party-h2-fork", "third_party-rustls-rustcrypto", "third_party-lexical"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 license = "Apache-2.0"
 

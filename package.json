@@ -1,6 +1,6 @@
 {
   "name": "@gosuda/zeroproxy",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Isolation web proxy runtime, OXC JavaScript AST rewriter, streaming HTML/CSS transformer, URL classifier, and client-side TLS WebAssembly kernel.",
   "license": "Apache-2.0",
   "type": "module",

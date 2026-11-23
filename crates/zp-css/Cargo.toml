@@ -1,6 +1,6 @@
 [package]
 name = "zp-css"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 
 # Shared CSS rewriter (`url(...)` and `@import`) depended on by both

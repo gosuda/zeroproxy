@@ -3536,7 +3536,7 @@ checksum = "458b3e7a977f14499066b6bdb63d69da30ce337d6c160f077e6c575c82a44db9"
 
 [[package]]
 name = "zp-bundle"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "js-sys",
  "wasm-bindgen",
@@ -3550,7 +3550,7 @@ dependencies = [
 
 [[package]]
 name = "zp-css"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "swc_common",
  "swc_css_ast",
@@ -3563,7 +3563,7 @@ dependencies = [
 
 [[package]]
 name = "zp-engine"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "zp-css",
  "zp-htmltx",
@@ -3573,7 +3573,7 @@ dependencies = [
 
 [[package]]
 name = "zp-htmltx"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "criterion",
  "lol_html",
@@ -3587,7 +3587,7 @@ dependencies = [
 
 [[package]]
 name = "zp-kernel-bundle"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64",
  "brotli 9.1.3",
@@ -3626,7 +3626,7 @@ dependencies = [
 
 [[package]]
 name = "zp-page-bundle"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "wasm-bindgen",
  "zp-rewriter",
@@ -3635,11 +3635,11 @@ dependencies = [
 
 [[package]]
 name = "zp-page-rt"
-version = "0.1.0"
+version = "0.1.1"
 
 [[package]]
 name = "zp-rewriter"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "criterion",
  "oxc_allocator",
@@ -3659,7 +3659,7 @@ dependencies = [
 
 [[package]]
 name = "zp-shared"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "percent-encoding",
  "serde",
@@ -3669,7 +3669,7 @@ dependencies = [
 
 [[package]]
 name = "zp-transport-codec"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "httparse",
 ]
