@@ -1,48 +1,76 @@
 #!/usr/bin/env node
 import esbuild from 'esbuild';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { access, copyFile, mkdir, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-// Declare buildId before top-level buildWeb() executes to avoid the temporal dead zone.
+// Declare all build path constants before top-level await to avoid temporal dead zones.
 let buildId = '';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const args = parseArgs(process.argv.slice(2));
 const outRoot = path.resolve(repoRoot, args.out || 'dist');
 const webSrc = path.join(repoRoot, 'web');
+const esmSrc = path.join(repoRoot, 'esm');
 const membraneDir = path.join(webSrc, 'membrane');
 const webOut = path.join(outRoot, 'web');
+const esmOut = path.join(outRoot, 'esm');
+const esmWbgOut = path.join(esmOut, 'wbg');
+const esmWasmOut = path.join(esmOut, 'wasm');
 const serverOut = path.join(outRoot, process.platform === 'win32' ? 'zeroproxy-server.exe' : 'zeroproxy-server');
+const wasmManifestOut = path.join(outRoot, 'wasm-manifest.json');
+const cargoHome = process.env.CARGO_HOME || path.join(os.homedir(), '.cargo');
+// Remap host-specific workspace and registry paths so WASM binaries are reproducible and compact.
+const remapRustFlags = [
+  `--remap-path-prefix=${repoRoot}=/src`,
+  `--remap-path-prefix=${cargoHome}=/cargo`,
+].join(' ');
 // Default to a small local footprint; explicit caller limits still win.
 const buildEnv = {
   ...process.env,
   CARGO_BUILD_JOBS: process.env.CARGO_BUILD_JOBS || '2',
   BINARYEN_CORES: process.env.BINARYEN_CORES || '2',
   GOFLAGS: process.env.GOFLAGS ?? '-p=2',
+  RUSTFLAGS: [process.env.RUSTFLAGS, remapRustFlags].filter(Boolean).join(' '),
 };
 // Minify by default to match the shipped client artifact; pass --no-minify for readable debug output.
 const minify = args.noMinify !== true;
+const strictWasmOpt = args.strictWasmOpt === true;
 const zpBundleWasm = path.join(repoRoot, 'target', 'wasm32-unknown-unknown', 'release', 'zp_bundle.wasm');
 const zpKernelBundleWasm = path.join(repoRoot, 'target', 'wasm32-unknown-unknown', 'release', 'zp_kernel_bundle.wasm');
+const zpPageBundleWasm = path.join(repoRoot, 'target', 'wasm32-unknown-unknown', 'release', 'zp_page_bundle.wasm');
 const zpPageRtWasm = path.join(repoRoot, 'target', 'wasm32-unknown-unknown', 'release', 'zp_page_rt.wasm');
 // Served at /zp/Asset/<name> (see internal/httphost wasmAssets).
 const zpBundleOutDir = path.join(webOut, 'Asset');
+const WASM_OPT_FLAGS = [
+  '--low-memory-unused',
+  '--enable-bulk-memory',
+  '--enable-bulk-memory-opt',
+  '--enable-nontrapping-float-to-int',
+  '--enable-sign-ext',
+  '--enable-mutable-globals',
+  '--enable-multivalue',
+  '--enable-reference-types',
+];
 
 if (args.help) {
-  process.stdout.write(`Usage: node scripts/build.mjs [options]\n\nOptions:\n  --out <dir>       Output directory (default: dist)\n  --web-only        Build only browser assets\n  --server-only     Build only the relay server\n  --rust-only       Build only the Rust WASM bundle\n  --skip-web        Do not build browser assets\n  --skip-server     Do not build the relay server\n  --skip-rust       Do not build the Rust WASM bundle\n  --minify          Minify bundled JavaScript (default)
-  --no-minify       Emit readable bundled JavaScript (debug)\n  --no-clean        Keep existing output files not overwritten by this run\n`);
+  process.stdout.write(`Usage: node scripts/build.mjs [options]\n\nOptions:\n  --out <dir>         Output directory (default: dist)\n  --pkg-only          Build Rust WASM, browser assets, and ESM SDK (skip Go server)\n  --esm-only          Build only the ESM SDK from existing compiled WASM\n  --web-only          Build only browser assets\n  --server-only       Build only the relay server\n  --rust-only         Build only the Rust WASM bundle\n  --skip-esm          Do not build the ESM SDK\n  --skip-web          Do not build browser assets\n  --skip-server       Do not build the relay server\n  --skip-rust         Do not build the Rust WASM bundle\n  --strict-wasm-opt   Fail build if wasm-opt is unavailable or fails\n  --minify            Minify bundled JavaScript (default)\n  --no-minify         Emit readable bundled JavaScript (debug)\n  --no-clean          Keep existing output files not overwritten by this run\n`);
   process.exit(0);
 }
 
 const selected = selectedTargets(args);
+const wasmOptBin = await resolveWasmOpt();
 
 if (!args.noClean) await cleanSelectedOutputs(selected);
 await mkdir(outRoot, { recursive: true });
 
 if (selected.rust) await buildRustBundle();
 if (selected.web) await buildWeb();
+if (selected.esm) await buildEsm();
+if (selected.rust || selected.web || selected.esm) await writeWasmManifest();
 if (selected.server) buildServer();
 
 process.stdout.write(`Built ZeroProxy artifacts in ${path.relative(repoRoot, outRoot) || '.'}\n`);
@@ -56,12 +84,16 @@ function parseArgs(argv) {
         if (!argv[i + 1]) throw new Error('--out requires a directory');
         parsed.out = argv[++i];
         break;
+      case '--pkg-only':
+      case '--esm-only':
       case '--web-only':
       case '--server-only':
       case '--rust-only':
+      case '--skip-esm':
       case '--skip-web':
       case '--skip-server':
       case '--skip-rust':
+      case '--strict-wasm-opt':
       case '--minify':
       case '--no-minify':
       case '--no-clean':
@@ -81,18 +113,26 @@ function toKey(flag) {
 
 function selectedTargets(parsed) {
   let web = true;
+  let esm = true;
   let server = true;
   let rust = true;
-  if (parsed.webOnly || parsed.serverOnly || parsed.rustOnly) {
+  if (parsed.pkgOnly) {
+    web = true;
+    esm = true;
+    rust = true;
+    server = false;
+  } else if (parsed.webOnly || parsed.esmOnly || parsed.serverOnly || parsed.rustOnly) {
     web = parsed.webOnly === true;
+    esm = parsed.esmOnly === true;
     server = parsed.serverOnly === true;
     rust = parsed.rustOnly === true;
   }
   if (parsed.skipWeb) web = false;
+  if (parsed.skipEsm) esm = false;
   if (parsed.skipServer) server = false;
   if (parsed.skipRust) rust = false;
-  if (!web && !server && !rust) throw new Error('no build targets selected');
-  return { web, server, rust };
+  if (!web && !esm && !server && !rust) throw new Error('no build targets selected');
+  return { web, esm, server, rust };
 }
 
 async function cleanSelectedOutputs(selected) {
@@ -107,18 +147,41 @@ async function cleanSelectedOutputs(selected) {
       await rm(webOut, { recursive: true, force: true });
     }
   }
-  if (selected.web && selected.server) {
+  async function rmEsmPreserveWasm() {
     if (!selected.rust) {
-      await Promise.all([rmWebPreserveZp(), rm(serverOut, { force: true })]);
+      const entries = await readdir(esmOut, { withFileTypes: true }).catch(() => []);
+      await Promise.all(entries
+        .filter(d => d.name !== 'wasm' && d.name !== 'wbg')
+        .map(d => rm(path.join(esmOut, d.name), { recursive: true, force: true })));
     } else {
-      await rm(outRoot, { recursive: true, force: true });
+      await rm(esmOut, { recursive: true, force: true });
     }
+  }
+  if (selected.web && selected.esm && selected.server && selected.rust) {
+    await rm(outRoot, { recursive: true, force: true });
     return;
   }
   const removals = [];
   if (selected.web) removals.push(rmWebPreserveZp());
+  if (selected.esm) removals.push(rmEsmPreserveWasm());
   if (selected.server) removals.push(rm(serverOut, { force: true }));
   await Promise.all(removals);
+}
+
+async function resolveWasmOpt() {
+  const localName = process.platform === 'win32' ? 'wasm-opt.cmd' : 'wasm-opt';
+  const localBin = path.join(repoRoot, 'node_modules', '.bin', localName);
+  if (await exists(localBin)) return localBin;
+  return 'wasm-opt';
+}
+
+function optimizeWasm(wasmPath) {
+  const argsList = ['-Oz', ...WASM_OPT_FLAGS, wasmPath, '-o', wasmPath];
+  if (strictWasmOpt) {
+    run(wasmOptBin, argsList);
+    return true;
+  }
+  return tryRunOptional(wasmOptBin, argsList);
 }
 
 async function buildWeb() {
@@ -198,7 +261,6 @@ async function buildRustBundle() {
     );
   }
   // Expose the page bundle factory under self.ZPPageBundleWBG for synchronous page bootstrap.
-  const zpPageBundleWasm = path.join(repoRoot, 'target', 'wasm32-unknown-unknown', 'release', 'zp_page_bundle.wasm');
   run('wasm-bindgen', [
     '--target', 'no-modules',
     '--out-dir', zpBundleOutDir,
@@ -220,29 +282,209 @@ async function buildRustBundle() {
     await rm(path.join(zpBundleOutDir, `${name}.d.ts`), { force: true });
     await rm(path.join(zpBundleOutDir, `${name}_bg.wasm.d.ts`), { force: true });
   }
-  // Enable the WebAssembly features that rustc emits by default for wasm32.
-  const WASM_OPT_FLAGS = [
-    '--enable-bulk-memory',
-    '--enable-bulk-memory-opt',
-    '--enable-nontrapping-float-to-int',
-    '--enable-sign-ext',
-    '--enable-mutable-globals',
-    '--enable-multivalue',
-    '--enable-reference-types',
-  ];
   const swWasm = path.join(zpBundleOutDir, 'zp-bundle.wasm');
   const kernelWasm = path.join(zpBundleOutDir, 'zp-kernel.wasm');
   const pageBundleWasm = path.join(zpBundleOutDir, 'zp-page-bundle-wbg.wasm');
-  const optimizedSw = tryRunOptional('wasm-opt', ['-Oz', ...WASM_OPT_FLAGS, swWasm, '-o', swWasm]);
+  const optimizedSw = optimizeWasm(swWasm);
   if (!optimizedSw) {
     process.stderr.write('wasm-opt not found; skipping size optimization (install binaryen to enable)\n');
   } else {
-    tryRunOptional('wasm-opt', ['-Oz', ...WASM_OPT_FLAGS, kernelWasm, '-o', kernelWasm]);
-    tryRunOptional('wasm-opt', ['-Oz', ...WASM_OPT_FLAGS, pageBundleWasm, '-o', pageBundleWasm]);
+    optimizeWasm(kernelWasm);
+    optimizeWasm(pageBundleWasm);
   }
   const pageRtDst = path.join(zpBundleOutDir, 'zp-rt.wasm');
   await copyFile(zpPageRtWasm, pageRtDst);
-  tryRunOptional('wasm-opt', ['-Oz', ...WASM_OPT_FLAGS, pageRtDst, '-o', pageRtDst]);
+  if (optimizedSw) optimizeWasm(pageRtDst);
+}
+
+async function buildEsm() {
+  await mkdir(esmOut, { recursive: true });
+  await mkdir(esmWbgOut, { recursive: true });
+  await mkdir(esmWasmOut, { recursive: true });
+
+  if (!buildId) await computeBuildId();
+
+  const needWbgBuild = selected.rust || !(await exists(path.join(esmWasmOut, 'zp-bundle.wasm')));
+  if (needWbgBuild) {
+    const targets = [
+      { outName: 'zp-bundle', srcWasm: zpBundleWasm },
+      { outName: 'zp-kernel', srcWasm: zpKernelBundleWasm },
+      { outName: 'zp-page-bundle', srcWasm: zpPageBundleWasm },
+    ];
+    for (const { outName, srcWasm } of targets) {
+      if (!(await exists(srcWasm))) {
+        throw new Error(`Missing compiled WASM binary ${srcWasm}; run without --esm-only or run npm run wasm:pull first`);
+      }
+      run('wasm-bindgen', [
+        '--target', 'web',
+        '--out-dir', esmWbgOut,
+        '--out-name', outName,
+        srcWasm,
+      ]);
+      const bgWasm = path.join(esmWbgOut, `${outName}_bg.wasm`);
+      const finalWasm = path.join(esmWasmOut, `${outName}.wasm`);
+      const preOptWebWasm = path.join(zpBundleOutDir, `${outName}.wasm`);
+      // wasm-bindgen --target web and --target no-modules emit byte-identical `.wasm` when --out-name matches.
+      if (await exists(preOptWebWasm)) {
+        await rm(bgWasm, { force: true });
+        await copyFile(preOptWebWasm, finalWasm);
+      } else {
+        await rename(bgWasm, finalWasm);
+        optimizeWasm(finalWasm);
+      }
+      await rm(path.join(esmWbgOut, `${outName}.d.ts`), { force: true });
+      await rm(path.join(esmWbgOut, `${outName}_bg.wasm.d.ts`), { force: true });
+
+      // Point the generated fallback URL at ../wasm/<outName>.wasm and transform through esbuild.
+      const wbgJsPath = path.join(esmWbgOut, `${outName}.js`);
+      const rawGlue = (await readFile(wbgJsPath, 'utf8'))
+        .split(`'${outName}_bg.wasm'`).join(`'../wasm/${outName}.wasm'`)
+        .split(`"${outName}_bg.wasm"`).join(`"../wasm/${outName}.wasm"`);
+      await writeEsmModule(wbgJsPath, rawGlue);
+    }
+
+    const rtDst = path.join(esmWasmOut, 'zp-rt.wasm');
+    const preOptRt = path.join(zpBundleOutDir, 'zp-rt.wasm');
+    if (await exists(preOptRt)) {
+      await copyFile(preOptRt, rtDst);
+    } else if (await exists(zpPageRtWasm)) {
+      await copyFile(zpPageRtWasm, rtDst);
+      optimizeWasm(rtDst);
+    } else {
+      throw new Error(`Missing zp-rt WASM binary (${zpPageRtWasm})`);
+    }
+  }
+
+  await writeEsmModule(path.join(esmOut, '_core.js'), makePureCoreEsm(await readSource('zp-core.js'), buildId));
+  await writeEsmModule(path.join(esmOut, '_rt.js'), makePureRtEsm(await readSource('zp-rt.js')));
+
+  const esmEntries = (await readdir(esmSrc)).sort();
+  for (const name of esmEntries) {
+    const srcPath = path.join(esmSrc, name);
+    const dstPath = path.join(esmOut, name);
+    if (name.endsWith('.d.ts')) {
+      await copyFile(srcPath, dstPath);
+    } else if (name.endsWith('.js')) {
+      await writeEsmModule(dstPath, await readFile(srcPath, 'utf8'));
+    }
+  }
+
+  await writeEsmModule(path.join(esmOut, 'rewriter-inline.js'), await makeRewriterInlineEsm());
+}
+
+function makePureCoreEsm(rawSource, currentBuildId) {
+  const normalized = rawSource.split('\r\n').join('\n').split('__ZP_BUILD_ID__').join(currentBuildId);
+  const headAnchor = "(() => {\n  'use strict';\n  if (globalThis.ZP) return;\n";
+  const tailAnchor = "  Object.defineProperty(globalThis, 'ZP', { value: publicApi, enumerable: false, configurable: true, writable: false });\n  Object.defineProperty(globalThis, '__zp_internal', { value: internal, enumerable: false, configurable: true, writable: false });\n})();";
+  const headIdx = normalized.indexOf(headAnchor);
+  const tailIdx = normalized.lastIndexOf(tailAnchor);
+  if (headIdx < 0 || tailIdx <= headIdx) {
+    throw new Error('web/zp-core.js IIFE wrapper anchors changed; update makePureCoreEsm in scripts/build.mjs');
+  }
+  const body = normalized.slice(headIdx + headAnchor.length, tailIdx);
+  return `${body}\nexport { publicApi as ZP, internal };\n`;
+}
+
+function makePureRtEsm(rawSource) {
+  const normalized = rawSource.split('\r\n').join('\n');
+  const headAnchor = "(() => {\n  'use strict';\n  if (globalThis.ZeroProxyRT) return;\n";
+  const tailRe = /\s*Object\.defineProperty\(globalThis,\s*'ZeroProxyRT',[\s\S]*?\);\n\}\)\(\);\s*$/;
+  const headIdx = normalized.indexOf(headAnchor);
+  if (headIdx < 0 || !tailRe.test(normalized)) {
+    throw new Error('web/zp-rt.js IIFE wrapper anchors changed; update makePureRtEsm in scripts/build.mjs');
+  }
+  const body = normalized.slice(headIdx + headAnchor.length).replace(tailRe, '');
+  return `${body}\nexport { load, loadSync, UrlClass, api as ZeroProxyRT };\n`;
+}
+
+async function makeRewriterInlineEsm() {
+  const wasmBytes = await readFile(path.join(esmWasmOut, 'zp-page-bundle.wasm'));
+  const b64 = wasmBytes.toString('base64');
+  return `import { bindRewriterLoaders, SCRIPT_KINDS } from './rewriter.shared.js';
+
+const INLINE_WASM_B64 = ${JSON.stringify(b64)};
+let cachedModule = null;
+
+function decodeInlineModule() {
+  if (!cachedModule) {
+    let bytes;
+    if (typeof Uint8Array.fromBase64 === 'function') {
+      bytes = Uint8Array.fromBase64(INLINE_WASM_B64);
+    } else if (typeof atob === 'function') {
+      const bin = atob(INLINE_WASM_B64);
+      bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    } else {
+      bytes = new Uint8Array(Buffer.from(INLINE_WASM_B64, 'base64'));
+    }
+    cachedModule = new WebAssembly.Module(bytes);
+  }
+  return cachedModule;
+}
+
+const { createRewriter, createRewriterSync } = bindRewriterLoaders(
+  async () => decodeInlineModule(),
+  () => decodeInlineModule(),
+);
+
+export { createRewriter, createRewriterSync, SCRIPT_KINDS };
+`;
+}
+
+async function writeEsmModule(outPath, source) {
+  const result = await esbuild.transform(source, {
+    charset: 'utf8',
+    format: 'esm',
+    legalComments: 'none',
+    loader: 'js',
+    minify,
+    target: 'es2022',
+  });
+  await writeFile(outPath, result.code);
+}
+
+async function writeWasmManifest() {
+  const pkg = JSON.parse(await readFile(path.join(repoRoot, 'package.json'), 'utf8'));
+  const cargoToml = await readFile(path.join(repoRoot, 'Cargo.toml'), 'utf8');
+  const wsVerMatch = /\[workspace\.package\][\s\S]*?\nversion\s*=\s*"([^"]+)"/.exec(cargoToml);
+  const transformerVersion = wsVerMatch ? wsVerMatch[1] : pkg.version;
+  const wasmBindgenVersion = await readLockedCrateVersion('wasm-bindgen');
+
+  const candidateDirs = [esmWasmOut, zpBundleOutDir];
+  const artifacts = [];
+  for (const dir of candidateDirs) {
+    const names = await readdir(dir).catch(() => []);
+    for (const name of names.filter(n => n.endsWith('.wasm')).sort()) {
+      const fullPath = path.join(dir, name);
+      const buf = await readFile(fullPath);
+      const relPath = path.relative(outRoot, fullPath).split(path.sep).join('/');
+      const sha256 = createHash('sha256').update(buf).digest('hex');
+      artifacts.push({
+        path: relPath,
+        bytes: buf.byteLength,
+        sha256,
+      });
+    }
+  }
+  artifacts.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+
+  if (!buildId) await computeBuildId();
+  const manifest = {
+    schemaVersion: 1,
+    packageVersion: pkg.version,
+    transformerVersion,
+    wasmBindgenVersion,
+    buildId,
+    artifacts,
+  };
+  await writeFile(wasmManifestOut, JSON.stringify(manifest, null, 2) + '\n');
+}
+
+async function readLockedCrateVersion(crateName) {
+  const lockText = await readFile(path.join(repoRoot, 'Cargo.lock'), 'utf8');
+  const re = new RegExp(`\\[\\[package\\]\\]\\s*\\nname\\s*=\\s*"${crateName}"\\s*\\nversion\\s*=\\s*"([^"]+)"`);
+  const m = re.exec(lockText);
+  return m ? m[1] : 'unknown';
 }
 
 function tryRunOptional(cmd, argv) {
@@ -312,7 +554,6 @@ async function readMembraneSource() {
 
 // Hash source and WASM inputs to produce a content-addressed buildId for immutable ?v= asset URLs.
 async function computeBuildId() {
-  const { createHash } = await import('node:crypto');
   const h = createHash('sha256');
   const names = (await readdir(webSrc)).filter(n => n.endsWith('.js') || n.endsWith('.html')).sort();
   for (const n of names) {
@@ -331,7 +572,7 @@ async function computeBuildId() {
   return buildId;
 }
 async function listWasmArtifacts() {
-  const dir = zpBundleOutDir;
+  const dir = (await exists(zpBundleOutDir)) ? zpBundleOutDir : esmWasmOut;
   try {
     return (await readdir(dir)).filter(n => n.endsWith('.wasm')).sort().map(n => path.join(dir, n));
   } catch { return []; }
@@ -373,12 +614,9 @@ function run(cmd, argv, extraEnv = {}) {
     cwd: repoRoot,
     env: { ...buildEnv, ...extraEnv },
     stdio: 'inherit',
+    shell: process.platform === 'win32' && cmd.endsWith('.cmd'),
   });
   if (result.status !== 0) throw new Error(`${cmd} ${argv.join(' ')} failed with exit code ${result.status}`);
-}
-
-function resolveNodeModule(specifier) {
-  return path.join(repoRoot, 'node_modules', ...specifier.split('/'));
 }
 
 async function copyOptional(from, to) {

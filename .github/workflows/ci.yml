@@ -31,16 +31,18 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: "1.100.0"
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           key: workspace-tests
       - name: Run workspace tests
         run: |
           mkdir -p artifacts
           cargo test --locked --workspace --jobs 2 -- --test-threads=2 2>&1 | tee artifacts/rust.log
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: always()
         with:
           name: rust-logs
@@ -52,8 +54,8 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7
         with:
           go-version-file: go.mod
           cache: true
@@ -61,7 +63,7 @@ jobs:
         run: |
           mkdir -p artifacts
           go test -p 2 ./... 2>&1 | tee artifacts/go.log
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: always()
         with:
           name: go-logs
@@ -73,15 +75,16 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
-          node-version: '24'
+          node-version: '26'
+          package-manager-cache: false
       - name: Run JavaScript without compilation or browsers
         run: |
           mkdir -p artifacts
           npm run test:js 2>&1 | tee artifacts/javascript.log
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: always()
         with:
           name: javascript-logs
@@ -89,24 +92,25 @@ jobs:
           retention-days: 7
 
   build:
-    name: Build WASM and server once
+    name: Build WASM, ESM SDK, and server once
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7
         with:
           go-version-file: go.mod
           cache: true
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
+          toolchain: "1.100.0"
           targets: wasm32-unknown-unknown
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           key: wasm-release
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
-          node-version: '24'
+          node-version: '26'
           cache: npm
       - name: Read exact wasm-bindgen version from Cargo.lock
         id: bindgen
@@ -122,7 +126,7 @@ jobs:
           PY
       - name: Cache matching wasm-bindgen CLI
         id: bindgen-cache
-        uses: actions/cache@v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ~/.cargo/bin/wasm-bindgen
           key: wasm-bindgen-${{ runner.os }}-${{ runner.arch }}-${{ steps.bindgen.outputs.version }}
@@ -137,19 +141,20 @@ jobs:
         run: test "$(wasm-bindgen --version)" = "wasm-bindgen $WASM_BINDGEN_VERSION"
       - name: Install build dependencies without browser downloads
         run: npm ci
-      - name: Build deployable artifacts
+      - name: Build deployable artifacts and verify npm package layout
         run: |
           mkdir -p artifacts
-          npm run build 2>&1 | tee artifacts/build.log
+          node scripts/build.mjs --strict-wasm-opt 2>&1 | tee artifacts/build.log
+          npm run verify:pack 2>&1 | tee -a artifacts/build.log
       - name: Package distribution preserving executable permissions
         run: tar -czf artifacts/dist.tar.gz dist
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: distribution
           path: artifacts/dist.tar.gz
           if-no-files-found: error
           retention-days: 7
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: always()
         with:
           name: build-logs
@@ -157,7 +162,7 @@ jobs:
           retention-days: 7
 
   e2e:
-    name: Prebuilt WASM behavior and Chromium E2E
+    name: Prebuilt WASM, ESM SDK, and Chromium E2E
     needs: build
     runs-on: ubuntu-24.04
     timeout-minutes: 45
@@ -167,17 +172,17 @@ jobs:
       ZP_E2E_ARTIFACTS: artifacts/e2e
       PUPPETEER_CACHE_DIR: /tmp/zeroproxy-puppeteer
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
-          node-version: '24'
+          node-version: '26'
           cache: npm
       # test/e2e/wt-gateway.test.js builds its WebTransport echo target
-      # (test/wtecho) — Node cannot serve WebTransport.
-      - uses: actions/setup-go@v5
+      # (test/wtecho); Node cannot serve WebTransport.
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7
         with:
           go-version-file: go.mod
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: distribution
           path: artifacts
@@ -190,12 +195,12 @@ jobs:
         run: |
           sudo apt-get update
           sudo env "PATH=$PATH" "PUPPETEER_CACHE_DIR=$PUPPETEER_CACHE_DIR" npx --no-install puppeteer browsers install chrome --install-deps
-      - name: Exercise built WASM behavior without rebuilding
+      - name: Exercise built WASM and ESM SDK behavior without rebuilding
         run: npm run test:wasm:ci 2>&1 | tee artifacts/wasm-tests.log
       - name: Run actual Chromium E2E serially without rebuilding
         if: ${{ !cancelled() && steps.browser-install.outcome == 'success' }}
         run: npm run test:e2e:ci 2>&1 | tee artifacts/e2e.log
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: always()
         with:
           name: browser-e2e-evidence

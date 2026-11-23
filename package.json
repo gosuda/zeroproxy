@@ -1,15 +1,112 @@
 {
-  "name": "zeroproxy",
+  "name": "@gosuda/zeroproxy",
   "version": "0.1.0",
-  "private": true,
-  "type": "commonjs",
+  "description": "Isolation web proxy runtime, OXC JavaScript AST rewriter, streaming HTML/CSS transformer, URL classifier, and client-side TLS WebAssembly kernel.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "sideEffects": false,
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gosuda/zeroproxy.git"
+  },
+  "homepage": "https://github.com/gosuda/zeroproxy#readme",
+  "bugs": {
+    "url": "https://github.com/gosuda/zeroproxy/issues"
+  },
+  "keywords": [
+    "webassembly",
+    "wasm",
+    "proxy",
+    "sandbox",
+    "membrane",
+    "ast-rewriter",
+    "oxc",
+    "html-rewriter",
+    "tls",
+    "isolation"
+  ],
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "files": [
+    "dist/esm",
+    "dist/web",
+    "dist/wasm-manifest.json",
+    "LICENSE",
+    "README.md"
+  ],
+  "main": "./dist/esm/index.js",
+  "types": "./dist/esm/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/esm/index.d.ts",
+      "default": "./dist/esm/index.js"
+    },
+    "./core": {
+      "types": "./dist/esm/core.d.ts",
+      "default": "./dist/esm/core.js"
+    },
+    "./engine": {
+      "types": "./dist/esm/engine.d.ts",
+      "workerd": "./dist/esm/engine.workerd.js",
+      "node": "./dist/esm/engine.node.js",
+      "browser": "./dist/esm/engine.browser.js",
+      "default": "./dist/esm/engine.browser.js"
+    },
+    "./rewriter": {
+      "types": "./dist/esm/rewriter.d.ts",
+      "workerd": "./dist/esm/rewriter.workerd.js",
+      "node": "./dist/esm/rewriter.node.js",
+      "browser": "./dist/esm/rewriter.browser.js",
+      "default": "./dist/esm/rewriter.browser.js"
+    },
+    "./rewriter/inline": {
+      "types": "./dist/esm/rewriter-inline.d.ts",
+      "default": "./dist/esm/rewriter-inline.js"
+    },
+    "./url-policy": {
+      "types": "./dist/esm/url-policy.d.ts",
+      "workerd": "./dist/esm/url-policy.workerd.js",
+      "node": "./dist/esm/url-policy.node.js",
+      "browser": "./dist/esm/url-policy.browser.js",
+      "default": "./dist/esm/url-policy.browser.js"
+    },
+    "./transport": {
+      "types": "./dist/esm/transport.d.ts",
+      "workerd": "./dist/esm/transport.workerd.js",
+      "node": "./dist/esm/transport.node.js",
+      "browser": "./dist/esm/transport.browser.js",
+      "default": "./dist/esm/transport.browser.js"
+    },
+    "./membrane": {
+      "types": "./dist/esm/membrane.d.ts",
+      "default": "./dist/esm/membrane.js"
+    },
+    "./assets": {
+      "types": "./dist/esm/assets.d.ts",
+      "node": "./dist/esm/assets.node.js",
+      "default": "./dist/esm/assets.node.js"
+    },
+    "./wasm/*": "./dist/esm/wasm/*",
+    "./package.json": "./package.json"
+  },
   "scripts": {
     "build": "node scripts/build.mjs",
+    "build:pkg": "node scripts/build.mjs --pkg-only",
+    "build:esm": "node scripts/build.mjs --esm-only",
     "build:web": "node scripts/build.mjs --web-only",
     "build:server": "node scripts/build.mjs --server-only",
-    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
+    "clean": "node -e \"import('node:fs').then(fs => fs.rmSync('dist',{recursive:true,force:true}))\"",
+    "prepack": "node scripts/verify-pack.mjs",
+    "verify:pack": "node scripts/verify-pack.mjs",
+    "wasm:pull": "node scripts/fetch-prebuilt-wasm.mjs",
     "test": "node scripts/test.mjs",
     "test:js": "node scripts/test.mjs js",
+    "test:esm": "node scripts/test.mjs esm",
     "test:e2e": "node scripts/test.mjs e2e",
     "test:e2e:ci": "node scripts/test.mjs e2e-ci",
     "test:wasm:ci": "node scripts/test.mjs wasm-ci",
@@ -19,9 +116,9 @@
     "check:chrome-hello": "node scripts/check-chrome-hello.mjs"
   },
   "devDependencies": {
-    "binaryen": "^129.0.0",
-    "esbuild": "^0.28.0",
+    "binaryen": "^132.0.0",
+    "esbuild": "^0.28.2",
     "jquery": "^3.7.1",
-    "puppeteer": "^25.0.4"
+    "puppeteer": "^25.18.1"
   }
 }

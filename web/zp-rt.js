@@ -24,19 +24,24 @@
   const DANGEROUS_SCHEMES = new Set([UrlClass.JAVASCRIPT, UrlClass.VBSCRIPT]);
 
   async function instantiate(source) {
-    if (typeof source === 'string') {
-      if (typeof fetch === 'function' && typeof WebAssembly.instantiateStreaming === 'function') {
-        const resp = fetch(source);
+    if (source instanceof WebAssembly.Module) {
+      const instance = await WebAssembly.instantiate(source, {});
+      return { instance, module: source };
+    }
+    if (typeof source === 'string' || source instanceof URL) {
+      const href = String(source);
+      if (typeof fetch === 'function' && typeof WebAssembly.instantiateStreaming === 'function' && !href.startsWith('file:')) {
+        const resp = fetch(href);
         try {
           return await WebAssembly.instantiateStreaming(resp, {});
         } catch (e) {
           // Fall back to ArrayBuffer instantiation if the server omits the application/wasm MIME type.
-          const buf = await (await fetch(source)).arrayBuffer();
+          const buf = await (await fetch(href)).arrayBuffer();
           return await WebAssembly.instantiate(buf, {});
         }
       }
       const { readFile } = await import('node:fs/promises');
-      const buf = await readFile(source);
+      const buf = await readFile(source instanceof URL ? source : href);
       return await WebAssembly.instantiate(buf, {});
     }
     if (source instanceof ArrayBuffer || ArrayBuffer.isView(source)) {
@@ -45,9 +50,18 @@
     throw new TypeError('ZeroProxyRT.load: unsupported source');
   }
 
-  async function load(source) {
-    const { instance } = await instantiate(source);
-    const ex = instance.exports;
+  function instantiateSync(source) {
+    if (source instanceof WebAssembly.Module) {
+      return new WebAssembly.Instance(source, {});
+    }
+    if (source instanceof ArrayBuffer || ArrayBuffer.isView(source)) {
+      const mod = new WebAssembly.Module(source);
+      return new WebAssembly.Instance(mod, {});
+    }
+    throw new TypeError('ZeroProxyRT.loadSync: unsupported source');
+  }
+
+  function bindExports(ex) {
 
     for (const name of ['memory', 'version', 'scratch_ptr', 'scratch_cap',
       'url_intern', 'url_classify', 'url_view', 'url_intern_and_classify',
@@ -250,7 +264,16 @@
     });
   }
 
-  const api = Object.freeze({ load, UrlClass });
+  async function load(source) {
+    const { instance } = await instantiate(source);
+    return bindExports(instance.exports);
+  }
+
+  function loadSync(source) {
+    return bindExports(instantiateSync(source).exports);
+  }
+
+  const api = Object.freeze({ load, loadSync, UrlClass });
   // `configurable: true` lets the page prelude delete `globalThis.ZeroProxyRT` after capturing it into a closure,
   // hiding the symbol from `Object.getOwnPropertyNames(window)`.
   Object.defineProperty(globalThis, 'ZeroProxyRT', {

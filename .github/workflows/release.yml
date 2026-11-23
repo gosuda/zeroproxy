@@ -1,0 +1,213 @@
+name: Release and Publish
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Build, attest SLSA Level 3 provenance, and run E2E checks without publishing'
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    uses: ./.github/workflows/slsa-wasm-builder.yml
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+
+  verify:
+    name: Verify SLSA L3 provenance, ESM SDK, and Chromium E2E
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      attestations: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GOFLAGS: '-p=2'
+      GOMAXPROCS: '2'
+      PUPPETEER_SKIP_DOWNLOAD: 'true'
+      PUPPETEER_CACHE_DIR: /tmp/zeroproxy-puppeteer
+      ZP_E2E_PREBUILT: '1'
+      ZP_E2E_DIST: dist
+      ZP_E2E_ARTIFACTS: artifacts/e2e
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: '26'
+          cache: npm
+
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7
+        with:
+          go-version-file: go.mod
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: release-bundle
+          path: artifacts/release
+
+      - name: Verify SLSA Build Level 3 provenance and SHA-256 digests
+        env:
+          NPM_TARBALL: ${{ needs.build.outputs.npm_tarball }}
+          WASM_ARCHIVE: ${{ needs.build.outputs.wasm_archive }}
+          WEB_ARCHIVE: ${{ needs.build.outputs.web_archive }}
+          SIGNER_WORKFLOW: ${{ github.repository }}/.github/workflows/slsa-wasm-builder.yml
+        run: |
+          (cd artifacts/release && sha256sum -c SHA256SUMS.txt)
+          for artifact in \
+            "artifacts/release/${NPM_TARBALL}" \
+            "artifacts/release/${WASM_ARCHIVE}" \
+            "artifacts/release/${WEB_ARCHIVE}" \
+            "artifacts/release/wasm-manifest.json"; do
+            gh attestation verify "$artifact" \
+              --repo "${{ github.repository }}" \
+              --signer-workflow "$SIGNER_WORKFLOW"
+          done
+
+      - name: Unpack prebuilt WASM, ESM, and web assets and build Go server
+        env:
+          WASM_ARCHIVE: ${{ needs.build.outputs.wasm_archive }}
+          WEB_ARCHIVE: ${{ needs.build.outputs.web_archive }}
+        run: |
+          mkdir -p dist
+          tar -xzf "artifacts/release/${WASM_ARCHIVE}" -C dist
+          tar -xzf "artifacts/release/${WEB_ARCHIVE}" -C dist
+          npm ci --ignore-scripts
+          node scripts/verify-pack.mjs
+          node scripts/build.mjs --server-only --no-clean
+
+      - name: Verify every attested WASM binary directly
+        env:
+          SIGNER_WORKFLOW: ${{ github.repository }}/.github/workflows/slsa-wasm-builder.yml
+        run: |
+          for wasm in dist/esm/wasm/*.wasm dist/web/Asset/*.wasm; do
+            gh attestation verify "$wasm" \
+              --repo "${{ github.repository }}" \
+              --signer-workflow "$SIGNER_WORKFLOW"
+          done
+
+      - name: Run JS policy, WASM, and ESM contract suites
+        run: |
+          npm run test:js
+          npm run test:wasm:ci
+
+      - name: Install Chrome and run Chromium E2E suite against prebuilt artifacts
+        run: |
+          sudo apt-get update
+          sudo env "PATH=$PATH" "PUPPETEER_CACHE_DIR=$PUPPETEER_CACHE_DIR" npx --no-install puppeteer browsers install chrome --install-deps
+          npm run test:e2e:ci
+
+  publish-npm:
+    name: Publish to npm via OIDC Trusted Publishing
+    needs: [build, verify]
+    if: startsWith(github.ref, 'refs/tags/v') && (github.event_name == 'push' || inputs.dry_run == false)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment:
+      name: npm-publish
+      url: https://www.npmjs.com/package/@gosuda/zeroproxy
+    permissions:
+      contents: read
+      id-token: write
+      attestations: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      # Omit registry-url so setup-node does not write an empty _authToken placeholder that blocks npm OIDC exchange.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: '26'
+          package-manager-cache: false
+
+      - name: Verify npm CLI supports OIDC Trusted Publishing (>= 11.5.1)
+        run: |
+          npm --version
+          node -e 'const [maj, min, pat] = process.argv[1].split(".").map(Number); if (maj < 11 || (maj === 11 && (min < 5 || (min === 5 && pat < 1)))) process.exit(1);' "$(npm --version)"
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: release-bundle
+          path: artifacts/release
+
+      - name: Re-verify SLSA Level 3 attestation before OIDC publish
+        env:
+          NPM_TARBALL: ${{ needs.build.outputs.npm_tarball }}
+          SIGNER_WORKFLOW: ${{ github.repository }}/.github/workflows/slsa-wasm-builder.yml
+        run: |
+          gh attestation verify "artifacts/release/${NPM_TARBALL}" \
+            --repo "${{ github.repository }}" \
+            --signer-workflow "$SIGNER_WORKFLOW"
+          npm publish "artifacts/release/${NPM_TARBALL}" --access public --provenance
+
+  publish-github-release:
+    name: Publish prebuilt WASM and web bundles to GitHub Release
+    needs: [build, verify]
+    if: startsWith(github.ref, 'refs/tags/v') && (github.event_name == 'push' || inputs.dry_run == false)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      attestations: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: release-bundle
+          path: artifacts/release
+
+      - name: Re-verify SLSA Level 3 attestations and upload GitHub Release assets
+        env:
+          TAG: ${{ github.ref_name }}
+          NPM_TARBALL: ${{ needs.build.outputs.npm_tarball }}
+          WASM_ARCHIVE: ${{ needs.build.outputs.wasm_archive }}
+          WEB_ARCHIVE: ${{ needs.build.outputs.web_archive }}
+          SIGNER_WORKFLOW: ${{ github.repository }}/.github/workflows/slsa-wasm-builder.yml
+        run: |
+          for artifact in \
+            "artifacts/release/${NPM_TARBALL}" \
+            "artifacts/release/${WASM_ARCHIVE}" \
+            "artifacts/release/${WEB_ARCHIVE}" \
+            "artifacts/release/wasm-manifest.json"; do
+            gh attestation verify "$artifact" \
+              --repo "${{ github.repository }}" \
+              --signer-workflow "$SIGNER_WORKFLOW"
+          done
+
+          if gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            gh release upload "$TAG" \
+              "artifacts/release/${WASM_ARCHIVE}" \
+              "artifacts/release/${WEB_ARCHIVE}" \
+              "artifacts/release/${NPM_TARBALL}" \
+              "artifacts/release/wasm-manifest.json" \
+              "artifacts/release/SHA256SUMS.txt" \
+              --clobber \
+              --repo "${{ github.repository }}"
+          else
+            gh release create "$TAG" \
+              "artifacts/release/${WASM_ARCHIVE}" \
+              "artifacts/release/${WEB_ARCHIVE}" \
+              "artifacts/release/${NPM_TARBALL}" \
+              "artifacts/release/wasm-manifest.json" \
+              "artifacts/release/SHA256SUMS.txt" \
+              --generate-notes \
+              --verify-tag \
+              --repo "${{ github.repository }}"
+          fi

@@ -1,0 +1,170 @@
+name: SLSA Level 3 WASM and ESM Builder
+
+on:
+  workflow_call:
+    inputs:
+      release_ref:
+        description: 'Git ref or commit SHA to build'
+        required: false
+        type: string
+        default: ''
+    outputs:
+      version:
+        description: 'Built package version'
+        value: ${{ jobs.build-and-attest.outputs.version }}
+      npm_tarball:
+        description: 'Filename of the packed npm tarball inside release-bundle'
+        value: ${{ jobs.build-and-attest.outputs.npm_tarball }}
+      wasm_archive:
+        description: 'Filename of the prebuilt WASM + ESM archive'
+        value: ${{ jobs.build-and-attest.outputs.wasm_archive }}
+      web_archive:
+        description: 'Filename of the prebuilt dist/web archive'
+        value: ${{ jobs.build-and-attest.outputs.web_archive }}
+
+permissions: {}
+
+jobs:
+  build-and-attest:
+    name: Build deterministic WASM and sign SLSA L3 provenance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      npm_tarball: ${{ steps.pack.outputs.npm_tarball }}
+      wasm_archive: ${{ steps.pack.outputs.wasm_archive }}
+      web_archive: ${{ steps.pack.outputs.web_archive }}
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_TERM_COLOR: always
+      BINARYEN_CORES: '2'
+      PUPPETEER_SKIP_DOWNLOAD: 'true'
+    steps:
+      - name: Checkout immutable source revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.release_ref || github.sha }}
+          persist-credentials: false
+
+      - name: Setup Rust wasm32 toolchain
+        uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: "1.100.0"
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Cargo release build
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          key: slsa-wasm-release
+
+      - name: Setup Node.js 26
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: '26'
+          cache: npm
+
+      - name: Read package metadata and exact wasm-bindgen version
+        id: meta
+        run: |
+          python3 - <<'PY'
+          import json, os, subprocess, tomllib
+          with open('package.json', 'r', encoding='utf-8') as pf:
+              pkg = json.load(pf)
+          with open('Cargo.lock', 'rb') as lf:
+              versions = {p['version'] for p in tomllib.load(lf)['package'] if p['name'] == 'wasm-bindgen'}
+          if len(versions) != 1:
+              raise SystemExit(f'Expected single wasm-bindgen version in Cargo.lock, found {versions}')
+          epoch = subprocess.check_output(['git', 'log', '-1', '--pretty=%ct'], text=True).strip()
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as out:
+              out.write(f"version={pkg['version']}\n")
+              out.write(f"wasm_bindgen={versions.pop()}\n")
+              out.write(f"source_date_epoch={epoch}\n")
+          PY
+
+      - name: Verify git tag matches package.json version
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          PKG_VERSION: ${{ steps.meta.outputs.version }}
+          GIT_REF_NAME: ${{ github.ref_name }}
+        run: |
+          if [ "$GIT_REF_NAME" != "v$PKG_VERSION" ]; then
+            echo "Tag $GIT_REF_NAME does not match package.json version v$PKG_VERSION" >&2
+            exit 1
+          fi
+
+      - name: Cache matching wasm-bindgen CLI
+        id: bindgen-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ~/.cargo/bin/wasm-bindgen
+          key: wasm-bindgen-${{ runner.os }}-${{ runner.arch }}-${{ steps.meta.outputs.wasm_bindgen }}
+
+      - name: Install matching wasm-bindgen CLI
+        if: steps.bindgen-cache.outputs.cache-hit != 'true'
+        env:
+          WASM_BINDGEN_VERSION: ${{ steps.meta.outputs.wasm_bindgen }}
+        run: cargo install wasm-bindgen-cli --version "=$WASM_BINDGEN_VERSION" --locked --jobs 2
+
+      - name: Verify wasm-bindgen CLI version
+        env:
+          WASM_BINDGEN_VERSION: ${{ steps.meta.outputs.wasm_bindgen }}
+        run: test "$(wasm-bindgen --version)" = "wasm-bindgen $WASM_BINDGEN_VERSION"
+
+      - name: Install locked Node build dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Compile deterministic WASM, ESM SDK, and web runtime assets
+        env:
+          SOURCE_DATE_EPOCH: ${{ steps.meta.outputs.source_date_epoch }}
+        run: node scripts/build.mjs --pkg-only --strict-wasm-opt
+
+      - name: Stage release archives and npm tarball
+        id: pack
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+          SOURCE_DATE_EPOCH: ${{ steps.meta.outputs.source_date_epoch }}
+        run: |
+          mkdir -p artifacts/release
+          WASM_ARCHIVE="zeroproxy-wasm-${VERSION}.tar.gz"
+          WEB_ARCHIVE="zeroproxy-web-${VERSION}.tar.gz"
+          tar --sort=name --mtime="@${SOURCE_DATE_EPOCH}" --owner=0 --group=0 --numeric-owner \
+            -czf "artifacts/release/${WASM_ARCHIVE}" -C dist esm wasm-manifest.json
+          tar --sort=name --mtime="@${SOURCE_DATE_EPOCH}" --owner=0 --group=0 --numeric-owner \
+            -czf "artifacts/release/${WEB_ARCHIVE}" -C dist web wasm-manifest.json
+          cp dist/wasm-manifest.json artifacts/release/wasm-manifest.json
+
+          NPM_TARBALL="$(npm pack --pack-destination artifacts/release | tail -n 1)"
+          test -f "artifacts/release/${NPM_TARBALL}"
+
+          (
+            cd artifacts/release
+            sha256sum "${NPM_TARBALL}" "${WASM_ARCHIVE}" "${WEB_ARCHIVE}" wasm-manifest.json > SHA256SUMS.txt
+          )
+          {
+            echo "npm_tarball=${NPM_TARBALL}"
+            echo "wasm_archive=${WASM_ARCHIVE}"
+            echo "web_archive=${WEB_ARCHIVE}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Attest SLSA Build Level 3 provenance for release archives and WASM modules
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4
+        with:
+          subject-path: |
+            artifacts/release/*.tgz
+            artifacts/release/*.tar.gz
+            artifacts/release/wasm-manifest.json
+            dist/esm/wasm/*.wasm
+            dist/web/Asset/*.wasm
+
+      - name: Upload attested release bundle
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: release-bundle
+          path: artifacts/release/
+          if-no-files-found: error
+          retention-days: 14

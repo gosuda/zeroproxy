@@ -84,10 +84,21 @@ let rewritten_html = engine.transform_html(
 # Ok::<(), zp_engine::EngineError>(())
 ```
 
-### JavaScript and Browser Runtime (`web/*`)
+### JavaScript, ESM SDK, and Browser Runtime (`@gosuda/zeroproxy`, `esm/*`, `web/*`)
 
+- **`@gosuda/zeroproxy` (ESM SDK):** Publishes tree-shakable ES2022 subpath exports backed by prebuilt WebAssembly modules (`@gosuda/zeroproxy/core`, `/engine`, `/rewriter`, `/rewriter/inline`, `/url-policy`, `/transport`, `/membrane`, `/assets`, and `/wasm/*`) with conditional entrypoints for Node.js, browsers/bundlers, and Cloudflare Workers (`workerd`).
 - **[`web/zp-core.js`](web/zp-core.js) and [`web/zp-core.d.ts`](web/zp-core.d.ts):** Freeze `globalThis.ZP` as the public browser runtime contract (URL classification, share URL encryption, binary v2 envelope encoding/decoding, and host bridge installation via `ZP.configureBridge`). Internal helpers are passed to first-party bundles through `globalThis.__zp_internal`, which consumers capture into a closure and delete from `globalThis`.
 - **`window.__zp_realm` (`ZPRealmHandle`):** Frozen per-document handle created by [`web/membrane/`](web/membrane) exposing `tabId`, `entryId`, `getVirtualURL()`, `getBaseURL()`, `setBridge(bridge)`, and `dispose()`.
+
+```js
+import { createEngine } from '@gosuda/zeroproxy/engine';
+
+const engine = await createEngine({ proxyOrigin: 'https://proxy.example' });
+const rewrittenJs = engine.rewriteScript('export const href = window.location.href;', {
+  kind: 'module',
+  targetUrl: 'https://example.com/app.mjs',
+});
+```
 
 ```js
 // Install an optional host bridge in the page realm
@@ -235,6 +246,7 @@ On machines with limited RAM, prefer pushing branches to the [GitHub Actions CI 
 | [`docs/errata.md`](docs/errata.md) | Containment and compatibility risk inventory: closed items and remaining residuals. |
 | [`docs/engineering-guide.md`](docs/engineering-guide.md) | Engineering scope, real-site survey status, and browser diagnostic workflows. |
 | [`docs/rollout.md`](docs/rollout.md) | Operator dogfood checklist, runtime monitoring signals, and rollback procedure. |
+| [`docs/publishing.md`](docs/publishing.md) | SLSA Level 3 WebAssembly release pipeline, npm OIDC Trusted Publishing setup, and provenance verification. |
 | [`.ai/design/website-compat-refactor.md`](.ai/design/website-compat-refactor.md) | Website compatibility design, responsibility boundaries, and active refactor tracks. |
 | [`.ai/trap-notebook/README.md`](.ai/trap-notebook/README.md) & [`.ai/trap-notebook/INDEX.md`](.ai/trap-notebook/INDEX.md) | Indexed reference of browser, AST rewriter, Service Worker, and TLS traps. |
 | [`test/browser/README.md`](test/browser/README.md) | Cross-site browser diagnostic probes covering isolation, fidelity, console noise, and prototype shapes. |
