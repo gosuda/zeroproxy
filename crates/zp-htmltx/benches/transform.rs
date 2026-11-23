@@ -3,7 +3,8 @@
 //! Uses a synthetic HTML fixture (scripts, links, images, and anchors) to
 //! measure end-to-end transform cost.
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{criterion_group, criterion_main, Criterion};
+use std::hint::black_box;
 use zp_htmltx::{transform, TransformOptions};
 
 const PROXY_ORIGIN: &str = "http://proxy.localhost:18080";

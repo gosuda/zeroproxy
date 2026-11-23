@@ -48,8 +48,8 @@ getrandom_02 = { package = "getrandom", version = "0.2", default-features = fals
 
 # Response-body decoders (gzip/deflate/brotli/zstd).
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
-brotli = { version = "8", default-features = false, features = ["std"] }
-ruzstd = { version = "0.8", default-features = false, features = ["std"] }
+brotli = { version = "9", default-features = false, features = ["std"] }
+ruzstd = { version = "0.9", default-features = false, features = ["std"] }
 
 [dependencies.web-sys]
 workspace = true

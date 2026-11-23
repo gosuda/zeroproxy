@@ -1,9 +1,9 @@
-//! A narrow stand-in for the `lexical` crate, version 6: [`parse`] and nothing else.
+//! A narrow stand-in for the `lexical` crate, version 7: [`parse`] and nothing else.
 //!
-//! Every release of `lexical` below 7 (and `lexical-core` below 1.0) carries soundness advisories (GHSA-c2hm-mjxv-89r4, GHSA-2326-pfpj-vx3h), and `swc_css_parser`, the only crate in
-//! the workspace that uses it, requires `^6.1`. It calls `lexical::parse` to turn the text of a CSS number or an `An+B` offset, which its tokenizer has already checked, into a
-//! number. The standard library parses the same text, without `unsafe`, so this crate does that and the unsound code is no longer built. `[patch.crates-io]` in the workspace
-//! manifest points `lexical` here.
+//! `swc_css_parser`, the only crate in the workspace that uses `lexical`, calls `lexical::parse` to turn the text of a CSS number or an `An+B` offset into a number and wraps any
+//! `Err` in `unreachable!`. On out-of-range `:nth-child(...)` offsets, upstream `lexical` returns an overflow error and panics the stylesheet rewrite (a WASM trap). This stand-in
+//! parses with the standard library without `unsafe`, clamps integer overflows to the target type's range, and keeps the seven `lexical*` crates out of `Cargo.lock` and the WASM
+//! bundle. `[patch.crates-io]` in the workspace manifest points `lexical` here.
 //!
 //! The numbers it is given are plain decimals (`-.5`, `1.5e+3`, `+7`), for which `str::parse` and lexical agree; the tests below pin the shapes the tokenizer produces.
 #![no_std]

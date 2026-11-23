@@ -6,6 +6,6 @@ license.workspace = true
 
 [dependencies]
 zp-shared = { workspace = true }
-zp-rewriter = { workspace = true }
+zp-rewriter = { workspace = true, features = ["sourcemap"] }
 zp-css = { workspace = true }
 zp-htmltx = { workspace = true }

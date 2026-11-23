@@ -69,7 +69,7 @@ func TestListenerRejectsMissingTargetHeader(t *testing.T) {
 
 	time.Sleep(200 * time.Millisecond)
 
-	dialer := &webtransport.Dialer{
+	dialer := &webtransport.Transport{
 		TLSClientConfig: &tls.Config{
 			InsecureSkipVerify: true, // dev cert
 			NextProtos:         []string{"h3"},
@@ -178,7 +178,7 @@ func TestGatewayBridgesToRealTarget(t *testing.T) {
 	go func() { _ = gw.Run(gwCtx) }()
 	time.Sleep(200 * time.Millisecond)
 
-	dialer := &webtransport.Dialer{
+	dialer := &webtransport.Transport{
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: true, NextProtos: []string{"h3"}},
 		QUICConfig: &quic.Config{
 			KeepAlivePeriod:                  5 * time.Second,
@@ -316,7 +316,7 @@ func TestGatewayFailsConnectOnUnreachableTarget(t *testing.T) {
 	defer cancel()
 	go func() { _ = gw.Run(ctx) }()
 	time.Sleep(200 * time.Millisecond)
-	dialer := &webtransport.Dialer{
+	dialer := &webtransport.Transport{
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: true, NextProtos: []string{"h3"}},
 		QUICConfig:      &quic.Config{EnableDatagrams: true, EnableStreamResetPartialDelivery: true},
 	}

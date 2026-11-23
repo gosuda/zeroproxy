@@ -20,7 +20,9 @@ use oxc_span::{GetSpan, SourceType, Span};
 use std::collections::HashSet;
 use zp_shared::ErrorCode;
 
+#[cfg(feature = "sourcemap")]
 pub mod sourcemap;
+#[cfg(feature = "sourcemap")]
 pub use sourcemap::{chain_with_original_map, compose_rewrite_map};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -276,46 +278,118 @@ pub fn with_helper_prefix() -> String {
     format!("const{{{}}}=(function(){{return this}})();", RUNTIME_HELPERS.join(","))
 }
 
+/// Shared auxiliary AST scanner for read-only predicates (`reserved_name_violation`,
+/// `body_yields`, `chain_suspends_after`). Combining them into one `Visit` impl avoids
+/// monomorphizing OXC's full AST walker separately per helper in the page WASM bundle.
+enum AuxScan {
+    Reserved {
+        hit: Option<String>,
+    },
+    Suspend {
+        from: u32,
+        check_for_await: bool,
+        hit: bool,
+    },
+}
+
+impl AuxScan {
+    fn check_reserved(&mut self, name: &str) {
+        if let AuxScan::Reserved { hit } = self {
+            if hit.is_none() && is_reserved_name(name) {
+                *hit = Some(name.to_string());
+            }
+        }
+    }
+}
+
+impl<'a> Visit<'a> for AuxScan {
+    fn visit_variable_declaration(&mut self, it: &VariableDeclaration<'a>) {
+        // Our own `with_helper_prefix`, met again when rewritten code is rewritten once more (a function's source
+        // run again). It binds the real helpers whoever writes it.
+        if matches!(self, AuxScan::Reserved { .. }) && is_helper_prefix_declaration(it) {
+            return;
+        }
+        walk::walk_variable_declaration(self, it);
+    }
+
+    fn visit_binding_identifier(&mut self, it: &BindingIdentifier<'a>) {
+        self.check_reserved(it.name.as_str());
+    }
+
+    fn visit_simple_assignment_target(&mut self, it: &SimpleAssignmentTarget<'a>) {
+        if let SimpleAssignmentTarget::AssignmentTargetIdentifier(id) = it {
+            self.check_reserved(id.name.as_str());
+        }
+        walk::walk_simple_assignment_target(self, it);
+    }
+
+    fn visit_assignment_target_property_identifier(
+        &mut self,
+        it: &AssignmentTargetPropertyIdentifier<'a>,
+    ) {
+        self.check_reserved(it.binding.name.as_str());
+        walk::walk_assignment_target_property_identifier(self, it);
+    }
+
+    fn visit_await_expression(&mut self, it: &AwaitExpression<'a>) {
+        if let AuxScan::Suspend { from, hit, .. } = self {
+            if it.span.start >= *from {
+                *hit = true;
+            }
+        }
+        walk::walk_await_expression(self, it);
+    }
+
+    fn visit_yield_expression(&mut self, it: &YieldExpression<'a>) {
+        if let AuxScan::Suspend { from, hit, .. } = self {
+            if it.span.start >= *from {
+                *hit = true;
+            }
+        }
+        walk::walk_yield_expression(self, it);
+    }
+
+    fn visit_for_of_statement(&mut self, it: &ForOfStatement<'a>) {
+        if let AuxScan::Suspend {
+            check_for_await: true,
+            hit,
+            ..
+        } = self
+        {
+            if it.r#await {
+                *hit = true;
+                return;
+            }
+        }
+        walk::walk_for_of_statement(self, it);
+    }
+
+    fn visit_function(&mut self, it: &Function<'a>, flags: oxc_syntax::scope::ScopeFlags) {
+        if matches!(self, AuxScan::Suspend { .. }) {
+            return;
+        }
+        walk::walk_function(self, it, flags);
+    }
+
+    fn visit_arrow_function_expression(&mut self, it: &ArrowFunctionExpression<'a>) {
+        if matches!(self, AuxScan::Suspend { .. }) {
+            return;
+        }
+        walk::walk_arrow_function_expression(self, it);
+    }
+}
+
 /// A page binding (`var`, `let`, `const`, `function`, `class`, parameter, `catch`, import) or a write (`x = …`, `x++`,
 /// a destructuring or `for (x in …)` target) of a reserved name (`is_reserved_name`). The bound name would receive the
 /// real global object the rewritten calls pass; the overwritten global would be every later script's helper. No site
 /// names these.
 fn reserved_name_violation(program: &Program<'_>) -> Option<String> {
-    struct Scan {
-        hit: Option<String>,
-    }
-    impl Scan {
-        fn check(&mut self, name: &str) {
-            if self.hit.is_none() && is_reserved_name(name) {
-                self.hit = Some(name.to_string());
-            }
-        }
-    }
-    impl<'a> Visit<'a> for Scan {
-        fn visit_variable_declaration(&mut self, it: &VariableDeclaration<'a>) {
-            // Our own `with_helper_prefix`, met again when rewritten code is rewritten once more (a function's source
-            // run again). It binds the real helpers whoever writes it.
-            if !is_helper_prefix_declaration(it) {
-                walk::walk_variable_declaration(self, it);
-            }
-        }
-        fn visit_binding_identifier(&mut self, it: &BindingIdentifier<'a>) {
-            self.check(it.name.as_str());
-        }
-        fn visit_simple_assignment_target(&mut self, it: &SimpleAssignmentTarget<'a>) {
-            if let SimpleAssignmentTarget::AssignmentTargetIdentifier(id) = it {
-                self.check(id.name.as_str());
-            }
-            walk::walk_simple_assignment_target(self, it);
-        }
-        fn visit_assignment_target_property_identifier(&mut self, it: &AssignmentTargetPropertyIdentifier<'a>) {
-            self.check(it.binding.name.as_str());
-            walk::walk_assignment_target_property_identifier(self, it);
-        }
-    }
-    let mut scan = Scan { hit: None };
+    let mut scan = AuxScan::Reserved { hit: None };
     scan.visit_program(program);
-    scan.hit
+    match scan {
+        AuxScan::Reserved { hit } => hit,
+        _ => None,
+    }
 }
 
 /// Exactly the shape `with_helper_prefix` emits: `const{<helpers, shorthand>}=(function(){return this})();`.
@@ -389,9 +463,9 @@ pub fn rewrite_script_patches(
     let allocator = Allocator::default();
     let (ret, kind) = parse_for_kind(&allocator, source, opts.kind);
 
-    if !ret.errors.is_empty() {
+    if !ret.diagnostics.is_empty() {
         let msg = ret
-            .errors
+            .diagnostics
             .iter()
             .map(|e| e.to_string())
             .collect::<Vec<_>>()
@@ -425,6 +499,7 @@ pub fn rewrite_script_patches(
 /// proxy-side target URL of the script. `sourcesContent` embeds the
 /// *stripped* original source so the browser can render the original
 /// listing without a separate round trip.
+#[cfg(feature = "sourcemap")]
 pub fn compose_source_map(
     source: &str,
     opts: &RewriteOpts,
@@ -438,11 +513,11 @@ pub fn compose_source_map(
     // generated string the composer walks lines up 1:1 with what the
     // browser is actually executing.
     let stripped = strip_sourcemap_pragma(source);
-    let rewritten = apply_patches(&stripped, &result.patches);
+    let (rewritten, resolved_patches) = apply_patches_with_resolved(&stripped, &result.patches);
     Ok(compose_rewrite_map(
         &stripped,
         &rewritten,
-        &result.patches,
+        &resolved_patches,
         source_url,
     ))
 }
@@ -454,6 +529,7 @@ pub fn compose_source_map(
 /// the bundled `.js`. When `original_map_json` is empty or malformed,
 /// the function falls back to the unchained map so a bad
 /// upstream `.map` never breaks DevTools.
+#[cfg(feature = "sourcemap")]
 pub fn compose_source_map_chained(
     source: &str,
     opts: &RewriteOpts,
@@ -495,9 +571,9 @@ pub fn rewrite_script(source: &str, opts: &RewriteOpts) -> Result<RewriteResult,
     let allocator = Allocator::default();
     let (ret, kind) = parse_for_kind(&allocator, source, opts.kind);
 
-    if !ret.errors.is_empty() {
+    if !ret.diagnostics.is_empty() {
         let msg = ret
-            .errors
+            .diagnostics
             .iter()
             .map(|e| e.to_string())
             .collect::<Vec<_>>()
@@ -746,6 +822,10 @@ fn inner_patches(patches: &[Patch], p: &Patch, start: usize, end: usize) -> Vec<
 }
 
 pub fn apply_patches(source: &str, patches: &[Patch]) -> String {
+    apply_patches_with_resolved(source, patches).0
+}
+
+pub fn apply_patches_with_resolved(source: &str, patches: &[Patch]) -> (String, Vec<Patch>) {
     // Deduplicate overlapping patches: when patch B is fully contained inside
     // patch A (A.start <= B.start && B.end <= A.end), prefer A (outer) and
     // drop B. This matches the rewrite semantics where outer member-get
@@ -772,6 +852,8 @@ pub fn apply_patches(source: &str, patches: &[Patch]) -> String {
     }
 
     let mut out = String::with_capacity(source.len());
+    let mut resolved: Vec<Patch> = Vec::with_capacity(chosen.len());
+    let mut pending_patch: Option<(u32, u32, usize)> = None;
     let bytes = source.as_bytes();
     let mut cursor: usize = 0;
     // Decide whether a patch emission requires a leading `(`:
@@ -826,12 +908,20 @@ pub fn apply_patches(source: &str, patches: &[Patch]) -> String {
         false
     };
     for p in chosen {
+        if let Some((ps, pe, repl_start)) = pending_patch.take() {
+            resolved.push(Patch {
+                start: ps,
+                end: pe,
+                replacement: out[repl_start..].to_string(),
+            });
+        }
         let start = p.start as usize;
         let end = p.end as usize;
         if start < cursor || end > bytes.len() || start > end {
             continue;
         }
         out.push_str(&source[cursor..start]);
+        pending_patch = Some((p.start, p.end, out.len()));
         // Marker patches need the receiver source text. Helper recursively
         // applies any contained inner patches to a sub-range of source.
         // When shifting markers into the sub-range, also shift the
@@ -1672,8 +1762,15 @@ pub fn apply_patches(source: &str, patches: &[Patch]) -> String {
         out.push_str(&p.replacement);
         cursor = end;
     }
+    if let Some((ps, pe, repl_start)) = pending_patch.take() {
+        resolved.push(Patch {
+            start: ps,
+            end: pe,
+            replacement: out[repl_start..].to_string(),
+        });
+    }
     out.push_str(&source[cursor..]);
-    out
+    (out, resolved)
 }
 
 /// Remove a trailing `sourceMappingURL` pragma. Per the source-map spec
@@ -1754,9 +1851,9 @@ impl RewriterInstance {
         // for the next call.
         let (ret, kind) = parse_for_kind(&self.allocator, source, opts.kind);
 
-        if !ret.errors.is_empty() {
+        if !ret.diagnostics.is_empty() {
             let msg = ret
-                .errors
+                .diagnostics
                 .iter()
                 .map(|e| e.to_string())
                 .collect::<Vec<_>>()
@@ -1797,9 +1894,9 @@ impl RewriterInstance {
     ) -> Result<RewriteResult, RewriteError> {
         let (ret, kind) = parse_for_kind(&self.allocator, source, opts.kind);
 
-        if !ret.errors.is_empty() {
+        if !ret.diagnostics.is_empty() {
             let msg = ret
-                .errors
+                .diagnostics
                 .iter()
                 .map(|e| e.to_string())
                 .collect::<Vec<_>>()
@@ -1892,9 +1989,6 @@ struct RewriteVisitor {
     /// identifier reads inside a `with` body must resolve against the object
     /// first (`__zp_with_get`), falling back to the next `with`/global.
     with_temps: Vec<String>,
-    /// Span starts of the synthetic `ExpressionStatement` OXC wraps an
-    /// expression-bodied arrow's body in (not a statement position).
-    arrow_expr_bodies: HashSet<u32>,
     /// Per `for-of`/`for-in` head: (dangerous name, temp it was renamed to)
     /// pairs whose sinks must run once per iteration inside the loop body.
     iter_sinks: Vec<Vec<(String, String)>>,
@@ -1943,7 +2037,6 @@ impl RewriteVisitor {
             in_target: 0,
             decl_seq: 0,
             with_temps: Vec::new(),
-            arrow_expr_bodies: HashSet::new(),
             iter_sinks: Vec::new(),
             for_iter_head: false,
             unbraced_body: 0,
@@ -2031,7 +2124,7 @@ impl RewriteVisitor {
         }
         let alloc = Allocator::new();
         let ret = Parser::new(&alloc, src, SourceType::cjs()).parse();
-        if !ret.errors.is_empty() {
+        if !ret.diagnostics.is_empty() {
             return; // runtime will throw SyntaxError; do not speculate on hoists
         }
         let mut names: Vec<String> = Vec::new();
@@ -2264,7 +2357,9 @@ impl RewriteVisitor {
     /// relative specifier resolves against `/zp/api/` and requests
     /// `<proxy>/zp/api/<name>`, which the SW maps onto the target host and 404s.
     fn rewrite_module_specifier(&mut self, lit: &StringLiteral<'_>) {
-        let raw = lit.value.as_str();
+        let Some(raw) = lit.value.as_str() else {
+            return;
+        };
         // Skip schemes the SW cannot proxy and bare specifiers (package-manager
         // names with no URL semantics that never round-trip through fetch).
         let lower = raw.trim_start().to_ascii_lowercase();
@@ -2347,20 +2442,13 @@ impl RewriteVisitor {
     /// does not yield the outer loop), so the walk stops at function
     /// boundaries.
     fn body_yields<'b>(body: &Statement<'b>) -> bool {
-        struct Y { hit: bool }
-        impl<'b> Visit<'b> for Y {
-            fn visit_await_expression(&mut self, _: &AwaitExpression<'b>) { self.hit = true; }
-            fn visit_yield_expression(&mut self, _: &YieldExpression<'b>) { self.hit = true; }
-            fn visit_for_of_statement(&mut self, s: &ForOfStatement<'b>) {
-                if s.r#await { self.hit = true; return; }
-                walk::walk_for_of_statement(self, s);
-            }
-            fn visit_function(&mut self, _: &Function<'b>, _: oxc_syntax::scope::ScopeFlags) {}
-            fn visit_arrow_function_expression(&mut self, _: &ArrowFunctionExpression<'b>) {}
-        }
-        let mut y = Y { hit: false };
-        walk::walk_statement(&mut y, body);
-        y.hit
+        let mut scan = AuxScan::Suspend {
+            from: 0,
+            check_for_await: true,
+            hit: false,
+        };
+        walk::walk_statement(&mut scan, body);
+        matches!(scan, AuxScan::Suspend { hit: true, .. })
     }
 
     /// Warn once when the iteration cap is reached, then exit the loop.
@@ -2739,26 +2827,24 @@ fn collect_scope_decl_names<'a>(
                     }
                 }
             }
-            Statement::ExportNamedDeclaration(e) => {
-                if let Some(decl) = &e.declaration {
-                    match decl {
-                        Declaration::VariableDeclaration(d) => {
-                            for dec in &d.declarations {
-                                collect_binding_pattern(&dec.id, &mut |n| out(n, BindCat::Lexical));
-                            }
+            Statement::ExportDeclaration(e) => {
+                match &e.declaration {
+                    Declaration::VariableDeclaration(d) => {
+                        for dec in &d.declarations {
+                            collect_binding_pattern(&dec.id, &mut |n| out(n, BindCat::Lexical));
                         }
-                        Declaration::FunctionDeclaration(f) => {
-                            if let Some(id) = &f.id {
-                                out(id.name.as_str(), BindCat::Lexical);
-                            }
-                        }
-                        Declaration::ClassDeclaration(c) => {
-                            if let Some(id) = &c.id {
-                                out(id.name.as_str(), BindCat::Lexical);
-                            }
-                        }
-                        _ => {}
                     }
+                    Declaration::FunctionDeclaration(f) => {
+                        if let Some(id) = &f.id {
+                            out(id.name.as_str(), BindCat::Lexical);
+                        }
+                    }
+                    Declaration::ClassDeclaration(c) => {
+                        if let Some(id) = &c.id {
+                            out(id.name.as_str(), BindCat::Lexical);
+                        }
+                    }
+                    _ => {}
                 }
             }
             Statement::ExportDefaultDeclaration(e) => {
@@ -3003,7 +3089,9 @@ impl RewriteVisitor {
                     // `__zp_set` calls reach them through `desc`.
                     if self.cur_sloppy {
                         if let Some(Argument::StringLiteral(lit)) = expr.arguments.first() {
-                            self.hoist_eval_var_decls(&lit.value);
+                            if let Some(src) = lit.value.as_str() {
+                                self.hoist_eval_var_decls(src);
+                            }
                         }
                     }
                     let desc = self.caller_desc_object();
@@ -3443,9 +3531,10 @@ impl RewriteVisitor {
             return;
         }
         if let Expression::StringLiteral(lit) = &expr.expression {
-            let name = lit.value.as_str();
-            if !is_dangerous_member(name) && !is_dangerous_global(name) && !is_dangerous_method(name) {
-                return;
+            if let Some(name) = lit.value.as_str() {
+                if !is_dangerous_member(name) && !is_dangerous_global(name) && !is_dangerous_method(name) {
+                    return;
+                }
             }
         }
         use oxc_span::GetSpan;
@@ -3548,34 +3637,29 @@ impl<'a> Visit<'a> for RewriteVisitor {
     fn visit_arrow_function_expression(&mut self, arrow: &ArrowFunctionExpression<'a>) {
         self.push_scope();
         // `var` declarations cannot be inserted into an expression-body arrow (`() => expr`).
-        self.var_env_stack.push(if arrow.expression {
-            (self.scopes.len() - 1, u32::MAX)
-        } else {
-            (self.scopes.len() - 1, Self::body_insert_pos(&arrow.body))
-        });
+        let (var_insert_pos, guard_end) = match &arrow.body {
+            ArrowFunctionBody::FunctionBody(body) => {
+                (Self::body_insert_pos(body), Some(body.span.end - 1))
+            }
+            _ => (u32::MAX, None),
+        };
+        self.var_env_stack.push((self.scopes.len() - 1, var_insert_pos));
         for param in &arrow.params.items {
             collect_binding_pattern(&param.pattern, &mut |a| self.declare(a));
         }
         let prev_sloppy = self.cur_sloppy;
-        self.cur_sloppy = prev_sloppy && !Self::has_use_strict(&arrow.body.directives);
-        // OXC synthesizes an `ExpressionStatement` for the body of `x => expr`.
-        // Because it is not in statement position, emitting the `_STMT` form
-        // (with ASI guard `0,`) would turn `(e,t)=>t[e]??=[]` into
-        // `(e,t)=>0,(…).v??=…` and cause a SyntaxError.
-        if arrow.expression {
-            if let Some(Statement::ExpressionStatement(s)) = arrow.body.statements.first() {
-                self.arrow_expr_bodies.insert(s.span.start);
-            }
+        if let ArrowFunctionBody::FunctionBody(body) = &arrow.body {
+            self.cur_sloppy = prev_sloppy && !Self::has_use_strict(&body.directives);
+            collect_scope_decl_names(&body.statements, true, self.cur_sloppy, &mut |name, _cat| {
+                self.declare(name);
+            });
         }
-        collect_scope_decl_names(&arrow.body.statements, true, self.cur_sloppy, &mut |name, _cat| {
-            self.declare(name);
-        });
         // Arrow bodies are real function scopes for `var`; the counter
         // keeps `var location` inside `() => {}` out of the global transform.
         // `nt_depth` is not bumped: an arrow's new.target is the enclosing
         // real function's, so dynamic-body mapping still applies.
         self.fn_depth += 1;
-        let guards = self.guard_fn_enter(if arrow.expression { None } else { Some(arrow.body.span.end - 1) });
+        let guards = self.guard_fn_enter(guard_end);
         walk::walk_arrow_function_expression(self, arrow);
         self.guard_fn_leave(guards);
         self.fn_depth -= 1;
@@ -3791,10 +3875,10 @@ impl<'a> Visit<'a> for RewriteVisitor {
         // `data:` and `blob:` literals also take the runtime path so the
         // runtime fetches, rewrites, and re-imports the module via blob URL.
         let runtime_literal = match &expr.source {
-            Expression::StringLiteral(lit) => {
-                let l = lit.value.as_str().trim_start().to_ascii_lowercase();
+            Expression::StringLiteral(lit) => lit.value.as_str().is_some_and(|raw| {
+                let l = raw.trim_start().to_ascii_lowercase();
                 l.starts_with("data:") || l.starts_with("blob:")
-            }
+            }),
             _ => false,
         };
         let static_literal = match &expr.source {
@@ -3833,12 +3917,9 @@ impl<'a> Visit<'a> for RewriteVisitor {
         self.rewrite_module_specifier(&decl.source);
     }
 
-    fn visit_export_named_declaration(&mut self, decl: &ExportNamedDeclaration<'a>) {
-        walk::walk_export_named_declaration(self, decl);
-        // `export { a }` with no `from` clause has no specifier to rewrite.
-        if let Some(source) = &decl.source {
-            self.rewrite_module_specifier(source);
-        }
+    fn visit_export_from_declaration(&mut self, decl: &ExportFromDeclaration<'a>) {
+        walk::walk_export_from_declaration(self, decl);
+        self.rewrite_module_specifier(&decl.source);
     }
 
     fn visit_export_all_declaration(&mut self, decl: &ExportAllDeclaration<'a>) {
@@ -4004,9 +4085,6 @@ impl<'a> Visit<'a> for RewriteVisitor {
     fn visit_expression_statement(&mut self, stmt: &ExpressionStatement<'a>) {
         let first_patch = self.patches.len();
         walk::walk_expression_statement(self, stmt);
-        if self.arrow_expr_bodies.contains(&stmt.span.start) {
-            return;
-        }
         // Only the outermost patch at the statement's start is emitted there; one inside it is emitted inside its
         // operand (`e.ports[0].postMessage(x)`: the guard is the base argument of `__zp_call(…)`, where `0,` would be
         // a separate argument).
@@ -4156,12 +4234,8 @@ impl<'a> Visit<'a> for RewriteVisitor {
         // `import.meta.url`: exposes the module's own URL. Without rewriting,
         // the proxy URL (`<proxy>/zp/api/script?…`) leaks and bundler-derived
         // `publicPath` values request `<proxy>/zp/api/<chunk>`.
-        if let Expression::MetaProperty(meta) = &expr.object {
-            if meta.meta.name == "import"
-                && meta.property.name == "meta"
-                && expr.property.name == "url"
-                && !self.target_url.is_empty()
-            {
+        if let Expression::ImportMeta(_) = &expr.object {
+            if expr.property.name == "url" && !self.target_url.is_empty() {
                 self.patches.push(Patch {
                     start: expr.span.start,
                     end: expr.span.end,
@@ -4172,11 +4246,7 @@ impl<'a> Visit<'a> for RewriteVisitor {
             // `import.meta.resolve(spec)`: native resolves against the module's
             // proxy URL, so replace it with a resolver anchored at the virtual
             // target URL.
-            if meta.meta.name == "import"
-                && meta.property.name == "meta"
-                && expr.property.name == "resolve"
-                && !self.target_url.is_empty()
-            {
+            if expr.property.name == "resolve" && !self.target_url.is_empty() {
                 self.patches.push(Patch {
                     start: expr.span.start,
                     end: expr.span.end,
@@ -4870,29 +4940,13 @@ fn chain_splits<'a>(chain: &ChainExpression<'a>) -> Option<Vec<ChainSplit>> {
 /// continuation is an arrow, which can hold neither. Nested functions are
 /// their own context and are not searched.
 fn chain_suspends_after<'a>(chain: &ChainExpression<'a>, from: u32) -> bool {
-    struct S {
-        from: u32,
-        hit: bool,
-    }
-    impl<'b> Visit<'b> for S {
-        fn visit_await_expression(&mut self, e: &AwaitExpression<'b>) {
-            if e.span.start >= self.from {
-                self.hit = true;
-            }
-            walk::walk_await_expression(self, e);
-        }
-        fn visit_yield_expression(&mut self, e: &YieldExpression<'b>) {
-            if e.span.start >= self.from {
-                self.hit = true;
-            }
-            walk::walk_yield_expression(self, e);
-        }
-        fn visit_function(&mut self, _: &Function<'b>, _: oxc_syntax::scope::ScopeFlags) {}
-        fn visit_arrow_function_expression(&mut self, _: &ArrowFunctionExpression<'b>) {}
-    }
-    let mut s = S { from, hit: false };
-    walk::walk_chain_expression(&mut s, chain);
-    s.hit
+    let mut scan = AuxScan::Suspend {
+        from,
+        check_for_await: false,
+        hit: false,
+    };
+    walk::walk_chain_expression(&mut scan, chain);
+    matches!(scan, AuxScan::Suspend { hit: true, .. })
 }
 
 /// First..last argument span for a call (the resolver splices them into
@@ -4927,7 +4981,7 @@ fn static_string_arg<'a>(
 ) -> Option<&'a str> {
     let arg = args.get(idx)?;
     match arg {
-        Argument::StringLiteral(s) => Some(s.value.as_str()),
+        Argument::StringLiteral(s) => s.value.as_str(),
         _ => None,
     }
 }
@@ -5259,9 +5313,9 @@ mod tests {
         let r1 = rewrite_script(src, &opts()).expect("full re-emit must succeed");
         let p1 = oxc_parser::Parser::new(&alloc1, &r1.code, st).parse();
         assert!(
-            p1.errors.is_empty(),
+            p1.diagnostics.is_empty(),
             "full re-emit produced invalid JS: {:#?}\n----\n{}",
-            p1.errors,
+            p1.diagnostics,
             r1.code,
         );
         let r2 = rewrite_script_patches(src, &opts()).expect("patch-mode must succeed");
@@ -5269,9 +5323,9 @@ mod tests {
         let alloc2 = oxc_allocator::Allocator::default();
         let p2 = oxc_parser::Parser::new(&alloc2, &patched, st).parse();
         assert!(
-            p2.errors.is_empty(),
+            p2.diagnostics.is_empty(),
             "patch-mode produced invalid JS: {:#?}\n----\n{}",
-            p2.errors,
+            p2.diagnostics,
             patched,
         );
         assert_eq!(r1.code, patched, "patch-mode vs full re-emit divergence");
@@ -6728,5 +6782,22 @@ mod dynamic_import_probe {
                 out.code
             );
         }
+    }
+
+    #[cfg(feature = "sourcemap")]
+    #[test]
+    fn compose_source_map_handles_nested_member_chains_and_optional_chains() {
+        let opts = RewriteOpts {
+            kind: ScriptKind::Classic,
+            target_url: "https://target.example/bundle.js".into(),
+            proxy_origin: "http://proxy.localhost:18080".into(),
+        };
+        let src = "const h = window.location.href;\nconst q = window?.location?.search;\n";
+        let map_json = compose_source_map(src, &opts, "https://target.example/bundle.js")
+            .expect("source map must succeed on overlapping member patches");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&map_json).expect("valid Source Map v3 JSON");
+        assert_eq!(parsed["version"], 3);
+        assert_eq!(parsed["sources"][0], "https://target.example/bundle.js");
     }
 }

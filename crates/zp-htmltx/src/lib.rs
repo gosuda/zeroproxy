@@ -68,14 +68,13 @@ fn attr_settings(
     // order. `lol_html` streams in document order, so `<base>` in `<head>` arrives
     // before body subresources, matching the HTML specification.
     let base_for_attr = Rc::new(RefCell::new(target_for_attr.clone()));
-    Settings {
-        element_content_handlers: vec![
-                // on* event handler attributes + javascript: URL attributes.
-                // <a href="javascript:CODE">, <form action="javascript:...">,
-                // <iframe src="javascript:..."> become harmless `javascript:void(0)`
-                // with `data-zp-jsurl` carrying the OXC-rewritten body, executed
-                // later by runtime-prelude's delegated click/submit handler.
-                element!("*", move |el| {
+    Settings::new().append_element_content_handler(
+        // on* event handler attributes + javascript: URL attributes.
+        // <a href="javascript:CODE">, <form action="javascript:...">,
+        // <iframe src="javascript:..."> become harmless `javascript:void(0)`
+        // with `data-zp-jsurl` carrying the OXC-rewritten body, executed
+        // later by runtime-prelude's delegated click/submit handler.
+        element!("*", move |el| {
                     // `tag_name()` is already lowercase per lol_html guarantee
                     // (it normalizes element names). Cache once per element
                     // instead of recomputing inside the per-attribute loop.
@@ -498,9 +497,7 @@ fn attr_settings(
                     }
                     Ok(())
                 }),
-            ],
-            ..Settings::new()
-        }
+    )
 }
 
 /// Transform target HTML: rewrites inline scripts and `on*` event handlers
@@ -708,11 +705,14 @@ fn script_settings(
             Ok(())
         }));
     }
-    Settings {
-        element_content_handlers: handlers,
-        document_content_handlers: doc_handlers,
-        ..Settings::new()
+    let mut settings = Settings::new();
+    for handler in handlers {
+        settings = settings.append_element_content_handler(handler);
     }
+    for handler in doc_handlers {
+        settings = settings.append_document_content_handler(handler);
+    }
+    settings
 }
 
 /// The streaming HTML transform: two chained `lol_html` rewriters (attribute

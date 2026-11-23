@@ -236,7 +236,7 @@ func (l *Listener) handleUpgrade(w http.ResponseWriter, r *http.Request) {
 	}
 	// webtransport-go requires EnableDatagrams and EnableStreamResetPartialDelivery
 	// on the outbound QUICConfig.
-	dialer := &webtransport.Dialer{
+	dialer := &webtransport.Transport{
 		TLSClientConfig: tlsCfg,
 		QUICConfig: &quic.Config{
 			KeepAlivePeriod:                  25 * time.Second,

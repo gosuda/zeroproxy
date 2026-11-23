@@ -13,16 +13,10 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 zp-shared = { workspace = true }
-zp-rewriter = { workspace = true }
+zp-rewriter = { workspace = true, features = ["sourcemap"] }
 zp-css = { workspace = true }
 zp-htmltx = { workspace = true }
 zp-engine = { workspace = true }
-
-swc_common = { version = "23.0.0", default-features = false }
-swc_css_ast = { version = "23.0.0", default-features = false }
-swc_css_parser = { version = "23.0.0", default-features = false }
-swc_css_visit = { version = "23.0.0", default-features = false }
-url = { version = "2.5", default-features = false }
 
 wasm-bindgen = { workspace = true }
 # Diagnostics only: the panic hook in `init()` needs `console.error` and the

@@ -3,7 +3,8 @@
 //! Measures cold (new `RewriterInstance` per call), warm (reused instance),
 //! and patch-only latency across script size buckets.
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use std::hint::black_box;
 use zp_rewriter::{rewrite_script, rewrite_script_patches, RewriteOpts, RewriterInstance, ScriptKind};
 
 fn opts() -> RewriteOpts {

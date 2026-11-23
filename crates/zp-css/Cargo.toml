@@ -7,10 +7,10 @@ edition = "2021"
 # `zp-bundle` (standalone stylesheets) and `zp-htmltx` (inline `<style>` tags
 # and `style` attributes) without creating a dependency cycle.
 [dependencies]
-swc_common = { version = "23.0.0", default-features = false }
-swc_css_ast = { version = "23.0.0", default-features = false }
-swc_css_parser = { version = "23.0.0", default-features = false }
-swc_css_visit = { version = "23.0.0", default-features = false }
+swc_common = { version = "27.0.0", default-features = false }
+swc_css_ast = { version = "27.0.0", default-features = false }
+swc_css_parser = { version = "27.0.0", default-features = false }
+swc_css_visit = { version = "27.0.0", default-features = false }
 thiserror = { workspace = true }
 url = { version = "2.5", default-features = false }
 zp-shared = { workspace = true }
