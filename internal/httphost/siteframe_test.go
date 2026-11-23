@@ -56,6 +56,18 @@ func TestSiteFrameBootstrapIsCrossOriginIsolationCompatible(t *testing.T) {
 	}
 }
 
+func TestServiceWorkerCSPAllowsDataConnectOnlyForSW(t *testing.T) {
+	s := &server{}
+	swReq := httptest.NewRequest("GET", "http://proxy.localhost:18080/zp/sw.js", nil)
+	if csp := s.responseCSP(swReq); !strings.Contains(csp, "connect-src 'self' data:") {
+		t.Fatalf("/zp/sw.js must allow in-memory data: connect-src for HLS playlists, got: %s", csp)
+	}
+	ctrlReq := httptest.NewRequest("GET", "http://proxy.localhost:18080/zp/", nil)
+	if csp := s.responseCSP(ctrlReq); strings.Contains(csp, "connect-src 'self' data:") {
+		t.Fatalf("control HTML routes must not allow data: in connect-src, got: %s", csp)
+	}
+}
+
 func testHandlerOK() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 }

@@ -129,6 +129,25 @@ test('a body that is not a playlist passes through unchanged', async () => {
   assert.equal(await out.text(), '<html>not a playlist</html>');
 });
 
+test('media element playlist reads return a URL-backed data response for Chromium HLS compatibility', async () => {
+  const w = loadWorker();
+  const seenUrls = [];
+  w.fetch = async url => {
+    seenUrls.push(String(url));
+    const b64 = String(url).split(';base64,')[1];
+    return new Response(Buffer.from(b64, 'base64'), { status: 200, headers: { 'Content-Type': 'application/vnd.apple.mpegurl' } });
+  };
+  const body = '#EXTM3U\nseg.ts\n';
+  const target = 'https://cdn.example/a/p.m3u8';
+  const req = { destination: 'video', headers: new Headers({ Range: 'bytes=0-' }) };
+  const upstream = new Response(body, { status: 200, headers: { 'Content-Type': 'application/vnd.apple.mpegurl; charset=utf-8' } });
+  const out = await w.rewritePlaylistResponse(req, upstream, { targetUrl: target, tab });
+  assert.equal(seenUrls.length, 1);
+  assert.ok(seenUrls[0].startsWith('data:application/vnd.apple.mpegurl;base64,'));
+  assert.equal(out.status, 200);
+  assert.equal(await out.text(), w.rewritePlaylistText(body, target, tab));
+});
+
 // Media elements send `Range: bytes=0-`, which causes CDNs to return 206 partial content of the original bytes.
 // Because playlists must be rewritten as a whole, playlist requests strip Range before forwarding upstream.
 test('the transport leaves Range off a request that asked for it not to travel, and keeps it otherwise', async () => {

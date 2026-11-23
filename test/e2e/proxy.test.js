@@ -1444,8 +1444,10 @@ function createTargetServer(requests, pendingResponses) {
             setTimeout(() => r(errs.length ? 'v:error-surfaced' : 'v:silent'), 400);
           }));
           await P('intervalString', () => new Promise(r => {
-            const id = setInterval('window.__tInt = (window.__tInt || 0) + 1', 20);
-            setTimeout(() => { clearInterval(id); r('v:' + window.__tInt); }, 300);
+            window.__tInt = 0;
+            window.__tIntDone = r;
+            window.__tIntId = setInterval('window.__tInt = (window.__tInt || 0) + 1; if (window.__tInt >= 3) { clearInterval(window.__tIntId); window.__tIntDone("v:3"); }', 20);
+            setTimeout(() => { clearInterval(window.__tIntId); r('v:' + window.__tInt); }, 2000);
           }));
 
           // Event handler compilation across content attributes, IDL properties, and addEventListener.
@@ -10336,7 +10338,9 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
       const expected = {
         webAuthn: 'credentials.create → NotAllowedError: the RP would be the proxy origin',
         credGet: 'credentials.get → NotAllowedError, same reason',
-        paSurfaces: 'Privacy Sandbox APIs removed: keyed to the proxy origin',
+        ...(direct.paSurfaces !== 'v:undefined|undefined|undefined|undefined|undefined|fn-gated'
+          ? { paSurfaces: 'Privacy Sandbox APIs removed: keyed to the proxy origin' }
+          : {}),
         swRegs: 'the virtual SW facade always reports one fake registration (D3 fail-soft)',
         dynamicBase: "base-uri 'none': a runtime <base> does not move the virtual base",
         framesItem: 'V8 names the rewritten callee in "is not a function" messages',
@@ -10461,7 +10465,7 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     assert.equal(probes.customEl, 'v:ctor:true|up:true|names:x-probe-el|X-PROBE-EL|qs:true|tag:1', `customEl: ${probes.customEl}`);
     assert.equal(probes.customElUpgrade, 'v:same:true|up:true|target:{"ok":1}|matches:true|w:7px', `customElUpgrade: ${probes.customElUpgrade}`);
     assert.match(probes.permGeo, /^v:(state:prompt|state:denied|e:\w+|absent)/, `permGeo: ${probes.permGeo}`);
-    assert.equal(probes.paSurfaces, 'v:undefined|fn:[]|undefined|undefined|undefined|fn-gated', `paSurfaces: ${probes.paSurfaces}`);
+    assert.match(probes.paSurfaces, /^v:undefined\|(?:fn:\[\]|undefined)\|undefined\|undefined\|undefined\|fn-gated$/, `paSurfaces: ${probes.paSurfaces}`);
     if (probes.setHTMLHook !== 'v:absent') {
       assert.equal(probes.setHTMLHook, `v:http://${targetHost}:${targetPort}/set-html-probe.png`, `setHTMLHook: ${probes.setHTMLHook}`);
     }

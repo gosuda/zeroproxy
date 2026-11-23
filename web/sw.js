@@ -870,6 +870,13 @@ function rewritePlaylistText(text, baseUrl, tab) {
     return line.trim() ? playlistProxyURI(line, baseUrl, tab) : line;
   }).join('');
 }
+function bytesToBase64(bytes) {
+  let bin = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  }
+  return btoa(bin);
+}
 async function rewritePlaylistResponse(req, resp, opt) {
   // Refetch partial (206) playlist responses whole before rewriting, then serve any requested byte range from the rewritten buffer.
   let source = resp;
@@ -886,12 +893,24 @@ async function rewritePlaylistResponse(req, resp, opt) {
   if (!/^\s*#EXTM3U/.test(text.replace(/^﻿/, ''))) return new Response(text, { status: source.status, statusText: source.statusText, headers });
   const bytes = new TextEncoder().encode(rewritePlaylistText(text, opt.targetUrl, opt.tab));
   const range = /^bytes=(\d*)-(\d*)$/.exec(req.headers.get('Range') || '');
+  let start = 0;
+  let end = bytes.length - 1;
+  let partial = false;
   if (range && (range[1] !== '' || range[2] !== '')) {
-    let start;
-    let end;
     if (range[1] === '') { start = Math.max(0, bytes.length - Number(range[2])); end = bytes.length - 1; }
     else { start = Number(range[1]); end = range[2] === '' ? bytes.length - 1 : Math.min(Number(range[2]), bytes.length - 1); }
     if (start >= bytes.length || start > end) return new Response(null, { status: 416, headers: { 'Content-Range': 'bytes */' + bytes.length } });
+    partial = true;
+  }
+  // Chromium 151+ HlsDataSourceProviderImpl rejects synthetic SW Responses that carry an empty url_list.
+  // Fetching an in-memory data: URL produces a Response with a non-empty url_list for full media playlist reads.
+  if (isMediaElementRequest(req) && (!partial || (start === 0 && end === bytes.length - 1))) {
+    const mime = (headers.get('Content-Type') || 'application/vnd.apple.mpegurl').split(';')[0].trim() || 'application/vnd.apple.mpegurl';
+    try {
+      return await fetch('data:' + mime + ';base64,' + bytesToBase64(bytes));
+    } catch {}
+  }
+  if (partial) {
     headers.set('Content-Range', 'bytes ' + start + '-' + end + '/' + bytes.length);
     return new Response(bytes.slice(start, end + 1), { status: 206, statusText: 'Partial Content', headers });
   }

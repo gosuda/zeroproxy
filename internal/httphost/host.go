@@ -949,14 +949,18 @@ func (s *server) securityHeaders(next http.Handler) http.Handler {
 	})
 }
 
-// responseCSP is zeroCSP, except that the page which boots a site frame's worker (a share route requested for an iframe on a
-// loopback host) may be embedded by pages of this proxy at other `*.localhost` hosts. Every other response stays unframeable.
+// responseCSP is zeroCSP, with two narrow per-route extensions:
+//   - A site frame bootstrap (share route requested for an iframe on a loopback host) may be embedded by other `*.localhost` proxy hosts.
+//   - The Service Worker script (`/zp/sw.js`) permits in-memory `data:` fetches so rewritten HLS playlists carry a non-empty Response URL list for Chromium 151+.
 func (s *server) responseCSP(r *http.Request) string {
 	csp := s.zeroCSP(r)
 	if isSiteFrameBootstrap(r) {
 		if src := siteFrameSource(r); src != "" {
 			csp = strings.Replace(csp, "frame-ancestors 'none'", "frame-ancestors "+src, 1)
 		}
+	}
+	if r.URL.Path == controlPrefix+"sw.js" {
+		csp = strings.Replace(csp, "connect-src 'self'", "connect-src 'self' data:", 1)
 	}
 	return csp
 }
