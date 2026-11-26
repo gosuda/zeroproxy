@@ -57,11 +57,6 @@ jobs:
           toolchain: "1.100.0"
           targets: wasm32-unknown-unknown
 
-      - name: Cache Cargo release build
-        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
-        with:
-          key: slsa-wasm-release
-
       - name: Setup Node.js 26
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
@@ -97,15 +92,7 @@ jobs:
             exit 1
           fi
 
-      - name: Cache matching wasm-bindgen CLI
-        id: bindgen-cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: ~/.cargo/bin/wasm-bindgen
-          key: wasm-bindgen-${{ runner.os }}-${{ runner.arch }}-${{ steps.meta.outputs.wasm_bindgen }}
-
       - name: Install matching wasm-bindgen CLI
-        if: steps.bindgen-cache.outputs.cache-hit != 'true'
         env:
           WASM_BINDGEN_VERSION: ${{ steps.meta.outputs.wasm_bindgen }}
         run: cargo install wasm-bindgen-cli --version "=$WASM_BINDGEN_VERSION" --locked --jobs 2
