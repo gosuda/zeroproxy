@@ -133,3 +133,9 @@ strip = true
 
 [profile.dev]
 opt-level = 1
+
+[profile.test]
+# CI runs the workspace suite on every push; line tables keep crash
+# triage while cutting the debug info minutes of full debuginfo.
+inherits = "dev"
+debug = "line-tables-only"
