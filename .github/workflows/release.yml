@@ -61,7 +61,10 @@ jobs:
 
       - name: Verify release Go cache isolation
         shell: bash
-        run: test -z "$(go env GOCACHEPROG)"
+        run: |
+          set -euo pipefail
+          cache_program=$(go env GOCACHEPROG)
+          test -z "$cache_program"
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
