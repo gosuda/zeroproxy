@@ -27,7 +27,7 @@ permissions: {}
 jobs:
   build-and-attest:
     name: Build deterministic WASM and sign SLSA L3 provenance
-    runs-on: ubuntu-24.04
+    runs-on: depot-ubuntu-24.04
     timeout-minutes: 90
     permissions:
       contents: read
